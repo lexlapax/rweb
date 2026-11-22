@@ -1,8 +1,9 @@
 # Phase 1 result: Rex client library (Zig)
 
-Status: **in progress**. Built and tested on desktop-mac against Rex `0.1.0-preview.21`
-(commit `202b1b3f`), API revision 18. Not yet run against linux-box's Rex (preview.22, revision
-19); the exit condition needs both. Plan: [PLAN.md](PLAN.md#phase-1-rex-client-library-zig).
+Status: **exit condition met for the library** (2026-11-22). Built and tested against both Rex
+versions in use: desktop-mac `0.1.0-preview.21` (commit `202b1b3f`, revision 18) and linux-box
+`0.1.0-preview.22` (commit `a086db17`, revision 19). The library asks for revision 18 only
+(`api_min = api_max = 18`), which both accept; moving to 19 is a later decision. Plan: [PLAN.md](PLAN.md#phase-1-rex-client-library-zig).
 Where this and the code differ, the code wins.
 
 ## What exists (`src/rex/`)
@@ -30,6 +31,12 @@ Where this and the code differ, the code wins.
   no failure in the five targets (ws header, data handshake, control welcome, `rex1` body, and
   stream-split invariance). That is a smoke run, not a fuzzing campaign.
 
+- linux-box (Linux, Zig 0.17.1), fresh clone of `04ea5f4` in `/tmp` (removed afterwards):
+  `zig build test` 53 pass, 6 skip, 13 s; with `REX_SOCKET=/run/user/1000/rex/server.sock`
+  59/59 pass, including every live test and the ownership observations, identical to
+  desktop-mac's. Only throwaway `rweb-test-live-*` sessions were created and destroyed; `rex ls`
+  showed only the owner's `drifting-tundra` afterwards. Nothing was installed or changed there.
+
 ## Findings
 
 1. **Mirror agrees with Rex.** A live shell running `printf` with colour, a wide character and
@@ -56,4 +63,5 @@ Where this and the code differ, the code wins.
   against a real Rex. The live tests do, on one Rex version so far.
 - Our own 120-second pings are not sent yet; Rex's pings are answered.
 - Events are queued without a bound in `Control`; the bridge must read them.
-- No test on linux-box, and none on a phone or a desktop browser (those are Phase 2 onwards).
+- Rex restart was not re-tested for real on either machine (needs the owner's approval).
+- No test on a phone or a desktop browser (those are Phase 2 onwards).

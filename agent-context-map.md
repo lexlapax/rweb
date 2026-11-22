@@ -5,7 +5,7 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
 
-Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 8 done; step 9 (linux-box) pending. The owner's grant for
+Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 9 done: **Phase 1 exit met** (2026-11-22). The owner's grant for
 desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
 
 desktop-mac facts checked 2026-11-22: Zig 0.17.1 (`/opt/homebrew/bin/zig`); Rex.app
@@ -108,11 +108,15 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       message's `owner` is only the owner at that size change.
    8. DONE: `src/rex/fuzz.zig` + `wire.zig`; `zig build fuzz --fuzz` (needs
       `mkdir -p .zig-cache/tmp`); 90 s smoke run clean. Not a campaign.
-   9. Live tests in `rweb-test-` sessions on both Rex versions: desktop-mac and linux-box.
-2. Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
+   9. DONE: live tests pass on desktop-mac (preview.21, rev 18) and linux-box (preview.22, rev 19),
+      59/59 each; see docs/phase1-result.md.
+2. **Next: Phase 2 (bridge server)**, then 3 and 4. Before Phase 2, decide whether to ask for
+   revision 19 as well, and whether to re-test a Rex restart for real (needs approval). Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
 ## Checks run for this update
 
+- 2026-11-22, linux-box: fresh `/tmp` clone of `04ea5f4`; `zig build test` 53 pass + 6 skip; with
+  `REX_SOCKET` 59/59 pass; clone removed; `rex ls` shows only `drifting-tundra`.
 - 2026-11-22, desktop-mac: typed calls, fuzz targets: `zig build test` 53 pass + 6 skip, also
   `ReleaseSafe`; with `REX_SOCKET` all pass (live ownership/typed-call test); `rex ls` shows only
   `calm-isle` afterwards. Details in docs/phase1-result.md.
