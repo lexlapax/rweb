@@ -110,11 +110,17 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       `mkdir -p .zig-cache/tmp`); 90 s smoke run clean. Not a campaign.
    9. DONE: live tests pass on desktop-mac (preview.21, rev 18) and linux-box (preview.22, rev 19),
       59/59 each; see docs/phase1-result.md.
-2. **Next: Phase 2 (bridge server)**, then 3 and 4. Before Phase 2, decide whether to ask for
-   revision 19 as well, and whether to re-test a Rex restart for real (needs approval). Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
+2. **Next: Phase 2 (bridge server)**, then 3 and 4. Revision 19 is open: the only
+   differences from 18 that matter are that an oversize event becomes an `event_dropped` event
+   instead of closing the connection, and a large request should be sent fragmented; new
+   method `focus_history.reverse` is unused. The real restart test is done on linux-box.
+   Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
 ## Checks run for this update
 
+- 2026-11-22, linux-box: owner-authorized real Rex restart through the library (live test in
+  `mirror.zig`): recovery as designed, 60/60 pass; scratch copy removed; `rex ls` shows only
+  `drifting-tundra` (restored with a new shell, as in Phase 0).
 - 2026-11-22, linux-box: fresh `/tmp` clone of `04ea5f4`; `zig build test` 53 pass + 6 skip; with
   `REX_SOCKET` 59/59 pass; clone removed; `rex ls` shows only `drifting-tundra`.
 - 2026-11-22, desktop-mac: typed calls, fuzz targets: `zig build test` 53 pass + 6 skip, also

@@ -63,6 +63,8 @@ pub const Mirror = struct {
     /// Goes up on every change a viewer could see.
     version: u64 = 0,
     snapshot_bytes: usize = 0,
+    /// Why the stream ended, once it has (see `data.End`).
+    ended: ?data.End = null,
 
     /// A mirror that learns its nonce from the data connection's welcome (see `sink`).
     pub fn initPending(gpa: Allocator, io: Io) !*Mirror {
@@ -114,7 +116,18 @@ pub const Mirror = struct {
         m.setNonce(nonce) catch |e| log.err("nonce: {t}", .{e});
     }
 
-    fn sinkEnded(_: *anyopaque, _: data.End) void {}
+    fn sinkEnded(ctx: *anyopaque, why: data.End) void {
+        const m: *Mirror = @ptrCast(@alignCast(ctx));
+        m.mu.lockUncancelable(m.io);
+        defer m.mu.unlock(m.io);
+        m.ended = why;
+    }
+
+    pub fn endReason(m: *Mirror) ?data.End {
+        m.mu.lockUncancelable(m.io);
+        defer m.mu.unlock(m.io);
+        return m.ended;
+    }
 
     pub fn setObserver(m: *Mirror, o: ?Observer) void {
         m.mu.lockUncancelable(m.io);
@@ -527,4 +540,114 @@ test "live: the mirror agrees with Rex's own capture of a throwaway terminal (ne
     }
     std.debug.print("\nmirror:\n{s}\n--- rex:\n{s}\n", .{ last_mirror orelse "", last_rex orelse "" });
     return error.MirrorDiffersFromRex;
+}
+
+test "live: recovery across a real Rex server restart (needs REX_SOCKET, REX_RESTART_OK=1, REX_RESTART_CMD)" {
+    const a = testing.allocator;
+    const sock = std.testing.environ.getPosix("REX_SOCKET") orelse return error.SkipZigTest;
+    if (sock.len == 0) return error.SkipZigTest;
+    // Restarting ends every program in every session: only when the owner has said so.
+    const ok = std.testing.environ.getPosix("REX_RESTART_OK") orelse return error.SkipZigTest;
+    if (!std.mem.eql(u8, ok, "1")) return error.SkipZigTest;
+    const cmd = std.testing.environ.getPosix("REX_RESTART_CMD") orelse return error.SkipZigTest;
+
+    const ctl = try Control.open(a, testing.io, .{ .socket_path = sock });
+    defer ctl.close();
+    var api = @import("api.zig").Api.init(a, ctl);
+    defer api.deinit();
+
+    var made = try api.createSession("rweb-test-live-restart");
+    defer made.deinit();
+    const sid = made.value.session_id;
+    const bid = made.value.block_id;
+    var destroyed = false;
+    defer if (!destroyed) api.destroySession(sid) catch {};
+    try api.attach(sid);
+
+    const m1 = try Mirror.initPending(a, testing.io);
+    defer m1.deinit();
+    const d1 = try data.Data.openTerminal(a, testing.io, ctl, sid, bid, m1.sink());
+    defer d1.close();
+    const q = try @import("input.zig").Input.open(a, testing.io, @import("input.zig").Sender.forControl(ctl), sid, bid);
+    defer q.close();
+    try q.writeText("echo before-restart-$((6*7))\n");
+    try q.flush(10000);
+    try waitText(m1, "before-restart-42", true);
+
+    // Drain events, then restart the server.
+    while (try ctl.nextEvent(50)) |e| e.deinit(a);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(a);
+    var it = std.mem.tokenizeScalar(u8, cmd, ' ');
+    while (it.next()) |w| try argv.append(a, w);
+    std.debug.print("\nrestart: running `{s}`\n", .{cmd});
+    const res = try std.process.run(a, testing.io, .{ .argv = argv.items });
+    defer a.free(res.stdout);
+    defer a.free(res.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+
+    // The old stream must end with "restart needed", and the control connection must come
+    // back as a NEW client.
+    var tries: u32 = 0;
+    while (m1.endReason() == null and tries < 1000) : (tries += 1) try testing.io.sleep(.fromMilliseconds(10), .awake);
+    std.debug.print("restart: old stream ended: {?}\n", .{m1.endReason()});
+    try testing.expectEqual(@as(?data.End, .restart_needed), m1.endReason());
+
+    var generation: u32 = 1;
+    var resumed = true;
+    tries = 0;
+    while (generation == 1 and tries < 200) : (tries += 1) {
+        const e = (try ctl.nextEvent(100)) orelse continue;
+        defer e.deinit(a);
+        if (e == .connected) {
+            generation = e.connected.generation;
+            resumed = e.connected.resumed;
+        }
+    }
+    std.debug.print("restart: control reconnected generation={d} resumed={}\n", .{ generation, resumed });
+    try testing.expectEqual(@as(u32, 2), generation);
+    try testing.expect(!resumed);
+
+    // Same session and block IDs; re-attach; a new stream starts from an empty screen.
+    {
+        var list = try api.sessions();
+        defer list.deinit();
+        var found = false;
+        for (list.value) |s| if (std.mem.eql(u8, s.session_id, sid)) {
+            found = true;
+        };
+        try testing.expect(found);
+    }
+    try api.attach(sid);
+    const m2 = try Mirror.initPending(a, testing.io);
+    defer m2.deinit();
+    const d2 = try data.Data.openTerminal(a, testing.io, ctl, sid, bid, m2.sink());
+    defer d2.close();
+    tries = 0;
+    while (m2.getStatus() != .live and tries < 600) : (tries += 1) try testing.io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expectEqual(Status.live, m2.getStatus());
+    {
+        const text = try m2.plainText(a);
+        defer a.free(text);
+        std.debug.print("restart: new screen contains the old output: {}\n", .{std.mem.indexOf(u8, text, "before-restart-42") != null});
+        try testing.expect(std.mem.indexOf(u8, text, "before-restart-42") == null);
+    }
+    // Input works again through the same queue (its calls just needed the connection back).
+    try q.writeText("echo after-restart-$((6*7))\n");
+    try q.flush(10000);
+    try waitText(m2, "after-restart-42", true);
+    try api.destroySession(sid);
+    destroyed = true;
+}
+
+fn waitText(m: *Mirror, needle: []const u8, want: bool) !void {
+    var tries: u32 = 0;
+    while (tries < 800) : (tries += 1) {
+        try testing.io.sleep(.fromMilliseconds(10), .awake);
+        if (m.getStatus() != .live) continue;
+        const text = try m.plainText(testing.allocator);
+        defer testing.allocator.free(text);
+        if ((std.mem.indexOf(u8, text, needle) != null) == want) return;
+    }
+    return error.TimedOut;
 }

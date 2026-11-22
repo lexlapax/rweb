@@ -54,8 +54,15 @@ Where this and the code differ, the code wins.
      `owner: null` after a take. **Track the owner from `block_owner_changed`; treat the
      `resize` message's `owner` as the owner at that size change only.**
    - `session.disown_block` returns the block with no owner.
-4. **Rex restart** is simulated in the fake only (as in finding 11 of Phase 0); not re-tested
-   for real, which needs the owner's approval.
+4. **Rex restart, for real** (linux-box, preview.22, 2026-11-22, owner-authorized, `systemctl --user
+   restart rex.service`; live test in `mirror.zig`, gated by `REX_RESTART_OK=1` and
+   `REX_RESTART_CMD`). With a throwaway session, control, data, mirror and input queue open:
+   the old stream ended `restart_needed` (1001 `data provider canceled`); the control
+   connection reconnected as generation 2 with `resumed=false`; the session came back under
+   the same ID; a re-attach and a new stream gave a live mirror with an empty screen (the old
+   output gone); the same input queue typed into it again. The throwaway session was
+   destroyed. Confirms Phase 0 finding 11 through the library. Not run on desktop-mac, whose
+   Rex.app has no service to restart by command.
 
 ## Limits of this evidence
 
@@ -63,5 +70,5 @@ Where this and the code differ, the code wins.
   against a real Rex. The live tests do, on one Rex version so far.
 - Our own 120-second pings are not sent yet; Rex's pings are answered.
 - Events are queued without a bound in `Control`; the bridge must read them.
-- Rex restart was not re-tested for real on either machine (needs the owner's approval).
+- Rex restart was tested for real only on linux-box.
 - No test on a phone or a desktop browser (those are Phase 2 onwards).
