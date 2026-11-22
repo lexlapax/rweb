@@ -158,6 +158,8 @@ zig build -Doptimize=ReleaseSafe
 # open the printed URL; add &input=key for hybrid input, &swallow=0 for the negative control
 # stop with: touch /path/outside/the/repo/cap.bin.stop
 python3 compare.py SESSION BLOCK /path/outside/the/repo/cap.bin.screen.json
+# Kitty keyboard check, run inside the test terminal: python3 kittyprobe.py 8
+# Rex delivery rate for a test block: python3 -I rate_probe.py SESSION BLOCK SECONDS
 # phone: with the owner's approval, add --origin https://<host>:10443 --ts-user <owner login>,
 # run `tailscale serve --https=10443 http://127.0.0.1:7690` in the foreground, stop it afterwards
 # restarts rex.service: every program in every Rex session ends. Only with the owner's approval.

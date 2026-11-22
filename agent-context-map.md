@@ -3,6 +3,19 @@
 Last updated: 2026-11-22. Read first; load linked context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
+## Handover (2026-11-22)
+
+Work moves to a coding assistant on desktop-mac. Phase 0 is finished and pushed; Phase 1 has not
+started. The owner's grant for desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
+
+Before starting on desktop-mac:
+
+1. Pull `main`, then check `zig version` (0.17.1 expected) and `rex version`. Rex.app updates
+   itself; it was preview.21 on 2026-11-20, and Phase 1 must support its API revision.
+2. Find Rex's socket. `spike/` and its Python probes read `XDG_RUNTIME_DIR`, and
+   `restart_probe.py` uses `systemctl`, so they are Linux-only as written.
+3. Nothing here has been built or run on macOS, and no fresh-clone build has been tried.
+
 ## Current state
 
 - **Phase 0 done; the gate passed (2026-11-21).** A libghostty-vt mirror in a Zig spike shows a
@@ -52,9 +65,18 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 
 ## Next actions, in order
 
-1. **Phase 1: Rex client library in Zig**, as in [docs/PLAN.md](docs/PLAN.md#phase-1-rex-client-library-zig):
-   control and data connections with resume and Rex-restart recovery, the mirror, the write
-   queue, typed calls, a fake Rex server, fuzz tests, and the ownership question.
+1. **Phase 1: Rex client library in Zig**, as in [docs/PLAN.md](docs/PLAN.md#phase-1-rex-client-library-zig),
+   built fresh at the repository root, in this order:
+   1. `build.zig` with Ghostty pinned, and a `rex` module with its WebSocket client.
+   2. The fake Rex server, built from `llms.txt`, with snapshots from libghostty-vt.
+   3. Control connection: hello, revision negotiation, events, reconnect, restart recovery
+      (finding 11).
+   4. Data connection: tickets, HELLO/RESUME, byte counting, 1013, `rex1` messages.
+   5. The mirror, one per open terminal, using the redraw rules.
+   6. One ordered input queue per terminal (finding 12).
+   7. Typed calls, and the ownership question (finding 7).
+   8. Fuzz tests for every parser of outside bytes.
+   9. Live tests in `rweb-test-` sessions on both Rex versions: desktop-mac and linux-box.
 2. Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
 ## Checks run for this update
@@ -89,7 +111,7 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
   Re-check with `rex version` before building; the revision moved 18 → 19 within a day.
 - Rex listeners on linux-box: the user unix socket `/run/user/1000/rex/server.sock`
   (peer credentials) and a login-server socket; Tailscale listener disabled. Do not change them.
-- desktop-mac: Rex.app preview.21 (Sparkle, outside setup-repo), no boot-time Rex server;
+- desktop-mac: Rex.app preview.21 on 2026-11-20 (Sparkle, outside setup-repo), no boot-time Rex server;
   Tailscale.app (sandboxed, no unix-socket Serve backend).
 - Tailscale 1.104.7 on linux-box (unix-socket Serve backends need ≥ 1.94; setting one needs root).
   Serve ports in use: 443 (Ovis), 9443 (Ovis canary), 8443 (desktop-mac).

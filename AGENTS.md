@@ -20,7 +20,7 @@ socket.
 - Follow the plan's phases in order. Phase 0 is a gate: if a browser terminal cannot render a
   live Rex terminal correctly, stop and report; the rest of the plan does not hold. Do not start
   a phase before the previous one's exit condition is met and recorded.
-- Rex on this machine is the owner's working multiplexer. Use only sessions your own test
+- Rex on linux-box and desktop-mac is the owner's working multiplexer. Use only sessions your own test
   created, name them with an `rweb-test-` prefix, and close them when done. Never attach to,
   type into, resize, take ownership of, rename or close any other session.
 - Never start or request a Rex listener with `--allow-anonymous`, and do not change Rex's
@@ -29,7 +29,8 @@ socket.
   session.
 - Never run `rex skill setup --force` or `rex skill remove`.
 - The Rex protocol reference is the server's own document:
-  `curl --unix-socket "$XDG_RUNTIME_DIR/rex/server.sock" http://localhost/llms.txt`. Treat it as
+  `curl --unix-socket "$XDG_RUNTIME_DIR/rex/server.sock" http://localhost/llms.txt` (that path is
+  Linux's; on macOS, find the socket first). Treat it as
   the source of truth over the research copy, and record the Rex version and API revision you
   built against.
 - Keep the browser protocol independent of Rex's, so a Rex change stays inside the client
@@ -42,6 +43,10 @@ socket.
 - Do not install anything on a machine or change a service by hand. Deployment goes through the
   owner's `setup-repo` repository with pinned, checksummed artifacts and needs the owner's
   approval; `sudo` is the owner's to run.
+- Owner's grant (2026-11-22): a coding assistant working on desktop-mac may do whatever this work
+  needs on desktop-mac, and may log in to linux-box when required. The grant does not widen what is
+  allowed on linux-box. The rules on credentials, `--allow-anonymous` and the owner's own Rex
+  sessions still apply on both. Record any lasting setup change in `setup-repo` in the same session.
 - Do not read or print credentials, including anything under `~/.config/herdr-web`,
   `~/.config/herdr-web-ui` and `/etc/rex`. Keep secrets and captured terminal streams that
   contain real output out of Git.
