@@ -10,6 +10,11 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ws = @import("ws.zig");
 const Control = @import("control.zig").Control;
+const wire = @import("wire.zig");
+
+pub const parseHandshake = wire.parseHandshake;
+pub const decodeTicket = wire.decodeTicket;
+pub const Handshake = wire.Handshake;
 
 const log = std.log.scoped(.rex_data);
 
@@ -214,40 +219,6 @@ pub const Data = struct {
     }
 };
 
-pub const Handshake = union(enum) {
-    welcome: struct { token: [16]u8, window_ms: u32, nonce: u64 },
-    reject: u8,
-};
-
-/// Parse a WELCOME or REJECT. Pure, for tests and fuzzing.
-pub fn parseHandshake(b: []const u8) error{BadHandshake}!Handshake {
-    if (b.len == 0) return error.BadHandshake;
-    switch (b[0]) {
-        0x81 => {
-            if (b.len != 32) return error.BadHandshake;
-            const nonce = std.mem.readInt(u64, b[24..32], .little);
-            if (nonce == 0) return error.BadHandshake;
-            return .{ .welcome = .{
-                .token = b[1..17].*,
-                .window_ms = std.mem.readInt(u32, b[20..24], .little),
-                .nonce = nonce,
-            } };
-        },
-        0x82 => {
-            if (b.len < 2) return error.BadHandshake;
-            return .{ .reject = b[1] };
-        },
-        else => return error.BadHandshake,
-    }
-}
-
-pub fn decodeTicket(text: []const u8) error{BadHandshake}![16]u8 {
-    var out: [16]u8 = undefined;
-    if (text.len != 22) return error.BadHandshake;
-    std.base64.url_safe_no_pad.Decoder.decode(&out, text) catch return error.BadHandshake;
-    return out;
-}
-
 // ---- tests ----
 
 const testing = std.testing;
@@ -347,37 +318,9 @@ const Setup = struct {
     }
 };
 
-test "parseHandshake" {
-    var w: [32]u8 = @splat(0);
-    w[0] = 0x81;
-    std.mem.writeInt(u32, w[20..24], 60000, .little);
-    std.mem.writeInt(u64, w[24..32], 77, .little);
-    const h = try parseHandshake(&w);
-    try testing.expectEqual(@as(u64, 77), h.welcome.nonce);
-    try testing.expectEqual(@as(u32, 60000), h.welcome.window_ms);
-    try testing.expectEqual(@as(u8, 3), (try parseHandshake(&.{ 0x82, 3 })).reject);
-    try testing.expectError(error.BadHandshake, parseHandshake(w[0..31]));
-    std.mem.writeInt(u64, w[24..32], 0, .little);
-    try testing.expectError(error.BadHandshake, parseHandshake(&w)); // nonce is never zero
-    try testing.expectError(error.BadHandshake, parseHandshake(&.{}));
-    try testing.expectError(error.BadHandshake, parseHandshake(&.{0x55}));
-}
 
-test "fuzz parseHandshake" {
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *testing.Smith) anyerror!void {
-            var buf: [40]u8 = undefined;
-            const n = smith.slice(&buf);
-            _ = parseHandshake(buf[0..n]) catch {};
-        }
-    }.run, .{});
-}
 
-test "decodeTicket" {
-    const t = try decodeTicket("AAECAwQFBgcICQoLDA0ODw");
-    try testing.expectEqual(@as(u8, 15), t[15]);
-    try testing.expectError(error.BadHandshake, decodeTicket("short"));
-}
+
 
 test "data: opens a terminal stream and counts bytes" {
     const a = testing.allocator;

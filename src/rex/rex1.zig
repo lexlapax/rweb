@@ -270,30 +270,3 @@ test "an unfinished message at the end is flushed as program output" {
     defer c.deinit();
     try testing.expectEqualStrings("a\x1b_rex1;3;{\"type\":", c.plain_bytes.items);
 }
-
-test "fuzz: output and messages account for every input byte, in order" {
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *testing.Smith) anyerror!void {
-            var buf: [256]u8 = undefined;
-            const n = smith.slice(&buf);
-            // Bias towards the interesting bytes.
-            for (buf[0..n]) |*b| switch (b.* % 8) {
-                0 => b.* = 0x1b,
-                1 => b.* = '_',
-                2 => b.* = '\\',
-                3 => b.* = ';',
-                else => {},
-            };
-            var s = try Splitter.init(testing.allocator, 1);
-            defer s.deinit();
-            var c: Collect = .{ .gpa = testing.allocator };
-            defer c.deinit();
-            const cut = if (n == 0) 0 else n / 2;
-            try s.feed(buf[0..cut], &c);
-            try s.feed(buf[cut..n], &c);
-            try s.finish(&c);
-            // Never emits more plain bytes than it was given.
-            try testing.expect(c.plain_bytes.items.len <= n);
-        }
-    }.run, .{});
-}

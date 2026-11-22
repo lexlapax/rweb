@@ -5,7 +5,7 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
 
-Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 6 done. The owner's grant for
+Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 8 done; step 9 (linux-box) pending. The owner's grant for
 desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
 
 desktop-mac facts checked 2026-11-22: Zig 0.17.1 (`/opt/homebrew/bin/zig`); Rex.app
@@ -103,13 +103,19 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       coalesced; invalid UTF-8 refused, 1 MiB backlog cap (`Backpressure`); a failed call loses
       that input only; input during a disconnect is dropped, not replayed. `Sender` abstracts
       the call so tests can record. Not yet: a viewer-facing size limit on keys/events.
-   7. Typed calls, and the ownership question (finding 7).
-   8. Fuzz tests for every parser of outside bytes.
+   7. DONE: `src/rex/api.zig` typed calls (see [docs/phase1-result.md](docs/phase1-result.md)).
+      Ownership answered live: track the owner from `block_owner_changed`; the `resize`
+      message's `owner` is only the owner at that size change.
+   8. DONE: `src/rex/fuzz.zig` + `wire.zig`; `zig build fuzz --fuzz` (needs
+      `mkdir -p .zig-cache/tmp`); 90 s smoke run clean. Not a campaign.
    9. Live tests in `rweb-test-` sessions on both Rex versions: desktop-mac and linux-box.
 2. Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
 ## Checks run for this update
 
+- 2026-11-22, desktop-mac: typed calls, fuzz targets: `zig build test` 53 pass + 6 skip, also
+  `ReleaseSafe`; with `REX_SOCKET` all pass (live ownership/typed-call test); `rex ls` shows only
+  `calm-isle` afterwards. Details in docs/phase1-result.md.
 - 2026-11-22, desktop-mac: input queue added; `zig build test` 49 pass + 5 skip, five runs and
   `ReleaseSafe`, stable; with `REX_SOCKET`: 54/54, including a live test that submits ten
   commands one character at a time to a throwaway `rweb-test-live-input` shell on preview.21
@@ -151,6 +157,7 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 | What Phase 0 showed, and why the design is as it is | [docs/phase0-result.md](docs/phase0-result.md) |
 | Snapshot format, libghostty-vt, browser terminals, Serve identity, machine facts | [docs/design-research.md](docs/design-research.md) |
 | Rex protocol, streams, revisions; Ovis and herdr background | [docs/rex-web-research.md](docs/rex-web-research.md) |
+| What Phase 1 built, findings, limits | [docs/phase1-result.md](docs/phase1-result.md) |
 | Working example of every Rex call the bridge needs | `spike/src/main.zig`, `spike/src/ws.zig` |
 | Live protocol reference (authoritative) | `curl --unix-socket "$XDG_RUNTIME_DIR/rex/server.sock" http://localhost/llms.txt` |
 | Rex CLI usage | the `rex` skill (always pass `-s` and `-b` in tests) |

@@ -375,17 +375,7 @@ test "acceptKey matches the RFC 6455 example" {
     try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", &a);
 }
 
-test "fuzz parseHeader" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [32]u8 = undefined;
-            const n = smith.slice(&buf);
-            if (parseHeader(buf[0..n], 1 << 20)) |h| {
-                try std.testing.expect(h.size <= n and h.size <= 14 and h.len <= 1 << 20);
-            } else |_| {}
-        }
-    }.run, .{});
-}
+
 
 test "live: control hello against a real Rex (needs REX_SOCKET)" {
     const gpa = std.testing.allocator;

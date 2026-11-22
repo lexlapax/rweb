@@ -11,10 +11,12 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ws = @import("ws.zig");
+const wire = @import("wire.zig");
 
 const log = std.log.scoped(.rex_control);
 
 pub const subprotocol = "rex.control.v1";
+
 
 pub const Options = struct {
     socket_path: []const u8,
@@ -37,6 +39,7 @@ pub const Error = error{
     BadWelcome,
     /// The server closed the connection during the hello (no common revision, say).
     Refused,
+    OutOfMemory,
 };
 
 /// What `nextEvent` returns. Owned by the caller; free with `deinit`.
@@ -157,30 +160,17 @@ pub const Control = struct {
         defer gpa.free(m.data);
         if (m.opcode == .close) return error.Refused;
         if (m.opcode != .text) return error.BadWelcome;
-        var parsed = std.json.parseFromSlice(std.json.Value, gpa, m.data, .{}) catch return error.BadWelcome;
-        defer parsed.deinit();
-        if (parsed.value != .object) return error.BadWelcome;
-        const o = parsed.value.object;
-        const ty = o.get("type") orelse return error.BadWelcome;
-        const proto = o.get("protocol") orelse return error.BadWelcome;
-        if (ty != .string or !std.mem.eql(u8, ty.string, "welcome")) return error.BadWelcome;
-        if (proto != .string or !std.mem.eql(u8, proto.string, subprotocol)) return error.BadWelcome;
-
-        var resumed = false;
-        var new_token: ?[]u8 = null;
-        if (o.get("client")) |cl| if (cl == .object) {
-            if (cl.object.get("resumed")) |r| resumed = r == .bool and r.bool;
-            if (cl.object.get("reconnect_token")) |t| if (t == .string) {
-                new_token = try gpa.dupe(u8, t.string);
-            };
+        const w = wire.parseWelcome(gpa, m.data) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.BadWelcome => return error.BadWelcome,
         };
-        errdefer if (new_token) |t| gpa.free(t);
-        const rev: u32 = if (o.get("api_revision")) |r| (if (r == .integer and r.integer >= 0) @intCast(r.integer) else 0) else 0;
-        if (rev < c.opts.api_min or rev > c.opts.api_max) return error.BadWelcome;
-        if (o.get("limits")) |l| if (l == .object) if (l.object.get("max_message_bytes")) |mb| {
-            if (mb == .integer and mb.integer >= 65536) c.max_message = @intCast(mb.integer);
-        };
+        errdefer if (w.token) |t| gpa.free(t);
+        if (w.revision < c.opts.api_min or w.revision > c.opts.api_max) return error.BadWelcome;
+        if (w.max_message) |mm| c.max_message = mm;
         cn.max_message = c.max_message;
+        const new_token = w.token;
+        const resumed = w.resumed;
+        const rev = w.revision;
 
         c.mu.lockUncancelable(c.io);
         defer c.mu.unlock(c.io);
