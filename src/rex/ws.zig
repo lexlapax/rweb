@@ -85,21 +85,23 @@ pub fn parseHeader(bytes: []const u8, max_len: u64) ParseError!Header {
     return .{ .fin = fin, .opcode = op, .masked = masked, .len = len, .mask = mask, .size = n };
 }
 
-/// Write a client frame header (always masked) into `out`; returns its length.
-pub fn writeHeader(out: *[14]u8, op: Opcode, len: usize, mask: [4]u8) usize {
+/// Write a frame header into `out`; returns its length. Client frames are masked.
+pub fn writeHeader(out: *[14]u8, op: Opcode, len: usize, mask: [4]u8, masked: bool) usize {
     out[0] = 0x80 | @as(u8, @intFromEnum(op));
+    const m: u8 = if (masked) 0x80 else 0;
     var n: usize = 2;
     if (len < 126) {
-        out[1] = 0x80 | @as(u8, @intCast(len));
+        out[1] = m | @as(u8, @intCast(len));
     } else if (len <= 0xffff) {
-        out[1] = 0x80 | 126;
+        out[1] = m | 126;
         std.mem.writeInt(u16, out[2..4], @intCast(len), .big);
         n = 4;
     } else {
-        out[1] = 0x80 | 127;
+        out[1] = m | 127;
         std.mem.writeInt(u64, out[2..10], len, .big);
         n = 10;
     }
+    if (!masked) return n;
     @memcpy(out[n .. n + 4], &mask);
     return n + 4;
 }
@@ -115,16 +117,75 @@ pub fn acceptKey(key: []const u8) [28]u8 {
     return accept;
 }
 
-pub const Client = struct {
+pub const Client = Conn;
+
+/// One end of a WebSocket. A client masks what it sends; a server does not.
+pub const Conn = struct {
     io: Io,
     stream: Io.net.Stream,
     reader: Io.net.Stream.Reader,
     writer: Io.net.Stream.Writer,
     write_mutex: Io.Mutex = .init,
+    /// True for the connecting side, which must mask its frames.
+    is_client: bool = true,
+    /// Server side: the subprotocol agreed in `accept` (one of the slices passed in).
+    subprotocol: []const u8 = "",
     /// Largest message accepted, after reassembly.
     max_message: u64 = 64 * 1024 * 1024,
     read_buf: [64 * 1024]u8 = undefined,
     write_buf: [64 * 1024]u8 = undefined,
+
+    /// Server side: read the upgrade request from an accepted `stream`, check it and answer 101.
+    /// `subprotocol` is echoed if the client asked for it; otherwise the upgrade is refused.
+    pub fn accept(gpa: Allocator, io: Io, stream: Io.net.Stream, subprotocols: []const []const u8) !*Conn {
+        const c = try gpa.create(Conn);
+        errdefer gpa.destroy(c);
+        c.* = .{ .io = io, .stream = stream, .reader = undefined, .writer = undefined, .is_client = false };
+        c.reader = stream.reader(io, &c.read_buf);
+        c.writer = stream.writer(io, &c.write_buf);
+        const r = &c.reader.interface;
+        const w = &c.writer.interface;
+
+        const req_line = try r.takeDelimiterInclusive('\n');
+        if (!std.mem.startsWith(u8, req_line, "GET ")) return error.BadRequest;
+        var key: ?[]const u8 = null;
+        var key_buf: [64]u8 = undefined;
+        var chosen: ?[]const u8 = null;
+        var lines: usize = 0;
+        while (true) {
+            const line = std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n");
+            if (line.len == 0) break;
+            lines += 1;
+            if (lines > 64) return error.BadRequest;
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            const name = line[0..colon];
+            const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+            if (std.ascii.eqlIgnoreCase(name, "sec-websocket-key") and value.len <= key_buf.len) {
+                @memcpy(key_buf[0..value.len], value);
+                key = key_buf[0..value.len];
+            } else if (std.ascii.eqlIgnoreCase(name, "sec-websocket-protocol")) {
+                var it = std.mem.tokenizeAny(u8, value, ", ");
+                while (it.next()) |p| for (subprotocols) |sp| {
+                    if (chosen == null and std.mem.eql(u8, p, sp)) chosen = sp;
+                };
+            }
+        }
+        const k = key orelse return error.BadRequest;
+        const proto = chosen orelse {
+            try w.writeAll("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+            try w.flush();
+            return error.BadSubprotocol;
+        };
+        const accept_val = acceptKey(k);
+        try w.print(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+                "Sec-WebSocket-Accept: {s}\r\nSec-WebSocket-Protocol: {s}\r\n\r\n",
+            .{ &accept_val, proto },
+        );
+        try w.flush();
+        c.subprotocol = proto;
+        return c;
+    }
 
     /// Connect to `socket_path`, then upgrade `path` to a WebSocket with `subprotocol`.
     pub fn connect(
@@ -133,12 +194,12 @@ pub const Client = struct {
         socket_path: []const u8,
         path: []const u8,
         subprotocol: []const u8,
-    ) !*Client {
+    ) !*Conn {
         const addr = try Io.net.UnixAddress.init(socket_path);
         const stream = try addr.connect(io);
         errdefer stream.close(io);
 
-        const c = try gpa.create(Client);
+        const c = try gpa.create(Conn);
         errdefer gpa.destroy(c);
         c.* = .{ .io = io, .stream = stream, .reader = undefined, .writer = undefined };
         c.reader = stream.reader(io, &c.read_buf);
@@ -158,7 +219,7 @@ pub const Client = struct {
         );
         try w.flush();
 
-        const accept = acceptKey(&key);
+        const expected = acceptKey(&key);
         const r = &c.reader.interface;
         const status = try r.takeDelimiterInclusive('\n');
         if (std.mem.indexOf(u8, status, " 101 ") == null) return error.UpgradeRefused;
@@ -169,30 +230,35 @@ pub const Client = struct {
             const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
             const name = line[0..colon];
             const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-            if (std.ascii.eqlIgnoreCase(name, "sec-websocket-accept") and std.mem.eql(u8, value, &accept))
+            if (std.ascii.eqlIgnoreCase(name, "sec-websocket-accept") and std.mem.eql(u8, value, &expected))
                 accepted = true;
         }
         if (!accepted) return error.BadAccept;
         return c;
     }
 
-    pub fn deinit(c: *Client, gpa: Allocator) void {
+    pub fn deinit(c: *Conn, gpa: Allocator) void {
         c.stream.close(c.io);
         gpa.destroy(c);
     }
 
     /// Send one masked frame. Safe to call from several tasks.
-    pub fn writeFrame(c: *Client, op: Opcode, data: []const u8) !void {
+    pub fn writeFrame(c: *Conn, op: Opcode, data: []const u8) !void {
         c.write_mutex.lockUncancelable(c.io);
         defer c.write_mutex.unlock(c.io);
 
         const w = &c.writer.interface;
-        var mask: [4]u8 = undefined;
-        c.io.random(&mask);
+        var mask: [4]u8 = .{ 0, 0, 0, 0 };
+        if (c.is_client) c.io.random(&mask);
         var hdr: [14]u8 = undefined;
-        const n = writeHeader(&hdr, op, data.len, mask);
+        const n = writeHeader(&hdr, op, data.len, mask, c.is_client);
         try w.writeAll(hdr[0..n]);
 
+        if (!c.is_client) {
+            try w.writeAll(data);
+            try w.flush();
+            return;
+        }
         var chunk: [4096]u8 = undefined;
         var off: usize = 0;
         while (off < data.len) {
@@ -205,7 +271,7 @@ pub const Client = struct {
     }
 
     /// Read one complete message, answering pings. Close frames are returned.
-    pub fn readMessage(c: *Client, gpa: Allocator) !Message {
+    pub fn readMessage(c: *Conn, gpa: Allocator) !Message {
         const r = &c.reader.interface;
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(gpa);
@@ -295,7 +361,7 @@ test "writeHeader round-trips through parseHeader" {
     const mask: [4]u8 = .{ 9, 8, 7, 6 };
     for ([_]usize{ 0, 5, 125, 126, 65535, 65536, 1 << 20 }) |len| {
         var out: [14]u8 = undefined;
-        const n = writeHeader(&out, .binary, len, mask);
+        const n = writeHeader(&out, .binary, len, mask, true);
         const h = try parseHeader(out[0..n], 1 << 21);
         try std.testing.expectEqual(@as(u64, len), h.len);
         try std.testing.expect(h.masked and h.fin and h.opcode == .binary);
@@ -326,7 +392,7 @@ test "live: control hello against a real Rex (needs REX_SOCKET)" {
     const sock = std.testing.environ.getPosix("REX_SOCKET") orelse return error.SkipZigTest;
     if (sock.len == 0) return error.SkipZigTest;
     const io = std.testing.io;
-    const c = try Client.connect(gpa, io, sock, "/api/control", "rex.control.v1");
+    const c = try Conn.connect(gpa, io, sock, "/api/control", "rex.control.v1");
     defer c.deinit(gpa);
     try c.writeFrame(.text, "{\"type\":\"hello\",\"api_revision\":18,\"api_min_revision\":18," ++
         "\"client\":{\"kind\":\"other\",\"platform\":\"web\",\"name\":\"rweb-test\",\"version\":\"0.0.1\"}}");

@@ -2,7 +2,9 @@
 //! directory should know Rex's wire format.
 
 pub const ws = @import("ws.zig");
+pub const fake = @import("fake.zig");
 
 test {
     _ = ws;
+    _ = fake;
 }
