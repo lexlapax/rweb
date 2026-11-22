@@ -59,6 +59,8 @@ pub const Fake = struct {
     next_id: u32 = 1,
     /// Count of control connections accepted, for tests.
     control_connections: u32 = 0,
+    /// Live control connections, so a test can cut them.
+    control_conns: std.ArrayList(*ws.Conn) = .empty,
 
     /// Listen on a fresh socket under /tmp and start serving.
     pub fn start(gpa: Allocator, io: Io) !*Fake {
@@ -96,6 +98,7 @@ pub const Fake = struct {
         for (f.sessions.items) |s| f.freeSession(s);
         f.sessions.deinit(f.gpa);
         f.tickets.deinit(f.gpa);
+        f.control_conns.deinit(f.gpa);
         f.streams.deinit(f.gpa);
         f.clients.deinit(f.gpa);
         f.gpa.free(f.path);
@@ -142,6 +145,13 @@ pub const Fake = struct {
             s.block.term = try newTerminal(f.gpa, f.io, cols, rows);
         }
         try f.listen();
+    }
+
+    /// Drop every control connection without a close frame; tokens stay valid.
+    pub fn dropControlConnections(f: *Fake) void {
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        for (f.control_conns.items) |cn| cn.stream.shutdown(f.io, .both) catch {};
     }
 
     /// Drop every data connection without a close frame. Streams stay resumable.
@@ -240,6 +250,17 @@ pub const Fake = struct {
         };
         defer c.deinit(f.gpa);
         if (std.mem.eql(u8, c.subprotocol, control_subprotocol)) {
+            f.mu.lockUncancelable(f.io);
+            f.control_conns.append(f.gpa, c) catch {};
+            f.mu.unlock(f.io);
+            defer {
+                f.mu.lockUncancelable(f.io);
+                for (f.control_conns.items, 0..) |x, i| if (x == c) {
+                    _ = f.control_conns.swapRemove(i);
+                    break;
+                };
+                f.mu.unlock(f.io);
+            }
             f.control(c) catch |e| log.debug("control ended: {t}", .{e});
         } else {
             f.dataConn(c) catch |e| log.debug("data ended: {t}", .{e});

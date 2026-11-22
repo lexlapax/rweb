@@ -3,8 +3,10 @@
 
 pub const ws = @import("ws.zig");
 pub const fake = @import("fake.zig");
+pub const control = @import("control.zig");
 
 test {
     _ = ws;
     _ = fake;
+    _ = control;
 }

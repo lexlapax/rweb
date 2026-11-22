@@ -5,7 +5,7 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
 
-Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 and 2 done. The owner's grant for
+Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 3 done. The owner's grant for
 desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
 
 desktop-mac facts checked 2026-11-22: Zig 0.17.1 (`/opt/homebrew/bin/zig`); Rex.app
@@ -76,8 +76,13 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       one window and one block per session, a reduced `session.attach` view, no `key`/`resize`/
       `format`, no theme or `child_exited`. Grow it with the steps that need it.
       `ws.zig` gained a server role (`Conn.accept`) for it.
-   3. Control connection: hello, revision negotiation, events, reconnect, restart recovery
-      (finding 11).
+   3. DONE: `src/rex/control.zig`: hello and revision negotiation (hello under 512 bytes),
+      `call` matched by id from any task, events and `connected`/`disconnected` notices through
+      `nextEvent`, reconnect with backoff and the reconnect token. A short drop resumes the same
+      client; a Rex restart gives `resumed=false` (finding 11), and the consumer must re-attach
+      and re-read state. Not yet: our own 120 s ping, `seq`/response ordering helper for
+      combining views with events (needs the real `session.attach` view, in step 7), a
+      `session.bootstrap` helper.
    4. Data connection: tickets, HELLO/RESUME, byte counting, 1013, `rex1` messages.
    5. The mirror, one per open terminal, using the redraw rules.
    6. One ordered input queue per terminal (finding 12).
@@ -88,6 +93,9 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 
 ## Checks run for this update
 
+- 2026-11-22, desktop-mac: control client added; `zig build test` 22 pass + 1 skip, eight runs
+  plus once in `ReleaseSafe`, stable and leak-free; with `REX_SOCKET`: 24/24 including live
+  `session.list` and `server.version` on preview.21 (no sessions created).
 - 2026-11-22, desktop-mac: fake server tests added; `zig build test`: 16 pass, 1 skip, three runs,
   no leaks (testing allocator). Also run once with `REX_SOCKET` set (see next line).
 - 2026-11-22, desktop-mac: `zig build test` in the repository root: 7 pass, 1 skip (live). With
