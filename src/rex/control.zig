@@ -104,6 +104,8 @@ pub const Control = struct {
     revision: u32 = 0,
     max_message: u64 = 1 << 20,
     closing: bool = false,
+    /// Callers writing to `conn`; the reader waits for them before freeing a dead connection.
+    writers: u32 = 0,
     next_id: u64 = 1,
     pending: std.StringHashMapUnmanaged(*Pending) = .empty,
     events: std.ArrayList(Event) = .empty,
@@ -228,20 +230,25 @@ pub const Control = struct {
             c.mu.unlock(c.io);
             return error.NotConnected;
         };
+        c.writers += 1; // released below, whatever happens
         const id_num = c.next_id;
         c.next_id += 1;
         var idbuf: [24]u8 = undefined;
         const id_tmp = std.fmt.bufPrint(&idbuf, "{d}", .{id_num}) catch unreachable;
         const id = gpa.dupe(u8, id_tmp) catch |e| {
+            c.writers -= 1;
             c.mu.unlock(c.io);
             return e;
         };
         defer gpa.free(id);
         c.pending.put(gpa, id, &pend) catch |e| {
+            c.writers -= 1;
             c.mu.unlock(c.io);
             return e;
         };
         c.mu.unlock(c.io);
+        var writing = true;
+        defer if (writing) c.releaseWriter();
         errdefer self_remove: {
             c.mu.lockUncancelable(c.io);
             defer c.mu.unlock(c.io);
@@ -261,7 +268,10 @@ pub const Control = struct {
         });
         defer gpa.free(req);
         if (req.len > c.max_message) return error.MessageTooLarge;
-        cn.writeFrame(.text, req) catch return error.ConnectionLost;
+        const wrote = cn.writeFrame(.text, req);
+        c.releaseWriter();
+        writing = false;
+        wrote catch return error.ConnectionLost;
 
         pend.done.waitTimeout(c.io, .{ .duration = .{ .raw = .fromMilliseconds(c.opts.call_timeout_ms), .clock = .awake } }) catch |e| switch (e) {
             error.Timeout => return error.Timeout,
@@ -293,6 +303,12 @@ pub const Control = struct {
         return r;
     }
 
+    fn releaseWriter(c: *Control) void {
+        c.mu.lockUncancelable(c.io);
+        c.writers -= 1;
+        c.mu.unlock(c.io);
+    }
+
     /// Fail every waiting call (the connection is gone; the server may still have run them).
     fn failPending(c: *Control) void {
         c.mu.lockUncancelable(c.io);
@@ -311,12 +327,22 @@ pub const Control = struct {
             // The connection ended.
             c.mu.lockUncancelable(c.io);
             const closing = c.closing;
-            if (c.conn) |cn| {
-                cn.deinit(c.gpa);
-                c.conn = null;
-            }
+            const dead = c.conn;
+            c.conn = null; // no new writers from here on
             if (!closing) c.pushLocked(.disconnected) catch {};
             c.mu.unlock(c.io);
+            if (dead) |cn| {
+                // Writers already on it fail fast once the socket is shut; wait them out.
+                cn.stream.shutdown(c.io, .both) catch {};
+                while (true) {
+                    c.mu.lockUncancelable(c.io);
+                    const busy = c.writers > 0;
+                    c.mu.unlock(c.io);
+                    if (!busy) break;
+                    c.io.sleep(.fromMilliseconds(1), .awake) catch break;
+                }
+                cn.deinit(c.gpa);
+            }
             c.failPending();
             if (closing or !c.opts.reconnect) return;
 

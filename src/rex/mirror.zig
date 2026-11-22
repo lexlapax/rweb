@@ -42,6 +42,8 @@ pub const Observer = struct {
     resized: ?*const fn (ctx: *anyopaque, cols: u16, rows: u16) void = null,
     theme: ?*const fn (ctx: *anyopaque, theme: *const Theme) void = null,
     exited: ?*const fn (ctx: *anyopaque, exit_code: i64) void = null,
+    /// The data stream ended (see `data.End`); no more output will arrive.
+    ended: ?*const fn (ctx: *anyopaque, why: data.End) void = null,
 };
 
 pub const Mirror = struct {
@@ -121,6 +123,7 @@ pub const Mirror = struct {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         m.ended = why;
+        if (m.observer) |o| if (o.ended) |f| f(o.ctx, why);
     }
 
     pub fn endReason(m: *Mirror) ?data.End {
@@ -236,13 +239,46 @@ pub const Mirror = struct {
     /// Keep trailing blank rows so the viewer's screen top matches the mirror's.
     const redraw_opts: ghostty_vt.formatter.Options = .{ .emit = .vt, .trim = false };
 
+    pub const RedrawOptions = struct {
+        /// Include at most this many rows of scrollback above the visible screen; null for all.
+        history_lines: ?u32 = null,
+    };
+
     /// A VT byte stream that recreates the mirror's state on a fresh terminal. Caller frees.
     pub fn redraw(m: *Mirror, gpa: Allocator) ![]u8 {
+        return m.redrawWith(gpa, .{});
+    }
+
+    pub fn redrawWith(m: *Mirror, gpa: Allocator, opts: RedrawOptions) ![]u8 {
+        var out: ?[]u8 = null;
+        const Cap = struct {
+            gpa: Allocator,
+            out: *?[]u8,
+            fn take(ctx: *anyopaque, bytes: []const u8) !void {
+                const c: *@This() = @ptrCast(@alignCast(ctx));
+                c.out.* = try c.gpa.dupe(u8, bytes);
+            }
+        };
+        var cap: Cap = .{ .gpa = gpa, .out = &out };
+        try m.redrawLocked(gpa, opts, &cap, Cap.take);
+        return out.?;
+    }
+
+    /// Build a redraw and hand it to `deliver` while the mirror is still locked, so nothing the
+    /// mirror receives afterwards can be missed or repeated by whoever switches to it (live
+    /// output reaches observers under the same lock). `deliver` must not call into the mirror.
+    pub fn redrawLocked(
+        m: *Mirror,
+        gpa: Allocator,
+        opts: RedrawOptions,
+        ctx: *anyopaque,
+        deliver: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
+    ) !void {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return error.NotLive;
         var out: Io.Writer.Allocating = .init(gpa);
-        errdefer out.deinit();
+        defer out.deinit();
         const w = &out.writer;
         try w.writeAll("\x1bc"); // RIS: start the viewer from a clean terminal
         // The formatter draws only the active screen. While a full-screen program has the
@@ -252,13 +288,34 @@ pub const Mirror = struct {
             if (m.term.screens.get(.primary)) |primary| {
                 var pf: ghostty_vt.formatter.ScreenFormatter = .init(primary, redraw_opts);
                 pf.extra = .all;
+                pf.content = .{ .selection = capSelection(primary, opts) };
                 try pf.format(w);
             }
         }
         var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, redraw_opts);
         f.extra = .all;
+        if (m.term.screens.active_key == .primary) f.content = .{ .selection = capSelection(m.term.screens.active, opts) };
         try f.format(w);
-        return out.toOwnedSlice();
+        try deliver(ctx, out.written());
+    }
+
+    /// The part of `screen` to draw: the visible rows plus at most `history_lines` above them.
+    fn capSelection(screen: *ghostty_vt.Screen, opts: RedrawOptions) ?ghostty_vt.Selection {
+        const n = opts.history_lines orelse return null;
+        const top = screen.pages.getTopLeft(.active);
+        const start = top.up(n) orelse return null; // less history than the cap: everything
+        const end = screen.pages.getBottomRight(.screen) orelse return null;
+        return ghostty_vt.Selection.init(start, end, false);
+    }
+
+    /// Rows of scrollback above the visible screen on the primary screen.
+    pub fn historyRows(m: *Mirror) usize {
+        m.mu.lockUncancelable(m.io);
+        defer m.mu.unlock(m.io);
+        if (m.status != .live) return 0;
+        const primary = m.term.screens.get(.primary) orelse return 0;
+        const total = primary.pages.total_rows;
+        return if (total > m.term.rows) total - m.term.rows else 0;
     }
 
     /// The visible screen as plain text, for tests and logs. Caller frees.
@@ -413,6 +470,50 @@ test "mirror: redraw recreates the screen on a fresh terminal, including the alt
         try f.format(&out.writer);
         try testing.expect(std.mem.indexOf(u8, out.written(), "primary text") != null);
     }
+}
+
+test "mirror: a redraw can cap how much scrollback it carries" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 1, 30, 5, "");
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 1);
+    defer m.deinit();
+    try m.feed(stream);
+    var i: u32 = 0;
+    while (i < 200) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        try m.feed(try std.fmt.bufPrint(&buf, "line-{d:0>3}\r\n", .{i}));
+    }
+    try testing.expect(m.historyRows() >= 190);
+    var alt = false;
+    {
+        const full = try m.redraw(a);
+        defer a.free(full);
+        const text = try replay(a, full, 30, 5, &alt);
+        defer a.free(text);
+        try testing.expect(std.mem.indexOf(u8, text, "line-000") != null);
+        try testing.expect(std.mem.indexOf(u8, text, "line-199") != null);
+    }
+    {
+        const full_len = (try m.redraw(a));
+        defer a.free(full_len);
+        const capped = try m.redrawWith(a, .{ .history_lines = 10 });
+        defer a.free(capped);
+        const text = try replay(a, capped, 30, 5, &alt);
+        defer a.free(text);
+        try testing.expect(std.mem.indexOf(u8, text, "line-000") == null);
+        try testing.expect(std.mem.indexOf(u8, text, "line-150") == null);
+        try testing.expect(std.mem.indexOf(u8, text, "line-190") != null); // within 10 + 5 rows
+        try testing.expect(std.mem.indexOf(u8, text, "line-199") != null);
+        // The fixed state (modes, palette) is most of a small redraw; the dropped rows are the rest.
+        try testing.expect(capped.len + 1500 < full_len.len);
+    }
+    // More history than exists: everything.
+    const all = try m.redrawWith(a, .{ .history_lines = 100000 });
+    defer a.free(all);
+    const text2 = try replay(a, all, 30, 5, &alt);
+    defer a.free(text2);
+    try testing.expect(std.mem.indexOf(u8, text2, "line-000") != null);
 }
 
 test "mirror: not live until the snapshot has arrived" {

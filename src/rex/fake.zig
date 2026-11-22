@@ -242,6 +242,20 @@ pub const Fake = struct {
         return ghostty_vt.Terminal.init(io, gpa, .{ .cols = cols, .rows = rows });
     }
 
+    /// Resize a block's terminal and tell its streams, as Rex does with a `resize` message.
+    fn resizeLocked(f: *Fake, block_id: []const u8, cols: u16, rows: u16) !void {
+        for (f.sessions.items) |s| {
+            if (!std.mem.eql(u8, s.block.id, block_id)) continue;
+            try s.block.term.resize(f.gpa, .{ .cols = cols, .rows = rows });
+        }
+        for (f.streams.items) |st| {
+            if (!std.mem.eql(u8, st.block_id, block_id)) continue;
+            var buf: [160]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "\x1b_rex1;{d};{{\"type\":\"resize\",\"cols\":{d},\"rows\":{d},\"cell_width_px\":0,\"cell_height_px\":0,\"owner\":\"client:fake\"}}\x1b\\", .{ st.nonce, cols, rows });
+            try st.bytes.appendSlice(f.gpa, msg);
+        }
+    }
+
     fn findSession(f: *Fake, id: []const u8) ?*Session {
         for (f.sessions.items) |s| if (std.mem.eql(u8, s.id, id)) return s;
         return null;
@@ -452,6 +466,54 @@ pub const Fake = struct {
                 f.freeSession(s);
                 break;
             };
+            return f.respond(c, id, .{});
+        } else if (std.mem.eql(u8, method, "session.attach_all")) {
+            const Item = struct { session_id: []const u8, label: []const u8 };
+            const items = try arena.alloc(Item, f.sessions.items.len);
+            for (f.sessions.items, items) |s, *it| it.* = .{ .session_id = s.id, .label = s.label };
+            return f.respond(c, id, .{ .sessions = items });
+        } else if (std.mem.eql(u8, method, "session.list_blocks")) {
+            const sid = strField(p, "session_id") orelse return f.respondError(c, id, "bad_request", 400, "session_id required");
+            const s = f.findSession(sid) orelse return f.respondError(c, id, "session_not_found", 404, "session not found");
+            return f.respond(c, id, .{ .blocks = .{.{
+                .block_id = s.block.id,
+                .label = "fake-block",
+                .creator_name = "com.superlogical.terminal",
+                .flavor = "com.superlogical.terminal.shell",
+                .placement = "placed",
+                .window_id = s.window_id,
+            }} });
+        } else if (std.mem.eql(u8, method, "session.set_label")) {
+            const sid = strField(p, "session_id") orelse return f.respondError(c, id, "bad_request", 400, "session_id required");
+            const s = f.findSession(sid) orelse return f.respondError(c, id, "session_not_found", 404, "session not found");
+            const new = try f.gpa.dupe(u8, strField(p, "label") orelse "fake-session");
+            f.gpa.free(s.label);
+            s.label = new;
+            return f.respond(c, id, .{ .revision = 2 });
+        } else if (std.mem.eql(u8, method, "session.own_block")) {
+            const bid = if (p.get("block_ids")) |b| (if (b == .array and b.array.items.len == 1 and b.array.items[0] == .string) b.array.items[0].string else null) else null;
+            return f.respond(c, id, .{ .blocks = .{.{ .block_id = bid orelse "", .owner = "client:fake" }} });
+        } else if (std.mem.eql(u8, method, "com.superlogical.terminal.resize")) {
+            const bid = strField(p, "block_id") orelse return f.respondError(c, id, "bad_request", 400, "block_id required");
+            const args = if (p.get("args")) |a| (if (a == .object) a.object else no_object) else no_object;
+            const cols = intField(args, "columns") orelse return f.respondError(c, id, "bad_request", 400, "columns required");
+            const rows = intField(args, "rows") orelse return f.respondError(c, id, "bad_request", 400, "rows required");
+            try f.resizeLocked(bid, @intCast(cols), @intCast(rows));
+            return f.respond(c, id, .{});
+        } else if (std.mem.eql(u8, method, "client.key")) {
+            // The fake has no keyboard encoder: the key's text is echoed.
+            const bid = strField(p, "block_id") orelse return f.respondError(c, id, "bad_request", 400, "block_id required");
+            const key = if (p.get("key")) |k| (if (k == .object) k.object else no_object) else no_object;
+            const text = strField(key, "text") orelse "";
+            if (std.mem.eql(u8, strField(key, "key") orelse "", "enter")) try f.feedLocked(bid, "\r\n") else try f.feedLocked(bid, text);
+            return f.respond(c, id, .{ .handled = false });
+        } else if (std.mem.eql(u8, method, "block.event")) {
+            const bid = strField(p, "block_id") orelse return f.respondError(c, id, "bad_request", 400, "block_id required");
+            const ev = if (p.get("event")) |e| (if (e == .object) e.object else no_object) else no_object;
+            if (std.mem.eql(u8, strField(ev, "type") orelse "", "paste")) {
+                const pl = if (ev.get("payload")) |x| (if (x == .object) x.object else no_object) else no_object;
+                try f.feedLocked(bid, strField(pl, "text") orelse "");
+            }
             return f.respond(c, id, .{});
         } else if (std.mem.eql(u8, method, "com.superlogical.terminal.write")) {
             const sid = strField(p, "session_id") orelse return f.respondError(c, id, "bad_request", 400, "session_id required");

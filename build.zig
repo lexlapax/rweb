@@ -14,13 +14,26 @@ pub fn build(b: *std.Build) void {
     });
     if (ghostty) |dep| rex.addImport("ghostty-vt", dep.module("ghostty-vt"));
 
-    const tests = b.addTest(.{ .root_module = rex });
+    const filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this") orelse &.{};
+    const tests = b.addTest(.{ .root_module = rex, .filters = filters });
     const run_tests = b.addRunArtifact(tests);
     run_tests.has_side_effects = true; // live tests read REX_SOCKET, which the cache cannot see
+    // The bridge: imports the Rex library and, through it, Ghostty.
+    const bridge_mod = b.createModule(.{
+        .root_source_file = b.path("src/bridge/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bridge_mod.addImport("rex", rex);
+    if (ghostty) |dep| bridge_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    const bridge_tests = b.addTest(.{ .root_module = bridge_mod, .filters = filters });
+    const run_bridge_tests = b.addRunArtifact(bridge_tests);
+    run_bridge_tests.has_side_effects = true;
+
     // Fuzz targets for the byte parsers. A separate module without Ghostty: its C++ is not
     // instrumented for fuzzing, so linking it into a fuzz build fails.
     const fuzz_mod = b.createModule(.{
-        .root_source_file = b.path("src/rex/fuzz.zig"),
+        .root_source_file = b.path("src/fuzz.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -28,5 +41,8 @@ pub fn build(b: *std.Build) void {
     const run_fuzz = b.addRunArtifact(fuzz_tests);
     b.step("fuzz", "Fuzz the parsers: zig build fuzz --fuzz").dependOn(&run_fuzz.step);
 
-    b.step("test", "Run unit tests (add --fuzz to fuzz the parsers)").dependOn(&run_tests.step);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_bridge_tests.step);
+    test_step.dependOn(&run_fuzz.step);
 }

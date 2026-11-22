@@ -162,6 +162,13 @@ pub const Api = struct {
         r.deinit();
     }
 
+    /// Receive session-level events for the whole server (not `block_event`s) and get the
+    /// session list. Must be repeated after every reconnect as a new client.
+    pub fn attachAll(a: *Api) Error!void {
+        var r = try a.run("session.attach_all", "{\"event_scope\":\"session\"}");
+        r.deinit();
+    }
+
     /// Attach this connection to a session, so its events and data connections work.
     pub fn attach(a: *Api, sid: []const u8) Error!void {
         const body = try a.sessionBody(sid, "");

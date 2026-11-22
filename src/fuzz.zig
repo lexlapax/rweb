@@ -5,9 +5,11 @@
 const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
-const ws = @import("ws.zig");
-const rex1 = @import("rex1.zig");
-const wire = @import("wire.zig");
+const ws = @import("rex/ws.zig");
+const rex1 = @import("rex/rex1.zig");
+const wire = @import("rex/wire.zig");
+const protocol = @import("bridge/protocol.zig");
+const access = @import("bridge/access.zig");
 
 /// Collects what the splitter emits, counting bytes.
 const Count = struct {
@@ -100,6 +102,55 @@ test "fuzz: splitting the stream anywhere gives the same output and messages" {
             try testing.expectEqual(cw.messages, cs.messages);
             // Never more output than input.
             try testing.expect(cw.plain_bytes <= n);
+        }
+    }.run, .{});
+}
+
+test "fuzz browser protocol" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [1024]u8 = undefined;
+            const n = smith.slice(&buf);
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            _ = protocol.parse(arena.allocator(), buf[0..n]) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz access decision" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const n = smith.slice(&buf);
+            // Split the bytes into header values; whatever they are, a request that is not
+            // exactly the owner's must never be allowed.
+            const third = n / 3;
+            const hs = [_]access.Header{
+                .{ .name = "Tailscale-User-Login", .value = buf[0..third] },
+                .{ .name = "X-Forwarded-For", .value = buf[third .. 2 * third] },
+                .{ .name = "Origin", .value = buf[2 * third .. n] },
+            };
+            const cfg: access.Config = .{ .owner = "owner@example.com", .own_addresses = &.{"100.64.0.5"} };
+            const d = access.decide(cfg, .{ .headers = &hs, .is_websocket_upgrade = true });
+            if (d == .allow) try testing.expectEqualStrings("owner@example.com", buf[0..third]);
+        }
+    }.run, .{});
+}
+
+test "fuzz originMatchesHost never matches a different host" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [128]u8 = undefined;
+            const n = smith.slice(&buf);
+            const half = n / 2;
+            if (access.originMatchesHost(buf[0..half], buf[half..n])) {
+                // Whatever matched must end in the host, case-insensitively.
+                const o = buf[0..half];
+                const h = buf[half..n];
+                try testing.expect(h.len > 0 and o.len >= h.len);
+                try testing.expect(std.ascii.eqlIgnoreCase(o[o.len - h.len ..], h));
+            }
         }
     }.run, .{});
 }

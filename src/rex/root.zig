@@ -10,7 +10,6 @@ pub const data = @import("data.zig");
 pub const mirror = @import("mirror.zig");
 pub const input = @import("input.zig");
 pub const api = @import("api.zig");
-pub const fuzz = @import("fuzz.zig");
 
 test {
     _ = ws;
@@ -22,5 +21,4 @@ test {
     _ = mirror;
     _ = input;
     _ = api;
-    _ = fuzz;
 }

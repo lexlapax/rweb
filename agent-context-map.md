@@ -115,8 +115,23 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
    requests should be sent fragmented at 19; ours are small. `focus_history.reverse` unused. The real restart test is done on both machines.
    Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
+## Phase 2 in progress (bridge, `src/bridge/`)
+
+Owner's answers (2026-11-22): history on open = last ~1,000 lines (button loads the rest); a
+terminal wider than the screen shrinks to fit and the Rex size changes only on request; the
+read-only switch is on the page, off by default (a bridge-wide locked mode also exists).
+Done so far: `access.zig` (pure decisions, one test per refusal), `protocol.zig` (validated
+browser messages), `hub.zig` (terminals, viewers with bounded queues, fan-out, session tree,
+restart and 1013 recovery; tested against the fake). Mirror gained `redrawLocked` and capped
+history. Fixed a use-after-free in `Control.call` found by the restart test. Not yet: HTTP and
+WebSocket server, peer credentials, frontend and vendored xterm.js, `main`, live and access
+tests, the Serve test. Run tests with output to a file; piping `zig build test` into `head`
+can hang.
+
 ## Checks run for this update
 
+- 2026-11-22: `zig build test` 76 pass + 7 skip (rex 51, bridge 25 incl. 12 hub tests against
+  the fake, fuzz 36 as ordinary tests).
 - 2026-11-22: revision 18 to 19 change: `zig build test` 55 pass + 7 skip; with `REX_SOCKET`
   61 pass + 1 skip (restart test gated) on desktop-mac (negotiated 18) and on linux-box (negotiated
   19, scratch copy removed). Both machines' `rex ls` show only the owner's session.
