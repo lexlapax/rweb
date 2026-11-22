@@ -113,7 +113,7 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 2. **Next: Phase 2 (bridge server)**, then 3 and 4. Revision 19 is open: the only
    differences from 18 that matter are that an oversize event becomes an `event_dropped` event
    instead of closing the connection, and a large request should be sent fragmented; new
-   method `focus_history.reverse` is unused. The real restart test is done on linux-box.
+   method `focus_history.reverse` is unused. The real restart test is done on both machines.
    Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
 ## Checks run for this update
