@@ -1,20 +1,18 @@
 # Agent context map
 
-Last updated: 2026-11-22. Read first; load linked context lazily. Keep this file short: current
+Last updated: 2026-11-22 (desktop-mac). Read first; load linked context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
-## Handover (2026-11-22)
+## Handover (2026-11-22), picked up on desktop-mac
 
-Work moves to a coding assistant on desktop-mac. Phase 0 is finished and pushed; Phase 1 has not
-started. The owner's grant for desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
+Phase 0 is finished and pushed. Phase 1 is in progress, step 1 done. The owner's grant for
+desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
 
-Before starting on desktop-mac:
-
-1. Pull `main`, then check `zig version` (0.17.1 expected) and `rex version`. Rex.app updates
-   itself; it was preview.21 on 2026-11-20, and Phase 1 must support its API revision.
-2. Find Rex's socket. `spike/` and its Python probes read `XDG_RUNTIME_DIR`, and
-   `restart_probe.py` uses `systemctl`, so they are Linux-only as written.
-3. Nothing here has been built or run on macOS, and no fresh-clone build has been tried.
+desktop-mac facts checked 2026-11-22: Zig 0.17.1 (`/opt/homebrew/bin/zig`); Rex.app
+`0.1.0-preview.21`, commit `202b1b3f`, API revision 18 (supports 0 to 18); socket
+`~/Library/Application Support/Rex/server.sock` (no `XDG_RUNTIME_DIR`; `rex ls` shows only the
+owner's `calm-isle`). The spike builds from a fresh clone on macOS (`ReleaseSafe`, ~2 min,
+Ghostty fetched). `spike/`'s Python probes remain Linux-only (`XDG_RUNTIME_DIR`, `systemctl`).
 
 ## Current state
 
@@ -67,7 +65,9 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 
 1. **Phase 1: Rex client library in Zig**, as in [docs/PLAN.md](docs/PLAN.md#phase-1-rex-client-library-zig),
    built fresh at the repository root, in this order:
-   1. `build.zig` with Ghostty pinned, and a `rex` module with its WebSocket client.
+   1. DONE: `build.zig`/`build.zig.zon` (Ghostty `vt-1.0.1` pinned), `src/rex/root.zig`,
+      `src/rex/ws.zig` (pure `parseHeader`, size limits, fragmentation rules, fuzz test).
+      `zig build test`; live tests need `REX_SOCKET=<socket>` (read-only hello/welcome).
    2. The fake Rex server, built from `llms.txt`, with snapshots from libghostty-vt.
    3. Control connection: hello, revision negotiation, events, reconnect, restart recovery
       (finding 11).
@@ -80,6 +80,10 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 2. Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
 ## Checks run for this update
+
+- 2026-11-22, desktop-mac: `zig build test` in the repository root: 7 pass, 1 skip (live). With
+  `REX_SOCKET` set to the desktop-mac socket: 8/8 pass, including a control hello and welcome
+  against Rex preview.21 / revision 18. No sessions were created or touched.
 
 - Phase 0 spike runs 1–10 against Rex preview.22 / revision 19 on linux-box, Chrome 157, as listed
   in [docs/phase0-result.md](docs/phase0-result.md). Every run destroyed its `rweb-test-` session;

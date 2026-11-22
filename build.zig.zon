@@ -1,0 +1,13 @@
+.{
+    .name = .rweb,
+    .version = "0.0.1",
+    .dependencies = .{
+        .ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/refs/tags/vt-1.0.1.tar.gz",
+            .hash = "ghostty-1.4.1-dev-5UdBC4lkpgUYGLDYGJQcJoa9zOGZNB3qVMgMoS9CUH5O",
+        },
+    },
+    .minimum_zig_version = "0.17.1",
+    .paths = .{""},
+    .fingerprint = 0xafa564880300d9e,
+}
