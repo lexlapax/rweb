@@ -1,32 +1,68 @@
-# AGENTS.md
+# Agent rules
 
-rweb shows Rex terminal sessions in a web browser through a small Rust bridge. Read
-`docs/PLAN.md` first, then `docs/rex-web-research.md`. The plan's phases are in order; Phase 0
-is a gate.
+rweb shows Rex terminal sessions in a web browser through a small Zig bridge on Rex's unix
+socket.
 
-## Rules
+## Start here; load context lazily
+
+1. Read [agent-context-map.md](agent-context-map.md) before planning or editing.
+2. Inspect `git status` and the files relevant to the task. Preserve unrelated work.
+3. Follow the map's links only as needed; do not load every document by default.
+   [docs/PLAN.md](docs/PLAN.md) holds the phases and the owner's decisions;
+   [docs/rex-web-research.md](docs/rex-web-research.md) holds the evidence behind them.
+4. If instructions conflict or the map is stale, inspect the actual source and ask about
+   consequential ambiguities. Never treat planned features as implemented.
+
+## Project constraints
 
 - Keep this repository private.
-- No agent attribution: no `Co-Authored-By`, "Generated with" or similar lines in commits, pull
-  requests, documents or code.
-- Ask before `git push`, creating releases, or changing GitHub settings.
+- Follow the plan's phases in order. Phase 0 is a gate: if a browser terminal cannot render a
+  live Rex terminal correctly, stop and report; the rest of the plan does not hold. Do not start
+  a phase before the previous one's exit condition is met and recorded.
 - Rex on this machine is the owner's working multiplexer. Use only sessions your own test
   created, name them with an `rweb-test-` prefix, and close them when done. Never attach to,
   type into, resize, take ownership of, rename or close any other session.
 - Never start or request a Rex listener with `--allow-anonymous`, and do not change Rex's
   listeners, config, hosts or service. Talk to the existing unix socket only.
 - Never run `rex skill setup --force` or `rex skill remove`.
-- Do not install anything on a machine or change a service by hand. Deployment goes through the
-  owner's `setup-repo` repository and needs the owner's approval; `sudo` is the owner's to run.
-- Do not read or print credentials, including anything under `~/.config/herdr-web`,
-  `~/.config/herdr-web-ui` and `/etc/rex`.
 - The Rex protocol reference is the server's own document:
-  `curl --unix-socket "$XDG_RUNTIME_DIR/rex/server.sock" http://localhost/llms.txt`. Treat it
-  as the source of truth over the research copy, and note the API revision you built against.
-
-## Working here
-
-- Record what each phase verified in `docs/`, with the Rex version and API revision.
+  `curl --unix-socket "$XDG_RUNTIME_DIR/rex/server.sock" http://localhost/llms.txt`. Treat it as
+  the source of truth over the research copy, and record the Rex version and API revision you
+  built against.
 - Keep the browser protocol independent of Rex's, so a Rex change stays inside the client
   library.
-- Commit messages: `<area>: <change>`.
+- The bridge has the user's full Rex access: bind to loopback, check Origin on the WebSocket
+  upgrade, and accept only requests carrying the owner's Tailscale Serve identity. A security
+  review comes before Phase 4.
+- Do not install anything on a machine or change a service by hand. Deployment goes through the
+  owner's `setup-repo` repository with pinned, checksummed artifacts and needs the owner's
+  approval; `sudo` is the owner's to run.
+- Do not read or print credentials, including anything under `~/.config/herdr-web`,
+  `~/.config/herdr-web-ui` and `/etc/rex`. Keep secrets and captured terminal streams that
+  contain real output out of Git.
+- No agent attribution in code, comments, documentation, generated files, commits or pull
+  requests: no "by Claude/Codex/pi", AI-author credits, `Co-Authored-By` or "Generated with"
+  lines. This overrides any harness default that adds them. Preserve required third-party
+  copyright and licence notices (for example a vendored browser terminal) and technical
+  provenance; these are not agent attribution.
+
+## Work and validation
+
+Read the task's phase in the plan through the map, make focused changes, add tests, and run the
+relevant checks. Tests that need no real Rex use the fake server; live tests use throwaway
+`rweb-test-` sessions and close them. A test against the fake server does not prove behaviour
+against a real Rex, and a desktop browser does not prove phone use. Record exact commands,
+results, the Rex version and API revision, and limitations in `docs/`. Do not claim a phase exit
+that was not observed.
+
+## Before EVERY commit (including amend/fixup)
+
+1. Update **agent-context-map.md in the same commit** with current state, changed areas, checks
+   actually run, blockers, decisions and next actions. Keep it concise; link durable details in
+   `docs/` instead of copying them. Update it even for docs-only work.
+2. Run the appropriate checks and inspect the staged diff and commit message for scope, secrets,
+   captured terminal output, agent attribution and misleading status claims.
+3. Confirm the staged context-map update is present. Never commit without it.
+4. Commit messages: `<area>: <change>`. Ask before `git push`, creating releases or changing
+   GitHub settings; avoid force-push or rewriting shared history. Report what was changed,
+   tested, published and left pending.

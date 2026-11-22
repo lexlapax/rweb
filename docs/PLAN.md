@@ -1,6 +1,8 @@
 # rweb: high-level plan
 
-Written 2026-11-21. Background and evidence: [rex-web-research.md](rex-web-research.md).
+Written 2026-11-21; revised the same day after the design research in
+[design-research.md](design-research.md). Background and evidence:
+[rex-web-research.md](rex-web-research.md).
 
 ## Goal
 
@@ -13,24 +15,77 @@ network.
 | Decision | Choice |
 | --- | --- |
 | Shape | A bridge process that runs as the user next to Rex's unix socket, speaks Rex's protocol, and serves the page and its own WebSocket on loopback. Tailscale Serve goes in front, as Ovis is deployed today. |
-| Server language | Rust, one static binary per platform. |
+| Server language | Zig, one static binary per platform (changed from Rust on 2026-11-21; see below). |
 | First usable version | List sessions and their terminals; open one terminal full-screen; type, resize, reconnect; usable on a phone; create, rename and close sessions and terminals from the browser. |
 | Not in the first version | Drawing a Rex window's split layout. Forking Ovis. |
 | Repository | `lexlapax/rweb`, private. |
 
+## Decisions made after the design research (2026-11-21)
+
+| Decision | Choice |
+| --- | --- |
+| Bridge language | Zig instead of Rust. libghostty-vt is a Zig package, so the bridge imports it directly, with no bindings and one toolchain. Accepted costs: Zig is before 1.0 and its releases break code, it does not prevent use-after-free, and it has fewer libraries. |
+| Zig toolchain | Installed on every build machine (linux-box, gateway-box, desktop-mac) by the owner's `setup-repo` repository, pinned to the Zig version the chosen libghostty-vt release requires (`vt-1.0.1` needs 0.17.0; Ghostty's main branch needs 0.17.1). The build checks the Zig version and fails on a mismatch. |
+| Requests from the machine's own Tailscale address | Rejected by default. A per-machine setting accepts them on hosts where no other user logs in, such as linux-box. |
+| desktop-mac | Included. The bridge starts a personal Rex server when none is running, as an `ssh://` client does, and listens on loopback TCP because Tailscale.app cannot forward to a unix socket; the exposure to other local users is accepted and recorded. |
+
 ## Constraints
 
 - Single user, private tailnet, no public exposure, no vendor relay.
-- Rex is a preview. Pin the API revision the client speaks and re-test on each Rex update.
+- Rex is a preview. Pin the API revision the client speaks, accept older servers down to the
+  oldest revision in use (desktop-mac runs preview.21), and re-test on each Rex update. Rex
+  upgrades restart the Rex server; the bridge must survive the socket going away and coming back.
 - Rex trusts only the transport. Never start or ask for a Rex listener with `--allow-anonymous`.
   The bridge talks to the unix socket only.
-- The bridge has the user's full Rex access, so it must authenticate browsers itself: bind to
-  loopback, check Origin on the WebSocket upgrade, and accept only requests that arrive through
-  Tailscale Serve with the owner's identity.
+- The snapshot at the start of Rex's stream is Ghostty's binary format, versioned outside
+  libghostty's ABI promise. Pin the libghostty-vt version, check the snapshot header version and
+  fail explicitly on one the bridge does not know, never guess.
+- The bridge has the user's full Rex access, so it must authenticate browsers itself:
+  - Listen on a unix socket (mode 0600, directory 0700) that Tailscale Serve proxies to, and
+    accept only peers with uid 0 (tailscaled). On desktop-mac, where Tailscale.app cannot use a
+    unix socket, the bridge listens on loopback TCP instead.
+  - Require `Tailscale-User-Login` to equal the configured owner; reject any request carrying
+    `Tailscale-Funnel-Request`; reject requests whose `X-Forwarded-For` is one of the node's own
+    Tailscale addresses unless that machine's setting allows them; check `Origin` against
+    `X-Forwarded-Host` on the WebSocket upgrade. Funnel stays off for the port.
+  - Processes running as the owner's own user are not prevented; they can already use Rex's
+    socket directly.
+- The browser terminal must never send query replies back as input. Rex's server-side terminal
+  already answers programs' queries.
+- Zig is pinned to the version libghostty-vt requires, and moving to a newer libghostty-vt
+  moves the whole bridge to its Zig version in one change. Dependencies are pinned by hash in
+  `build.zig.zon` and kept few. Releases build in `ReleaseSafe`, so bounds and overflow checks
+  stay on; the code is written to keep ownership plain (one owner per allocation, arenas per
+  request or connection) because Zig does not check it.
 - Deployment is through the owner's `setup-repo` repository with pinned, checksummed artifacts.
   Nothing is installed on a machine by hand.
 - Development and tests use throwaway Rex sessions that the test created. Never attach to, send
   input to, resize or close a session the owner is using.
+
+## Architecture
+
+```text
+browser (xterm.js) --WSS--> Tailscale Serve --unix socket--> bridge --unix socket--> Rex
+                                                               |
+                                    one Rex client; per open terminal: one data stream
+                                    into a libghostty-vt mirror, fanned out to viewers
+```
+
+- The bridge holds one Rex control connection and, for each terminal at least one browser
+  shows, one data connection (Rex allows one per client per block).
+- It decodes the stream's snapshot into a libghostty-vt terminal, removes Rex's `rex1` messages,
+  and feeds the live output into that terminal. The mirror never answers queries.
+- A browser that opens a terminal gets a VT redraw from libghostty-vt's formatter, then the live
+  output. Reconnecting is the same: a fresh redraw, so the browser needs no byte-exact resume.
+- Each viewer has a bounded send queue. A viewer that falls behind has its queue dropped and gets
+  a fresh redraw; the bridge never buffers without limit. Rex bounds its own side and asks for a
+  new stream (status 1013), which the bridge handles by re-snapshotting.
+- The browser protocol is the bridge's own (session tree, open, output, input, resize, close,
+  lifecycle events), independent of Rex's.
+
+If Phase 0 shows the libghostty-vt mirror does not work, the fallback is one Rex client per
+browser view, painting from `terminal.format` in VT form; the architecture is then revised before
+Phase 1.
 
 ## Phases
 
@@ -41,40 +96,69 @@ phase before the previous one's exit condition is met.
 
 Question to answer: can a browser terminal show a live Rex terminal correctly?
 
+Throwaway Zig code under `spike/`, not built on later. It starts once `setup-repo` has installed
+the pinned Zig on linux-box.
+
 - Connect to `/api/control` on the unix socket, complete the hello, attach, create a throwaway
-  session, get a ticket with `data.connect`, open `/api/data`, and save the raw stream to a file.
-- Look at the opening snapshot. Try both ways of handling it:
-  1. skip to the first nonce-marked `resize` message, paint the screen from
-     `com.superlogical.terminal.format` in VT form, then pass live output through with Rex's
-     marked messages removed, into xterm.js;
-  2. feed the stream, snapshot included, to a libghostty build in the browser.
-- Check a shell prompt, a full-screen program (for example `vim` or `htop`), colours, resize,
-  and reconnect after a dropped connection.
+  `rweb-test-` session, get a ticket with `data.connect`, open `/api/data`, and save the raw
+  stream to a file. Record the snapshot header and version.
+- Try the routes in this order, stopping at the first that passes the checks:
+  1. **Bridge-side mirror:** decode the snapshot with libghostty-vt (Ghostty's `vt-1.0.1` tag as
+     a `build.zig.zon` dependency, pinned by hash), strip the `rex1` messages, feed live output,
+     and serve a formatter VT redraw plus live output to xterm.js.
+  2. **Format repaint:** skip the snapshot up to the first nonce-marked `resize`, paint from
+     `com.superlogical.terminal.format` in VT form with every `extra_*` option, then pass live
+     output through. Measure how often output arriving between the snapshot and the format reply
+     is drawn twice or lost.
+  3. **Browser-side decode:** `ghostty-vt-js`'s `restoreTerminal`, only if 1 and 2 fail.
+- Input: compare xterm.js encoding keys (sent with `terminal.write`, with handlers that swallow
+  query replies) with `disableStdin` plus `client.key` / `block.event`, which let Rex encode keys
+  for the program's keyboard mode. Pick one.
+- Checks: a shell prompt; a full-screen program (`vim` or `htop`); a program that enables the
+  Kitty keyboard protocol; the alternate screen; colours and the `theme` message; wide and
+  combining characters; paste (bracketed); mouse in a program that asks for it; resize; that no
+  query reply comes back as input; reconnect after a dropped browser connection; a Rex server
+  restart; and typing from a phone browser.
+- Zig groundwork: which WebSocket and HTTP code to use (Zig's `std.http` WebSocket, or
+  karlseguin's `websocket.zig` and `http.zig`, both on Zig 0.17.0; Rex works without
+  compression) and which I/O model (`std.Io` threaded or evented).
 
-Exit: a written result in `docs/` saying which way works, with the evidence, and the choice of
-browser terminal. If neither works, stop and report; the rest of the plan does not hold.
+Exit: a written result in `docs/` saying which route, input path, libraries and I/O model work,
+with the evidence and the Rex, Zig, libghostty-vt and browser terminal versions. If no route works, stop and report; the rest
+of the plan does not hold.
 
-### Phase 1: Rex client library (Rust)
+### Phase 1: Rex client library (Zig)
 
-- Control connection: hello and revision negotiation, requests and responses, events, resume.
+- Control connection: hello and revision negotiation (down to the oldest revision in use),
+  requests and responses, events, resume, reconnect after a Rex restart.
 - Data connection: ticket, handshake, byte counting, resume within the 60-second window,
-  parsing of Rex's marked messages (resize, theme, child exited).
+  re-snapshot on 1013, parsing of Rex's marked messages (resize, theme, child exited).
+- Terminal mirror: the libghostty-vt terminal per open block, touched by one thread only,
+  producing VT redraws.
 - Typed calls for the methods the first version needs: list and inspect sessions, windows and
   blocks; create, rename, close; terminal write, key, resize, format, process; block ownership.
-- A fake Rex server built from the protocol document, for tests that need no real Rex.
+- A fake Rex server built from the protocol document, with snapshots made by libghostty-vt's
+  encoder, for tests that need no real Rex.
+- Fuzz tests (`zig build test --fuzz`) for every parser that reads bytes from outside: the
+  control JSON, data handshake, `rex1` messages, and later the browser protocol and HTTP headers.
 
-Exit: tests pass against the fake server and against a live local Rex using throwaway sessions.
+Exit: tests pass against the fake server and against a live local Rex using throwaway sessions,
+on both Rex versions in use.
 
 ### Phase 2: bridge server
 
 - One binary: serves the embedded frontend, a small JSON API and one browser WebSocket.
-- Its own browser protocol, kept independent of Rex's so a Rex change stays inside the client
-  library: session tree, attach, output, input, resize, detach, lifecycle events.
-- Access control as in Constraints, plus an observe-only mode that cannot type or resize.
-- Sizing policy when several browsers view one terminal, and when the desktop app owns it.
-- Flow control so a slow phone cannot make the bridge buffer without limit.
+- The browser protocol and fan-out described under Architecture.
+- Access control as in Constraints, plus an observe-only mode that never writes, resizes or takes
+  ownership.
+- Sizing: a browser draws the terminal at Rex's size and scales or scrolls to fit. It changes the
+  size only when the user asks, by taking ownership and resizing; a desktop client that owns the
+  block keeps its size otherwise.
+- WebSocket ping both ways; the browser reconnects on its own.
 
-Exit: a terminal works end to end from a browser on the same machine.
+Exit: a terminal works end to end from a browser through Tailscale Serve on a test port, and the
+access checks (wrong user, forged headers on the socket, the node's own address, Funnel, wrong
+Origin, observe-only) are each shown to refuse.
 
 ### Phase 3: frontend
 
@@ -86,12 +170,18 @@ Exit: daily use from a phone and a laptop browser for a week without falling bac
 
 ### Phase 4: packaging and deployment
 
-- Release builds for Linux x64 and macOS ARM64 with checksums.
-- A `rweb` module in `setup-repo`: pinned version and checksum, a systemd user unit on Linux and a
-  LaunchAgent on macOS, loopback port, and the Tailscale Serve mapping as an operator step.
+- Security review of the bridge before any deployment.
+- Release builds for Linux x64 and macOS ARM64 (`ReleaseSafe`) with checksums, libghostty-vt
+  compiled in.
+- A `rweb` module in `setup-repo`: pinned version and checksum, a systemd user unit on Linux
+  (ordered after Rex's user server) and a LaunchAgent on macOS, the bridge's socket path, and the
+  Tailscale Serve mapping as an operator step on a port not already in use (443, 8443 and 9443
+  are taken).
+- On macOS the bridge starts a personal Rex server (with the bundled CLI, as an `ssh://` client
+  does) when none is running; it never changes Rex's listeners or config.
 - Start after login and reboot behaviour verified on linux-box, then gateway-box, then desktop-mac.
 
-Exit: all three machines serve rweb after a reboot, recorded in setup-repo.
+Exit: each machine in scope serves rweb after a reboot, recorded in setup-repo.
 
 ### Later, not planned in detail
 
@@ -104,14 +194,18 @@ Exit: all three machines serve rweb after a reboot, recorded in setup-repo.
 
 | Risk | What limits it |
 | --- | --- |
-| Rex's stream cannot be rendered in a browser | Phase 0 is first and is a stop condition. |
+| Rex's stream cannot be rendered in a browser | Phase 0 is first and is a stop condition, with three routes. |
 | Rex changes its API | Pinned revision; the server still accepts old ones; the fake server and live tests show breakage early. |
+| A Rex update changes the snapshot format | Pinned libghostty-vt; the bridge checks the snapshot version and refuses an unknown one; the format repaint route remains as a fallback. |
+| The browser sends query replies as input | Handlers that swallow queries, or input through `client.key`; a Phase 0 check. |
+| The bridge becomes a way into every terminal | Unix socket behind Serve, peer and identity checks, own-address and Funnel refusal, Origin check, no anonymous Rex listener, a security review before Phase 4. |
+| A Zig release breaks the bridge's code or its libraries | Zig pinned with libghostty-vt; upgrades are one deliberate change; few dependencies, pinned by hash. |
+| A memory-safety bug in the bridge | `ReleaseSafe` builds, plain ownership, fuzzed parsers, and the security review before Phase 4. |
 | Rex ships its own web client | The project is small by design; stop if that happens. |
-| The bridge becomes a way into every terminal | Loopback only, origin and identity checks, no anonymous Rex listener, a security review before Phase 4. |
 | Licence terms forbid third-party clients | None found; ask the vendor before any public release. |
 
 ## Open questions for the build
 
-- Which browser terminal (decided by Phase 0).
-- How Tailscale Serve identity reaches the bridge and how to verify it cannot be forged locally.
-- What the bridge does when the desktop app and a browser both want to own a terminal's size.
+- Which route and input path (decided by Phase 0).
+- Whether Serve's own-address identity, read from Tailscale's source, behaves as read (tested in
+  Phase 2).
