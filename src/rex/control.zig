@@ -21,7 +21,9 @@ pub const subprotocol = "rex.control.v1";
 pub const Options = struct {
     socket_path: []const u8,
     /// Newest and oldest API revision the client can use.
-    api_max: u32 = 18,
+    /// 19 adds `event_dropped` (an oversize event no longer closes the connection) and is
+    /// otherwise the same as 18 for every call this library makes.
+    api_max: u32 = 19,
     api_min: u32 = 18,
     client_name: []const u8 = "rweb",
     client_version: []const u8 = "0.0.0",
@@ -46,6 +48,9 @@ pub const Error = error{
 pub const Event = union(enum) {
     /// A server event: `seq` and the raw JSON of the whole `event` message.
     server: struct { seq: u64, json: []u8 },
+    /// Rex dropped an event that was too large for the connection (revision 19 and up; at 18
+    /// it would have closed the connection). State may have changed without a notice: re-read it.
+    dropped: struct { seq: u64 },
     /// A (re)connection finished its welcome. `resumed` false means a new client: nothing is
     /// attached, and any stream or ticket from before is gone.
     connected: struct { generation: u32, resumed: bool },
@@ -361,6 +366,17 @@ pub const Control = struct {
             } else gpa.free(copy); // a late answer to a call that timed out
         } else if (std.mem.eql(u8, ty.string, "event")) {
             const seq: u64 = if (o.get("seq")) |s| (if (s == .integer and s.integer >= 0) @intCast(s.integer) else 0) else 0;
+            const is_dropped = blk: {
+                const pl = o.get("payload") orelse break :blk false;
+                if (pl != .object) break :blk false;
+                const t = pl.object.get("type") orelse break :blk false;
+                break :blk t == .string and std.mem.eql(u8, t.string, "event_dropped");
+            };
+            if (is_dropped) {
+                c.mu.lockUncancelable(c.io);
+                defer c.mu.unlock(c.io);
+                return c.pushLocked(.{ .dropped = .{ .seq = seq } });
+            }
             const copy = try gpa.dupe(u8, text);
             errdefer gpa.free(copy);
             c.mu.lockUncancelable(c.io);
@@ -381,7 +397,7 @@ test "control: connects, negotiates and calls" {
     defer f.deinit();
     const c = try Control.open(testing.allocator, testing.io, .{ .socket_path = f.path });
     defer c.close();
-    try testing.expectEqual(@as(u32, 18), c.revision);
+    try testing.expectEqual(@as(u32, 18), c.revision); // the fake speaks 18
 
     var r = try c.call("session.create", "{\"label\":\"rweb-test-ctl\"}");
     defer r.deinit();
@@ -498,11 +514,41 @@ test "live: session.list and server.version on a real Rex (needs REX_SOCKET)" {
     if (sock.len == 0) return error.SkipZigTest;
     const c = try Control.open(testing.allocator, testing.io, .{ .socket_path = sock });
     defer c.close();
-    try testing.expectEqual(@as(u32, 18), c.revision);
+    try testing.expect(c.revision >= 18 and c.revision <= 19);
+    std.debug.print("\nlive: negotiated API revision {d}\n", .{c.revision});
     var l = try c.call("session.list", null);
     defer l.deinit();
     try testing.expect((try l.ok()).object.get("sessions") != null);
     var v = try c.call("server.version", null);
     defer v.deinit();
     _ = try v.ok();
+}
+
+test "control: a fake that speaks 19 is used at 19, and event_dropped is surfaced" {
+    const f = try fake.Fake.start(testing.allocator, testing.io);
+    defer f.deinit();
+    f.api_max = 19;
+    const c = try Control.open(testing.allocator, testing.io, .{ .socket_path = f.path });
+    defer c.close();
+    try testing.expectEqual(@as(u32, 19), c.revision);
+    var first = (try c.nextEvent(1000)).?; // connected
+    first.deinit(testing.allocator);
+    f.broadcastEvent("{\"type\":\"event_dropped\"}");
+    f.broadcastEvent("{\"type\":\"hosts_changed\"}");
+    const e1 = (try c.nextEvent(2000)).?;
+    defer e1.deinit(testing.allocator);
+    try testing.expect(e1 == .dropped);
+    const e2 = (try c.nextEvent(2000)).?;
+    defer e2.deinit(testing.allocator);
+    try testing.expect(e2 == .server);
+    try testing.expect(e2.server.seq > e1.dropped.seq);
+}
+
+test "control: an old server (18 only) still works with a client that asks 18 to 19" {
+    const f = try fake.Fake.start(testing.allocator, testing.io);
+    defer f.deinit();
+    f.api_max = 18;
+    const c = try Control.open(testing.allocator, testing.io, .{ .socket_path = f.path });
+    defer c.close();
+    try testing.expectEqual(@as(u32, 18), c.revision);
 }

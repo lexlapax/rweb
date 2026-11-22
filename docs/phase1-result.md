@@ -2,8 +2,11 @@
 
 Status: **exit condition met for the library** (2026-11-22). Built and tested against both Rex
 versions in use: desktop-mac `0.1.0-preview.21` (commit `202b1b3f`, revision 18) and linux-box
-`0.1.0-preview.22` (commit `a086db17`, revision 19). The library asks for revision 18 only
-(`api_min = api_max = 18`), which both accept; moving to 19 is a later decision. Plan: [PLAN.md](PLAN.md#phase-1-rex-client-library-zig).
+`0.1.0-preview.22` (commit `a086db17`, revision 19). The library asks for revisions 18 to 19
+(`api_min = 18`, `api_max = 19`); desktop-mac negotiates 18 and linux-box 19 (live test prints it).
+Revision 19 adds `event_dropped` (an oversize event no longer closes the connection), which
+`Control` surfaces as `Event.dropped`: the consumer must re-read state. Nothing else the
+library calls differs between the two. Plan: [PLAN.md](PLAN.md#phase-1-rex-client-library-zig).
 Where this and the code differ, the code wins.
 
 ## What exists (`src/rex/`)

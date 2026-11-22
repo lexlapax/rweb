@@ -110,14 +110,16 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       `mkdir -p .zig-cache/tmp`); 90 s smoke run clean. Not a campaign.
    9. DONE: live tests pass on desktop-mac (preview.21, rev 18) and linux-box (preview.22, rev 19),
       59/59 each; see docs/phase1-result.md.
-2. **Next: Phase 2 (bridge server)**, then 3 and 4. Revision 19 is open: the only
-   differences from 18 that matter are that an oversize event becomes an `event_dropped` event
-   instead of closing the connection, and a large request should be sent fragmented; new
-   method `focus_history.reverse` is unused. The real restart test is done on both machines.
+2. **Next: Phase 2 (bridge server)**, then 3 and 4. `Control` now asks for revisions 18 to 19 (desktop-mac gets 18, linux-box 19) and surfaces
+   `event_dropped` as `Event.dropped`: the bridge must re-read state on it (Phase 2). Large
+   requests should be sent fragmented at 19; ours are small. `focus_history.reverse` unused. The real restart test is done on both machines.
    Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
 ## Checks run for this update
 
+- 2026-11-22: revision 18 to 19 change: `zig build test` 55 pass + 7 skip; with `REX_SOCKET`
+  61 pass + 1 skip (restart test gated) on desktop-mac (negotiated 18) and on linux-box (negotiated
+  19, scratch copy removed). Both machines' `rex ls` show only the owner's session.
 - 2026-11-22, desktop-mac: restart test `manual` mode added (`REX_RESTART_CMD=manual`). Quitting and
   reopening Rex.app did **not** restart the server (pid 2209, started 2026-11-20, kept running):
   Rex.app is a client. `rex server stop` was denied by the permission classifier, so the desktop-mac

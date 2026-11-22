@@ -63,6 +63,7 @@ pub const Fake = struct {
     control_connections: u32 = 0,
     /// Live control connections, so a test can cut them.
     control_conns: std.ArrayList(*ws.Conn) = .empty,
+    event_seq: u64 = 0,
 
     /// Listen on a fresh socket under /tmp and start serving.
     pub fn start(gpa: Allocator, io: Io) !*Fake {
@@ -147,6 +148,17 @@ pub const Fake = struct {
             s.block.term = try newTerminal(f.gpa, f.io, cols, rows);
         }
         try f.listen();
+    }
+
+    /// Send an event with the given `payload` JSON to every control connection. Its `seq`
+    /// counts up across calls (the real server counts per connection).
+    pub fn broadcastEvent(f: *Fake, payload_json: []const u8) void {
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        f.event_seq += 1;
+        const text = std.fmt.allocPrint(f.gpa, "{{\"type\":\"event\",\"seq\":{d},\"payload\":{s}}}", .{ f.event_seq, payload_json }) catch return;
+        defer f.gpa.free(text);
+        for (f.control_conns.items) |cn| cn.writeFrame(.text, text) catch {};
     }
 
     /// Drop every control connection without a close frame; tokens stay valid.
