@@ -118,6 +118,11 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 
 ## Checks run for this update
 
+- 2026-11-22, desktop-mac: restart test `manual` mode added (`REX_RESTART_CMD=manual`). Quitting and
+  reopening Rex.app did **not** restart the server (pid 2209, started 2026-11-20, kept running):
+  Rex.app is a client. `rex server stop` was denied by the permission classifier, so the desktop-mac
+  restart test is **not done**. The test run was stopped and its `rweb-test-live-restart`
+  session killed with `rex session kill`; `rex ls` shows only `calm-isle`.
 - 2026-11-22, linux-box: owner-authorized real Rex restart through the library (live test in
   `mirror.zig`): recovery as designed, 60/60 pass; scratch copy removed; `rex ls` shows only
   `drifting-tundra` (restored with a new shell, as in Phase 0).

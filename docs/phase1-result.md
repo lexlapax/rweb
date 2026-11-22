@@ -61,8 +61,9 @@ Where this and the code differ, the code wins.
    connection reconnected as generation 2 with `resumed=false`; the session came back under
    the same ID; a re-attach and a new stream gave a live mirror with an empty screen (the old
    output gone); the same input queue typed into it again. The throwaway session was
-   destroyed. Confirms Phase 0 finding 11 through the library. Not run on desktop-mac, whose
-   Rex.app has no service to restart by command.
+   destroyed. Confirms Phase 0 finding 11 through the library. Not yet run on desktop-mac: quitting and
+   reopening Rex.app leaves the server running (it is a client), so the server itself has to be
+   stopped; `REX_RESTART_CMD=manual` makes the test wait for that.
 
 ## Limits of this evidence
 

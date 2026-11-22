@@ -576,27 +576,33 @@ test "live: recovery across a real Rex server restart (needs REX_SOCKET, REX_RES
 
     // Drain events, then restart the server.
     while (try ctl.nextEvent(50)) |e| e.deinit(a);
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(a);
-    var it = std.mem.tokenizeScalar(u8, cmd, ' ');
-    while (it.next()) |w| try argv.append(a, w);
-    std.debug.print("\nrestart: running `{s}`\n", .{cmd});
-    const res = try std.process.run(a, testing.io, .{ .argv = argv.items });
-    defer a.free(res.stdout);
-    defer a.free(res.stderr);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+    const manual = std.mem.eql(u8, cmd, "manual");
+    if (manual) {
+        std.debug.print("\nrestart: MANUAL: restart the Rex server now (waiting up to 5 minutes)\n", .{});
+    } else {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(a);
+        var it = std.mem.tokenizeScalar(u8, cmd, ' ');
+        while (it.next()) |w| try argv.append(a, w);
+        std.debug.print("\nrestart: running `{s}`\n", .{cmd});
+        const res = try std.process.run(a, testing.io, .{ .argv = argv.items });
+        defer a.free(res.stdout);
+        defer a.free(res.stderr);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, res.term);
+    }
 
     // The old stream must end with "restart needed", and the control connection must come
     // back as a NEW client.
     var tries: u32 = 0;
-    while (m1.endReason() == null and tries < 1000) : (tries += 1) try testing.io.sleep(.fromMilliseconds(10), .awake);
+    const wait_ticks: u32 = if (manual) 30_000 else 1000;
+    while (m1.endReason() == null and tries < wait_ticks) : (tries += 1) try testing.io.sleep(.fromMilliseconds(10), .awake);
     std.debug.print("restart: old stream ended: {?}\n", .{m1.endReason()});
     try testing.expectEqual(@as(?data.End, .restart_needed), m1.endReason());
 
     var generation: u32 = 1;
     var resumed = true;
     tries = 0;
-    while (generation == 1 and tries < 200) : (tries += 1) {
+    while (generation == 1 and tries < (if (manual) @as(u32, 3000) else 200)) : (tries += 1) {
         const e = (try ctl.nextEvent(100)) orelse continue;
         defer e.deinit(a);
         if (e == .connected) {
