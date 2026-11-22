@@ -82,10 +82,19 @@ browser (xterm.js) --WSS--> Tailscale Serve --unix socket--> bridge --unix socke
   new stream (status 1013), which the bridge handles by re-snapshotting.
 - The browser protocol is the bridge's own (session tree, open, output, input, resize, close,
   lifecycle events), independent of Rex's.
-
-If Phase 0 shows the libghostty-vt mirror does not work, the fallback is one Rex client per
-browser view, painting from `terminal.format` in VT form; the architecture is then revised before
-Phase 1.
+- Redraws (confirmed in Phase 0): RIS, then libghostty-vt's `TerminalFormatter` with every extra
+  and no trimming; while the alternate screen is up, the primary screen first. A new redraw goes
+  to every viewer after each Rex `resize`, since xterm.js and Ghostty reflow differently.
+- Input (confirmed in Phase 0) is a hybrid. Physical keys go to `client.key`, so Rex encodes them
+  for the program's keyboard mode. Mouse reports, pastes and composed text (input methods, phone
+  keyboards) come from xterm.js and go to `terminal.write`. Rex runs `terminal.write` calls
+  concurrently, so the bridge keeps one in flight per terminal and coalesces the rest. Keys and
+  text also need one order between them (Phase 0, finding 12): a `client.key` waits for the
+  write in flight, and while a soft keyboard is in use the browser sends Enter and Backspace
+  through xterm.js after the text before them. The browser swallows terminal queries, because
+  Rex's own terminal answers them.
+- Viewers are written to outside the mirror's lock, through their bounded queues, so a slow
+  viewer never stalls the others or the read from Rex.
 
 ## Phases
 
@@ -93,6 +102,10 @@ Each phase ends with something that runs and a short record of what was verified
 phase before the previous one's exit condition is met.
 
 ### Phase 0: spike (gate for everything else)
+
+**Done 2026-11-21; the gate passed.** Route 1 works with xterm.js 6.0.0 and hybrid input; routes
+2 and 3 were not needed. Evidence and findings: [phase0-result.md](phase0-result.md). A Rex
+server restart and typing from a real phone were checked on 2026-11-22 with the owner's approval.
 
 Question to answer: can a browser terminal show a live Rex terminal correctly?
 
@@ -124,8 +137,8 @@ the pinned Zig on linux-box.
   compression) and which I/O model (`std.Io` threaded or evented).
 
 Exit: a written result in `docs/` saying which route, input path, libraries and I/O model work,
-with the evidence and the Rex, Zig, libghostty-vt and browser terminal versions. If no route works, stop and report; the rest
-of the plan does not hold.
+with the evidence and the Rex, Zig, libghostty-vt and browser terminal versions. If no route
+works, stop and report; the rest of the plan does not hold.
 
 ### Phase 1: Rex client library (Zig)
 
@@ -134,7 +147,20 @@ of the plan does not hold.
 - Data connection: ticket, handshake, byte counting, resume within the 60-second window,
   re-snapshot on 1013, parsing of Rex's marked messages (resize, theme, child exited).
 - Terminal mirror: the libghostty-vt terminal per open block, touched by one thread only,
-  producing VT redraws.
+  producing VT redraws by the rules under Architecture. Ghostty is built in the same optimize
+  mode as the bridge (Phase 0: a Debug Ghostty was about 400 times slower).
+- Input: one ordered queue per terminal. One `terminal.write` in flight, the rest coalesced; a
+  `client.key` or `block.event` waits until the write before it has answered.
+- Ownership: check what `session.own_block` changes against `block_owner_changed` and the
+  `owner` field of `resize` (Phase 0 saw `owner: null` after a take).
+- Recovery from a Rex server restart, as Phase 0 saw it (finding 11): the control connection
+  ends without a close frame, data gets 1001 `data provider canceled`, the old tokens give a new
+  client and a refused resume, and sessions and blocks keep their IDs but come back with new
+  programs and empty screens. Reconnect, re-attach, get new tickets, replace each mirror with
+  the new snapshot and redraw viewers. Test it against the fake server; re-test for real only
+  with the owner's approval.
+- Test hygiene: every live test names its sessions `rweb-test-`, closes them even when it fails,
+  and passes `-s` and `-b` to any `rex` CLI call.
 - Typed calls for the methods the first version needs: list and inspect sessions, windows and
   blocks; create, rename, close; terminal write, key, resize, format, process; block ownership.
 - A fake Rex server built from the protocol document, with snapshots made by libghostty-vt's
@@ -155,15 +181,23 @@ on both Rex versions in use.
   size only when the user asks, by taking ownership and resizing; a desktop client that owns the
   block keeps its size otherwise.
 - WebSocket ping both ways; the browser reconnects on its own.
+- The frontend embeds xterm.js with its licence; nothing loads from a CDN.
+- A join sends a capped amount of scrollback (Phase 0: a full-scrollback redraw was 774 KB),
+  with more on request.
 
-Exit: a terminal works end to end from a browser through Tailscale Serve on a test port, and the
-access checks (wrong user, forged headers on the socket, the node's own address, Funnel, wrong
-Origin, observe-only) are each shown to refuse.
+Exit: a terminal works end to end from a browser through Tailscale Serve on a test port,
+including typing from a real phone, and the access checks (wrong user, forged headers on the
+socket, the node's own address, Funnel, wrong Origin, observe-only) are each shown to refuse.
 
 ### Phase 3: frontend
 
 - Session and terminal list with live updates; one terminal full-screen; reconnect with state
   kept; touch keyboard helpers (Esc, Ctrl, Tab, arrows), paste, font size.
+- Copying on a phone: xterm.js has no touch selection (Phase 0, finding 13), so a select mode
+  shows the screen and scrollback as plain text for the phone's own selection handles.
+- Soft-keyboard input: Enter and Backspace through xterm.js while a soft keyboard is in use, and
+  no stray DEL after Enter (Phase 0, finding 12), tested on a real phone in a shell and in an
+  editor.
 - Create, rename and close sessions and terminals, with a confirmation before closing.
 
 Exit: daily use from a phone and a laptop browser for a week without falling back to SSH.
@@ -172,7 +206,8 @@ Exit: daily use from a phone and a laptop browser for a week without falling bac
 
 - Security review of the bridge before any deployment.
 - Release builds for Linux x64 and macOS ARM64 (`ReleaseSafe`) with checksums, libghostty-vt
-  compiled in.
+  compiled in. libghostty-vt compiles C++ (simdutf, highway) and links `libc++`, so a static Linux
+  binary needs libc++ linked statically (likely a musl target); check before packaging.
 - A `rweb` module in `setup-repo`: pinned version and checksum, a systemd user unit on Linux
   (ordered after Rex's user server) and a LaunchAgent on macOS, the bridge's socket path, and the
   Tailscale Serve mapping as an operator step on a port not already in use (443, 8443 and 9443
@@ -194,10 +229,10 @@ Exit: each machine in scope serves rweb after a reboot, recorded in setup-repo.
 
 | Risk | What limits it |
 | --- | --- |
-| Rex's stream cannot be rendered in a browser | Phase 0 is first and is a stop condition, with three routes. |
+| Rex's stream cannot be rendered in a browser | Retired: Phase 0 showed it rendered correctly through the bridge-side mirror. |
 | Rex changes its API | Pinned revision; the server still accepts old ones; the fake server and live tests show breakage early. |
 | A Rex update changes the snapshot format | Pinned libghostty-vt; the bridge checks the snapshot version and refuses an unknown one; the format repaint route remains as a fallback. |
-| The browser sends query replies as input | Handlers that swallow queries, or input through `client.key`; a Phase 0 check. |
+| The browser sends query replies as input | Handlers that swallow queries; Phase 0 showed they are needed and that they work. |
 | The bridge becomes a way into every terminal | Unix socket behind Serve, peer and identity checks, own-address and Funnel refusal, Origin check, no anonymous Rex listener, a security review before Phase 4. |
 | A Zig release breaks the bridge's code or its libraries | Zig pinned with libghostty-vt; upgrades are one deliberate change; few dependencies, pinned by hash. |
 | A memory-safety bug in the bridge | `ReleaseSafe` builds, plain ownership, fuzzed parsers, and the security review before Phase 4. |
@@ -206,6 +241,7 @@ Exit: each machine in scope serves rweb after a reboot, recorded in setup-repo.
 
 ## Open questions for the build
 
-- Which route and input path (decided by Phase 0).
 - Whether Serve's own-address identity, read from Tailscale's source, behaves as read (tested in
   Phase 2).
+- How much scrollback a join sends by default (Phase 2).
+- How to stop xterm.js sending a DEL after Enter on Gboard (Phase 0, finding 12; Phase 3).

@@ -9,7 +9,8 @@ socket.
 2. Inspect `git status` and the files relevant to the task. Preserve unrelated work.
 3. Follow the map's links only as needed; do not load every document by default.
    [docs/PLAN.md](docs/PLAN.md) holds the phases and the owner's decisions;
-   [docs/rex-web-research.md](docs/rex-web-research.md) holds the evidence behind them.
+   [docs/rex-web-research.md](docs/rex-web-research.md) and
+   [docs/design-research.md](docs/design-research.md) hold the evidence behind them.
 4. If instructions conflict or the map is stale, inspect the actual source and ask about
    consequential ambiguities. Never treat planned features as implemented.
 
@@ -23,7 +24,9 @@ socket.
   created, name them with an `rweb-test-` prefix, and close them when done. Never attach to,
   type into, resize, take ownership of, rename or close any other session.
 - Never start or request a Rex listener with `--allow-anonymous`, and do not change Rex's
-  listeners, config, hosts or service. Talk to the existing unix socket only.
+  listeners, config, hosts or service. Talk to the existing unix socket only. Restart the Rex
+  server only with the owner's approval for that restart: it ends every program in every
+  session.
 - Never run `rex skill setup --force` or `rex skill remove`.
 - The Rex protocol reference is the server's own document:
   `curl --unix-socket "$XDG_RUNTIME_DIR/rex/server.sock" http://localhost/llms.txt`. Treat it as
@@ -31,9 +34,11 @@ socket.
   built against.
 - Keep the browser protocol independent of Rex's, so a Rex change stays inside the client
   library.
-- The bridge has the user's full Rex access: bind to loopback, check Origin on the WebSocket
-  upgrade, and accept only requests carrying the owner's Tailscale Serve identity. A security
-  review comes before Phase 4.
+- The bridge has the user's full Rex access: it listens only where the plan says (a 0600 unix
+  socket behind Tailscale Serve, loopback TCP on desktop-mac), checks Origin on the WebSocket
+  upgrade, and accepts only requests carrying the owner's Tailscale Serve identity, as the plan's
+  Constraints spell out. A security review comes before Phase 4.
+- Any spike or test server you run listens on 127.0.0.1 only and requires a random token.
 - Do not install anything on a machine or change a service by hand. Deployment goes through the
   owner's `setup-repo` repository with pinned, checksummed artifacts and needs the owner's
   approval; `sudo` is the owner's to run.
@@ -49,11 +54,12 @@ socket.
 ## Work and validation
 
 Read the task's phase in the plan through the map, make focused changes, add tests, and run the
-relevant checks. Tests that need no real Rex use the fake server; live tests use throwaway
-`rweb-test-` sessions and close them. A test against the fake server does not prove behaviour
-against a real Rex, and a desktop browser does not prove phone use. Record exact commands,
-results, the Rex version and API revision, and limitations in `docs/`. Do not claim a phase exit
-that was not observed.
+relevant checks. Build with Ghostty in the same optimize mode as the bridge, and measure
+performance only in `ReleaseSafe` or faster. Tests that need no real Rex use the fake server;
+live tests use throwaway `rweb-test-` sessions and close them. A test against the fake server
+does not prove behaviour against a real Rex, and a desktop browser does not prove phone use.
+Record exact commands, results, the Rex version and API revision, and limitations in `docs/`.
+Do not claim a phase exit that was not observed.
 
 ## Before EVERY commit (including amend/fixup)
 

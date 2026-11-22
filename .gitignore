@@ -3,3 +3,7 @@ node_modules/
 dist/
 *.log
 .env
+.zig-cache/
+zig-out/
+zig-pkg/
+__pycache__/
