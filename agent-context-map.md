@@ -5,7 +5,7 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
 
-Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 3 done. The owner's grant for
+Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 4 done. The owner's grant for
 desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
 
 desktop-mac facts checked 2026-11-22: Zig 0.17.1 (`/opt/homebrew/bin/zig`); Rex.app
@@ -83,7 +83,13 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       and re-read state. Not yet: our own 120 s ping, `seq`/response ordering helper for
       combining views with events (needs the real `session.attach` view, in step 7), a
       `session.bootstrap` helper.
-   4. Data connection: tickets, HELLO/RESUME, byte counting, 1013, `rex1` messages.
+   4. DONE: `src/rex/data.zig` (ticket via `data.connect`, HELLO, WELCOME, byte counting after
+      the sink has the bytes, RESUME with the exact count and backoff within the server's
+      window, `End` reasons: `block_closed` 4000, `restart_needed` for 1013/1001 canceled/
+      refused resume/window passed, `failed`) and `src/rex/rex1.zig` (pure splitter of program
+      output and `resize`/`theme`/`child_exited`, nonce-checked, split-safe, fuzz test). Fake
+      gained `endStreams`. Not yet: the snapshot is not interpreted here (the mirror, step 5,
+      does it); our own pings.
    5. The mirror, one per open terminal, using the redraw rules.
    6. One ordered input queue per terminal (finding 12).
    7. Typed calls, and the ownership question (finding 7).
@@ -93,6 +99,10 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 
 ## Checks run for this update
 
+- 2026-11-22, desktop-mac: data and `rex1` added; `zig build test` 38 pass + 2 skip, six runs and
+  `ReleaseSafe`, stable and leak-free; with `REX_SOCKET`: 41/41, including a live test that
+  streams a throwaway `rweb-test-live-data` shell on preview.21, types `echo` and reads it back;
+  the session was destroyed (`rex ls` shows only `calm-isle`).
 - 2026-11-22, desktop-mac: control client added; `zig build test` 22 pass + 1 skip, eight runs
   plus once in `ReleaseSafe`, stable and leak-free; with `REX_SOCKET`: 24/24 including live
   `session.list` and `server.version` on preview.21 (no sessions created).

@@ -4,9 +4,13 @@
 pub const ws = @import("ws.zig");
 pub const fake = @import("fake.zig");
 pub const control = @import("control.zig");
+pub const rex1 = @import("rex1.zig");
+pub const data = @import("data.zig");
 
 test {
     _ = ws;
     _ = fake;
     _ = control;
+    _ = rex1;
+    _ = data;
 }

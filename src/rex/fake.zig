@@ -23,6 +23,8 @@ const Stream = struct {
     /// Set when a connection is currently serving this stream.
     attached: bool = false,
     dead: bool = false,
+    /// When set, the serving connection sends this close frame and the stream is gone.
+    end: ?struct { code: u16, reason: []const u8 } = null,
 };
 
 const Block = struct {
@@ -159,6 +161,16 @@ pub const Fake = struct {
         f.mu.lockUncancelable(f.io);
         defer f.mu.unlock(f.io);
         for (f.streams.items) |st| st.dead = true;
+    }
+
+    /// End a block's streams with a WebSocket close frame (4000 `block closed`, 1013
+    /// `data reconnect required`, 1001 `data provider canceled`, ...). They cannot be resumed.
+    pub fn endStreams(f: *Fake, block_id: []const u8, code: u16, reason: []const u8) void {
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        for (f.streams.items) |st| if (std.mem.eql(u8, st.block_id, block_id)) {
+            st.end = .{ .code = code, .reason = reason };
+        };
     }
 
     /// Program output for a block: applied to its terminal and appended to its streams.
@@ -477,6 +489,7 @@ pub const Fake = struct {
                     if (std.mem.eql(u8, &st.token, hs.data[1..17])) found = st;
                 };
                 stream = found orelse return reject(c, 0x01);
+                if (stream.end != null) return reject(c, 0x03);
                 const count = std.mem.readInt(u64, hs.data[17..25], .little);
                 if (count > stream.bytes.items.len) return reject(c, 0x05);
                 sent = @intCast(count);
@@ -497,15 +510,24 @@ pub const Fake = struct {
         while (true) {
             var n: usize = 0;
             var dead = false;
+            var end: ?@TypeOf(stream.end) = null;
             {
                 f.mu.lockUncancelable(f.io);
                 defer f.mu.unlock(f.io);
                 dead = stream.dead;
+                if (stream.end != null) end = stream.end;
                 if (!dead and stream.bytes.items.len > sent) {
                     n = @min(chunk.len, stream.bytes.items.len - sent);
                     @memcpy(chunk[0..n], stream.bytes.items[sent .. sent + n]);
                 }
             }
+            if (end) |e| if (e) |x| {
+                closeWith(c, x.code, x.reason);
+                f.mu.lockUncancelable(f.io);
+                defer f.mu.unlock(f.io);
+                stream.dead = true;
+                return;
+            };
             if (dead) return; // dropped without a close frame
             if (n == 0) {
                 try f.io.sleep(.fromMilliseconds(2), .awake);
