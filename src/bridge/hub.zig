@@ -145,6 +145,12 @@ pub const Viewer = struct {
         v.live_bytes = 0;
     }
 
+    pub fn isClosed(v: *Viewer) bool {
+        v.mu.lockUncancelable(v.hub.io);
+        defer v.mu.unlock(v.hub.io);
+        return v.closed;
+    }
+
     pub fn requestRedraw(v: *Viewer) void {
         v.mu.lockUncancelable(v.hub.io);
         defer v.mu.unlock(v.hub.io);
@@ -691,6 +697,14 @@ pub const Hub = struct {
     }
 
     // ---- the tree ----
+
+    /// A copy of the current tree JSON, or null before the first read. Caller frees.
+    pub fn treeJson(h: *Hub) ?[]u8 {
+        h.mu.lockUncancelable(h.io);
+        defer h.mu.unlock(h.io);
+        const t = h.tree_json orelse return null;
+        return h.gpa.dupe(u8, t) catch null;
+    }
 
     pub fn markTreeDirty(h: *Hub) void {
         h.mu.lockUncancelable(h.io);

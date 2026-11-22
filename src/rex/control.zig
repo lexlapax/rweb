@@ -249,11 +249,15 @@ pub const Control = struct {
         c.mu.unlock(c.io);
         var writing = true;
         defer if (writing) c.releaseWriter();
-        errdefer self_remove: {
+        // Whatever way this returns: forget the call, and free a response that arrived after
+        // we stopped waiting (the dispatcher writes `pend.text` under `mu`).
+        defer {
             c.mu.lockUncancelable(c.io);
-            defer c.mu.unlock(c.io);
             _ = c.pending.remove(id);
-            break :self_remove;
+            const leftover = pend.text;
+            pend.text = null;
+            c.mu.unlock(c.io);
+            if (leftover) |t| gpa.free(t);
         }
 
         const id_json = try std.json.Stringify.valueAlloc(gpa, id, .{});
@@ -279,8 +283,10 @@ pub const Control = struct {
         };
         c.mu.lockUncancelable(c.io);
         _ = c.pending.remove(id);
+        const taken = pend.text;
+        pend.text = null;
         c.mu.unlock(c.io);
-        const text = pend.text orelse return error.ConnectionLost;
+        const text = taken orelse return error.ConnectionLost;
         defer gpa.free(text);
 
         var parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});

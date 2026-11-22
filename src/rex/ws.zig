@@ -125,6 +125,11 @@ pub const Conn = struct {
     stream: Io.net.Stream,
     reader: Io.net.Stream.Reader,
     writer: Io.net.Stream.Writer,
+    /// What frames are read from and written to: the fields above, or an HTTP server's.
+    r: *Io.Reader = undefined,
+    w: *Io.Writer = undefined,
+    /// False when the stream belongs to someone else (an HTTP server connection).
+    owns_stream: bool = true,
     write_mutex: Io.Mutex = .init,
     /// True for the connecting side, which must mask its frames.
     is_client: bool = true,
@@ -143,8 +148,10 @@ pub const Conn = struct {
         c.* = .{ .io = io, .stream = stream, .reader = undefined, .writer = undefined, .is_client = false };
         c.reader = stream.reader(io, &c.read_buf);
         c.writer = stream.writer(io, &c.write_buf);
-        const r = &c.reader.interface;
-        const w = &c.writer.interface;
+        c.r = &c.reader.interface;
+        c.w = &c.writer.interface;
+        const r = c.r;
+        const w = c.w;
 
         const req_line = try r.takeDelimiterInclusive('\n');
         if (!std.mem.startsWith(u8, req_line, "GET ")) return error.BadRequest;
@@ -197,6 +204,20 @@ pub const Conn = struct {
     ) !*Conn {
         const addr = try Io.net.UnixAddress.init(socket_path);
         const stream = try addr.connect(io);
+        return connectStream(gpa, io, stream, path, subprotocol, "");
+    }
+
+    /// Upgrade `path` to a WebSocket on an already connected `stream`. `extra_headers` is
+    /// header lines, each ending in CRLF (for tests that send an Origin, say). Closes the
+    /// stream on failure.
+    pub fn connectStream(
+        gpa: Allocator,
+        io: Io,
+        stream: Io.net.Stream,
+        path: []const u8,
+        subprotocol: ?[]const u8,
+        extra_headers: []const u8,
+    ) !*Conn {
         errdefer stream.close(io);
 
         const c = try gpa.create(Conn);
@@ -204,23 +225,27 @@ pub const Conn = struct {
         c.* = .{ .io = io, .stream = stream, .reader = undefined, .writer = undefined };
         c.reader = stream.reader(io, &c.read_buf);
         c.writer = stream.writer(io, &c.write_buf);
+        c.r = &c.reader.interface;
+        c.w = &c.writer.interface;
 
         var key_raw: [16]u8 = undefined;
         io.random(&key_raw);
         var key: [24]u8 = undefined;
         _ = std.base64.standard.Encoder.encode(&key, &key_raw);
 
-        const w = &c.writer.interface;
+        const w = c.w;
         try w.print(
             "GET {s} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n" ++
-                "Connection: Upgrade\r\nSec-WebSocket-Key: {s}\r\n" ++
-                "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {s}\r\n\r\n",
-            .{ path, &key, subprotocol },
+                "Connection: Upgrade\r\nSec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n",
+            .{ path, &key },
         );
+        if (subprotocol) |sp| try w.print("Sec-WebSocket-Protocol: {s}\r\n", .{sp});
+        try w.writeAll(extra_headers);
+        try w.writeAll("\r\n");
         try w.flush();
 
         const expected = acceptKey(&key);
-        const r = &c.reader.interface;
+        const r = c.r;
         const status = try r.takeDelimiterInclusive('\n');
         if (std.mem.indexOf(u8, status, " 101 ") == null) return error.UpgradeRefused;
         var accepted = false;
@@ -237,8 +262,26 @@ pub const Conn = struct {
         return c;
     }
 
+    /// Server side, on a connection an HTTP server already upgraded: frames go over `r` and
+    /// `w`; the stream stays the caller's. `max_message` bounds what a peer can make us buffer.
+    pub fn fromHttp(gpa: Allocator, io: Io, stream: Io.net.Stream, r: *Io.Reader, w: *Io.Writer, max_message: u64) !*Conn {
+        const c = try gpa.create(Conn);
+        c.* = .{
+            .io = io,
+            .stream = stream,
+            .reader = undefined,
+            .writer = undefined,
+            .r = r,
+            .w = w,
+            .owns_stream = false,
+            .is_client = false,
+            .max_message = max_message,
+        };
+        return c;
+    }
+
     pub fn deinit(c: *Conn, gpa: Allocator) void {
-        c.stream.close(c.io);
+        if (c.owns_stream) c.stream.close(c.io);
         gpa.destroy(c);
     }
 
@@ -247,7 +290,7 @@ pub const Conn = struct {
         c.write_mutex.lockUncancelable(c.io);
         defer c.write_mutex.unlock(c.io);
 
-        const w = &c.writer.interface;
+        const w = c.w;
         var mask: [4]u8 = .{ 0, 0, 0, 0 };
         if (c.is_client) c.io.random(&mask);
         var hdr: [14]u8 = undefined;
@@ -272,7 +315,7 @@ pub const Conn = struct {
 
     /// Read one complete message, answering pings. Close frames are returned.
     pub fn readMessage(c: *Conn, gpa: Allocator) !Message {
-        const r = &c.reader.interface;
+        const r = c.r;
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(gpa);
         var msg_op: ?Opcode = null;

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>rweb</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header id="bar">
+  <button id="menu" aria-label="Sessions">&#9776;</button>
+  <span id="title">rweb</span>
+  <span id="status" class="dim">connecting</span>
+  <span class="spacer"></span>
+  <button id="ro" title="Read-only: the page will not type, resize or change anything">read-only</button>
+  <button id="history" title="Load the rest of the scrollback" disabled>more history</button>
+  <button id="fit" title="Resize the terminal to this window (changes it for everyone viewing it)" disabled>fit window</button>
+</header>
+<main>
+  <nav id="list" class="open">
+    <div class="row">
+      <button id="new-session">new session</button>
+    </div>
+    <div id="tree"></div>
+  </nav>
+  <section id="view">
+    <div id="empty" class="dim">Pick a terminal from the list.</div>
+    <div id="stage" hidden><div id="term"></div></div>
+    <div id="keys" hidden>
+      <button data-k="escape">Esc</button>
+      <button data-k="tab">Tab</button>
+      <button id="ctrl" data-mod="ctrl">Ctrl</button>
+      <button data-k="arrow_up">&uarr;</button>
+      <button data-k="arrow_down">&darr;</button>
+      <button data-k="arrow_left">&larr;</button>
+      <button data-k="arrow_right">&rarr;</button>
+    </div>
+  </section>
+</main>
+<div id="notice" hidden></div>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

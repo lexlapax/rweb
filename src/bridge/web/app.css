@@ -1,0 +1,33 @@
+:root { color-scheme: dark; --bg: #111418; --fg: #d7dae0; --dim: #8b93a1; --line: #2a2f38; --accent: #5aa2ff; --warn: #e5a50a; }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
+body { display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+button { font: inherit; color: var(--fg); background: #1c2128; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; min-height: 40px; }
+button:disabled { opacity: .4; }
+button.on { background: var(--warn); color: #000; border-color: var(--warn); }
+.dim { color: var(--dim); }
+#bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); flex: none; }
+#bar .spacer { flex: 1; }
+#title { font-weight: 600; }
+main { flex: 1; display: flex; min-height: 0; }
+#list { flex: none; width: 280px; overflow: auto; border-right: 1px solid var(--line); padding: 8px; }
+#list:not(.open) { display: none; }
+#list .row { display: flex; gap: 6px; margin-bottom: 8px; }
+.session { margin-bottom: 10px; }
+.session > .name { display: flex; align-items: center; gap: 6px; font-weight: 600; padding: 4px 0; }
+.session > .name .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.block { display: flex; align-items: center; gap: 6px; padding: 2px 0 2px 12px; }
+.block .label { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; border: 0; padding: 8px 4px; }
+.block.current .label { color: var(--accent); }
+.small { padding: 4px 8px; min-height: 32px; }
+#view { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#empty { margin: auto; }
+#stage { flex: 1; min-height: 0; overflow: auto; background: #000; }
+#term { transform-origin: top left; width: max-content; }
+#keys { display: flex; gap: 6px; padding: 6px; border-top: 1px solid var(--line); flex: none; overflow-x: auto; }
+#keys button { flex: 1; min-width: 44px; }
+#notice { position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%); background: #2d3340; border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; max-width: 90vw; z-index: 10; }
+@media (max-width: 700px) {
+  #list { position: absolute; z-index: 5; top: 53px; bottom: 0; left: 0; width: 86vw; background: var(--bg); }
+  #title { display: none; }
+}
