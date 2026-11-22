@@ -33,6 +33,8 @@ pub const Sink = struct {
     ctx: *anyopaque,
     bytes: *const fn (ctx: *anyopaque, bytes: []const u8) void,
     ended: *const fn (ctx: *anyopaque, why: End) void,
+    /// Called once, after the first WELCOME and before any bytes, with the channel nonce.
+    welcome: ?*const fn (ctx: *anyopaque, nonce: u64) void = null,
 };
 
 pub const Data = struct {
@@ -77,6 +79,7 @@ pub const Data = struct {
         @memcpy(hello[1..], &ticket);
         try d.handshake(&hello);
         errdefer if (d.conn) |c| c.deinit(gpa);
+        if (sink.welcome) |f| f(sink.ctx, d.nonce);
         d.reader = try io.concurrent(readerMain, .{d});
         return d;
     }

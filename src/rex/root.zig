@@ -6,6 +6,7 @@ pub const fake = @import("fake.zig");
 pub const control = @import("control.zig");
 pub const rex1 = @import("rex1.zig");
 pub const data = @import("data.zig");
+pub const mirror = @import("mirror.zig");
 
 test {
     _ = ws;
@@ -13,4 +14,5 @@ test {
     _ = control;
     _ = rex1;
     _ = data;
+    _ = mirror;
 }

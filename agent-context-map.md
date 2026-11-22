@@ -5,7 +5,7 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
 
-Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 4 done. The owner's grant for
+Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 5 done. The owner's grant for
 desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
 
 desktop-mac facts checked 2026-11-22: Zig 0.17.1 (`/opt/homebrew/bin/zig`); Rex.app
@@ -90,7 +90,14 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       output and `resize`/`theme`/`child_exited`, nonce-checked, split-safe, fuzz test). Fake
       gained `endStreams`. Not yet: the snapshot is not interpreted here (the mirror, step 5,
       does it); our own pings.
-   5. The mirror, one per open terminal, using the redraw rules.
+   5. DONE: `src/rex/mirror.zig`: one libghostty-vt terminal per stream behind one mutex;
+      decodes the snapshot (accumulates and retries, as the spike did), splits `rex1` messages
+      (resize applies to the terminal; theme, owner and exit are kept), observer callbacks,
+      `redraw` by the Phase 0 rules (RIS, `TerminalFormatter` all extras `trim=false`, primary
+      screen first while the alternate screen is up), `plainText`. `Data` now calls
+      `Sink.welcome(nonce)` so `Mirror.initPending` + `sink()` just works. Not yet: a redraw
+      after every Rex resize is the consumer's job (the `resized` observer says when); snapshot
+      decode retries on every chunk (quadratic for a huge snapshot; fine so far).
    6. One ordered input queue per terminal (finding 12).
    7. Typed calls, and the ownership question (finding 7).
    8. Fuzz tests for every parser of outside bytes.
@@ -99,6 +106,11 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 
 ## Checks run for this update
 
+- 2026-11-22, desktop-mac: mirror added; `zig build test` 45 pass + 3 skip, five runs and
+  `ReleaseSafe`, stable and leak-free; with `REX_SOCKET`: 49/49, including a live test that
+  compares the mirror's text with Rex's own `terminal.format` on a throwaway
+  `rweb-test-live-mirror` shell (colour, wide and combining characters) on preview.21; session
+  destroyed.
 - 2026-11-22, desktop-mac: data and `rex1` added; `zig build test` 38 pass + 2 skip, six runs and
   `ReleaseSafe`, stable and leak-free; with `REX_SOCKET`: 41/41, including a live test that
   streams a throwaway `rweb-test-live-data` shell on preview.21, types `echo` and reads it back;
