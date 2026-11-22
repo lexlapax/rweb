@@ -5,7 +5,7 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
 
-Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 5 done. The owner's grant for
+Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 6 done. The owner's grant for
 desktop-mac and linux-box is in [AGENTS.md](AGENTS.md).
 
 desktop-mac facts checked 2026-11-22: Zig 0.17.1 (`/opt/homebrew/bin/zig`); Rex.app
@@ -98,7 +98,11 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       `Sink.welcome(nonce)` so `Mirror.initPending` + `sink()` just works. Not yet: a redraw
       after every Rex resize is the consumer's job (the `resized` observer says when); snapshot
       decode retries on every chunk (quadratic for a huge snapshot; fine so far).
-   6. One ordered input queue per terminal (finding 12).
+   6. DONE: `src/rex/input.zig`: one call in flight per terminal, in arrival order across text
+      (`terminal.write`), `client.key` and `block.event`; text queued behind a call is
+      coalesced; invalid UTF-8 refused, 1 MiB backlog cap (`Backpressure`); a failed call loses
+      that input only; input during a disconnect is dropped, not replayed. `Sender` abstracts
+      the call so tests can record. Not yet: a viewer-facing size limit on keys/events.
    7. Typed calls, and the ownership question (finding 7).
    8. Fuzz tests for every parser of outside bytes.
    9. Live tests in `rweb-test-` sessions on both Rex versions: desktop-mac and linux-box.
@@ -106,6 +110,10 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
 
 ## Checks run for this update
 
+- 2026-11-22, desktop-mac: input queue added; `zig build test` 49 pass + 5 skip, five runs and
+  `ReleaseSafe`, stable; with `REX_SOCKET`: 54/54, including a live test that submits ten
+  commands one character at a time to a throwaway `rweb-test-live-input` shell on preview.21
+  and sees all ten run correctly; session destroyed.
 - 2026-11-22, desktop-mac: mirror added; `zig build test` 45 pass + 3 skip, five runs and
   `ReleaseSafe`, stable and leak-free; with `REX_SOCKET`: 49/49, including a live test that
   compares the mirror's text with Rex's own `terminal.format` on a throwaway
