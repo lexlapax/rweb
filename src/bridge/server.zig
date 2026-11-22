@@ -47,6 +47,11 @@ pub const Server = struct {
     accept_task: ?Io.Future(void) = null,
     group: Io.Group = .init,
     active: std.atomic.Value(u32) = .init(0),
+    stopping: std.atomic.Value(bool) = .init(false),
+    /// Accepted streams, so `stop` can shut them (cancelling a task blocked in a read is not
+    /// reliable on its own).
+    conns_mu: Io.Mutex = .init,
+    conns: std.ArrayList(Io.net.Stream) = .empty,
     /// Requests refused by `access`, and the last reason, for tests and logs.
     refusals: std.atomic.Value(u32) = .init(0),
     last_refusal: std.atomic.Value(u8) = .init(255),
@@ -77,15 +82,38 @@ pub const Server = struct {
     }
 
     pub fn stop(s: *Server) void {
+        s.stopping.store(true, .release);
+        s.conns_mu.lockUncancelable(s.io);
+        for (s.conns.items) |c| c.shutdown(s.io, .both) catch {};
+        s.conns_mu.unlock(s.io);
+        s.wakeAccept();
         if (s.accept_task) |*t| t.cancel(s.io);
         s.group.cancel(s.io);
+        s.conns.deinit(s.gpa);
         s.listener.deinit(s.io);
         if (s.opts.listen == .unix) Io.Dir.deleteFileAbsolute(s.io, s.opts.listen.unix) catch {};
         s.gpa.destroy(s);
     }
 
+    /// Make a blocked `accept` return, by connecting to ourselves.
+    fn wakeAccept(s: *Server) void {
+        switch (s.opts.listen) {
+            .unix => |path| {
+                const addr = Io.net.UnixAddress.init(path) catch return;
+                const c = addr.connect(s.io) catch return;
+                c.close(s.io);
+            },
+            .tcp_loopback => {
+                var addr = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(s.port) };
+                const c = addr.connect(s.io, .{ .mode = .stream }) catch return;
+                c.close(s.io);
+            },
+        }
+    }
+
     fn acceptLoop(s: *Server) void {
         while (true) {
+            if (s.stopping.load(.acquire)) return;
             const conn = s.listener.accept(s.io) catch |e| switch (e) {
                 error.Canceled => return,
                 else => {
@@ -94,6 +122,10 @@ pub const Server = struct {
                     continue;
                 },
             };
+            if (s.stopping.load(.acquire)) {
+                conn.close(s.io);
+                return;
+            }
             if (s.active.load(.acquire) >= s.opts.max_connections) {
                 conn.close(s.io);
                 continue;
@@ -107,7 +139,16 @@ pub const Server = struct {
     }
 
     fn handleConn(s: *Server, conn: Io.net.Stream) void {
+        s.conns_mu.lockUncancelable(s.io);
+        s.conns.append(s.gpa, conn) catch {};
+        s.conns_mu.unlock(s.io);
         defer {
+            s.conns_mu.lockUncancelable(s.io);
+            for (s.conns.items, 0..) |c, i| if (c.socket.handle == conn.socket.handle) {
+                _ = s.conns.swapRemove(i);
+                break;
+            };
+            s.conns_mu.unlock(s.io);
             _ = s.active.fetchSub(1, .acq_rel);
             conn.close(s.io);
         }

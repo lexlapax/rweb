@@ -127,6 +127,9 @@ pub const Control = struct {
     pub fn close(c: *Control) void {
         c.mu.lockUncancelable(c.io);
         c.closing = true;
+        // Shut the socket so a reader blocked in a read returns at once (cancelling it is not
+        // reliable on its own).
+        if (c.conn) |cn| cn.stream.shutdown(c.io, .both) catch {};
         c.mu.unlock(c.io);
         if (c.reader) |*r| r.cancel(c.io);
         c.reader = null;

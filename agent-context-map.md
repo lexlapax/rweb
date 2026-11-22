@@ -123,13 +123,18 @@ read-only switch is on the page, off by default (a bridge-wide locked mode also 
 Done so far: `access.zig` (pure decisions, one test per refusal), `protocol.zig` (validated
 browser messages), `hub.zig` (terminals, viewers with bounded queues, fan-out, session tree,
 restart and 1013 recovery; tested against the fake). Mirror gained `redrawLocked` and capped
-history. Fixed a use-after-free in `Control.call` found by the restart test. Not yet: HTTP and
-WebSocket server, peer credentials, frontend and vendored xterm.js, `main`, live and access
-tests, the Serve test. Run tests with output to a file; piping `zig build test` into `head`
+history. Fixed a use-after-free in `Control.call` found by the restart test. Also done: `server.zig` (HTTP/WebSocket, access enforced first, unix 0600 + private dir, peer uid,
+loopback TCP, CSP), `assets.zig` + `web/` (page, vendored xterm.js 6.0.0 and fit addon 0.11.0),
+`cli.zig`, `main.zig` (`zig build run -- ...`). Closing now shuts sockets before cancelling
+tasks: cancelling a task blocked in a read deadlocked (seen in a sample). Not yet: live and
+browser checks, the Serve test, phase2 docs. Run tests with output to a file; piping `zig build test` into `head`
 can hang.
 
 ## Checks run for this update
 
+- 2026-11-22: bridge server tests (each access refusal over real HTTP, WebSocket end to end,
+  observe-only over the wire, unix socket 0600/0700 and peer refusal); `zig build test` 89 pass +
+  7 skip, six runs in a row.
 - 2026-11-22: `zig build test` 76 pass + 7 skip (rex 51, bridge 25 incl. 12 hub tests against
   the fake, fuzz 36 as ordinary tests).
 - 2026-11-22: revision 18 to 19 change: `zig build test` 55 pass + 7 skip; with `REX_SOCKET`

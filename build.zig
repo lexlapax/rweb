@@ -26,6 +26,12 @@ pub fn build(b: *std.Build) void {
     });
     bridge_mod.addImport("rex", rex);
     if (ghostty) |dep| bridge_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    const exe = b.addExecutable(.{ .name = "rweb", .root_module = bridge_mod });
+    b.installArtifact(exe);
+    const run_exe = b.addRunArtifact(exe);
+    run_exe.addPassthruArgs();
+    b.step("run", "Run the bridge").dependOn(&run_exe.step);
+
     const bridge_tests = b.addTest(.{ .root_module = bridge_mod, .filters = filters });
     const run_bridge_tests = b.addRunArtifact(bridge_tests);
     run_bridge_tests.has_side_effects = true;

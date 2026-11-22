@@ -63,6 +63,9 @@ pub const Fake = struct {
     control_connections: u32 = 0,
     /// Live control connections, so a test can cut them.
     control_conns: std.ArrayList(*ws.Conn) = .empty,
+    /// Every accepted stream (control and data), shut when the fake stops listening.
+    live_streams: std.ArrayList(Io.net.Stream) = .empty,
+    stopping: bool = false,
     event_seq: u64 = 0,
 
     /// Listen on a fresh socket under /tmp and start serving.
@@ -82,10 +85,21 @@ pub const Fake = struct {
         Io.Dir.deleteFileAbsolute(f.io, f.path) catch {}; // a stale socket file from before a restart
         const addr = try Io.net.UnixAddress.init(f.path);
         f.server = try addr.listen(f.io, .{});
+        f.mu.lockUncancelable(f.io);
+        f.stopping = false;
+        f.mu.unlock(f.io);
         f.accept_task = try f.io.concurrent(acceptLoop, .{f});
     }
 
     fn stopListening(f: *Fake) void {
+        f.mu.lockUncancelable(f.io);
+        f.stopping = true;
+        for (f.live_streams.items) |st| st.shutdown(f.io, .both) catch {};
+        f.mu.unlock(f.io);
+        // Wake a blocked accept by connecting to ourselves.
+        if (Io.net.UnixAddress.init(f.path)) |addr| {
+            if (addr.connect(f.io)) |c| c.close(f.io) else |_| {}
+        } else |_| {}
         if (f.accept_task) |*t| t.cancel(f.io);
         f.accept_task = null;
         f.group.cancel(f.io);
@@ -102,6 +116,7 @@ pub const Fake = struct {
         f.sessions.deinit(f.gpa);
         f.tickets.deinit(f.gpa);
         f.control_conns.deinit(f.gpa);
+        f.live_streams.deinit(f.gpa);
         f.streams.deinit(f.gpa);
         f.clients.deinit(f.gpa);
         f.gpa.free(f.path);
@@ -270,6 +285,10 @@ pub const Fake = struct {
 
     fn acceptLoop(f: *Fake) void {
         while (true) {
+            f.mu.lockUncancelable(f.io);
+            const stop = f.stopping;
+            f.mu.unlock(f.io);
+            if (stop) return;
             const stream = f.server.?.accept(f.io) catch |e| switch (e) {
                 error.Canceled => return,
                 else => {
@@ -277,32 +296,55 @@ pub const Fake = struct {
                     return;
                 },
             };
-            f.group.concurrent(f.io, handleConn, .{ f, stream }) catch stream.close(f.io);
+            f.mu.lockUncancelable(f.io);
+            f.live_streams.append(f.gpa, stream) catch {};
+            const stop2 = f.stopping;
+            f.mu.unlock(f.io);
+            if (stop2) {
+                f.unregisterStream(stream);
+                stream.close(f.io);
+                return;
+            }
+            f.group.concurrent(f.io, handleConn, .{ f, stream }) catch {
+                f.unregisterStream(stream);
+                stream.close(f.io);
+            };
         }
+    }
+
+    /// Take a stream off the list `stopListening` shuts. Always before it is closed: shutting a
+    /// closed descriptor is a bug (and a panic in debug builds).
+    fn unregisterStream(f: *Fake, stream: Io.net.Stream) void {
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        for (f.live_streams.items, 0..) |x, i| if (x.socket.handle == stream.socket.handle) {
+            _ = f.live_streams.swapRemove(i);
+            break;
+        };
     }
 
     fn handleConn(f: *Fake, stream: Io.net.Stream) void {
         const c = ws.Conn.accept(f.gpa, f.io, stream, &.{ control_subprotocol, data_subprotocol }) catch {
+            f.unregisterStream(stream);
             stream.close(f.io);
             return;
         };
-        defer c.deinit(f.gpa);
         if (std.mem.eql(u8, c.subprotocol, control_subprotocol)) {
             f.mu.lockUncancelable(f.io);
             f.control_conns.append(f.gpa, c) catch {};
             f.mu.unlock(f.io);
-            defer {
-                f.mu.lockUncancelable(f.io);
-                for (f.control_conns.items, 0..) |x, i| if (x == c) {
-                    _ = f.control_conns.swapRemove(i);
-                    break;
-                };
-                f.mu.unlock(f.io);
-            }
             f.control(c) catch |e| log.debug("control ended: {t}", .{e});
+            f.mu.lockUncancelable(f.io);
+            for (f.control_conns.items, 0..) |x, k| if (x == c) {
+                _ = f.control_conns.swapRemove(k);
+                break;
+            };
+            f.mu.unlock(f.io);
         } else {
             f.dataConn(c) catch |e| log.debug("data ended: {t}", .{e});
         }
+        f.unregisterStream(stream);
+        c.deinit(f.gpa);
     }
 
     fn closeWith(c: *ws.Conn, code: u16, reason: []const u8) void {

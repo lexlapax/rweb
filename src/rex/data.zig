@@ -56,6 +56,8 @@ pub const Data = struct {
     /// How long the server keeps the stream for a resume.
     resume_window_ms: u32,
     conn: ?*ws.Conn,
+    /// Guards `conn`, which the reader replaces when it resumes.
+    conn_mu: Io.Mutex = .init,
     closing: std.atomic.Value(bool) = .init(false),
     reader: ?Io.Future(void) = null,
     /// The last close status seen, for tests and logs.
@@ -109,7 +111,11 @@ pub const Data = struct {
 
     pub fn close(d: *Data) void {
         d.closing.store(true, .release);
-        // Stop the reader first: it replaces `conn` when it resumes.
+        // Shut the socket first: cancelling a task blocked in a read is not reliable, but a read
+        // on a shut socket returns at once, and the reader sees `closing` and exits.
+        d.conn_mu.lockUncancelable(d.io);
+        if (d.conn) |c| c.stream.shutdown(d.io, .both) catch {};
+        d.conn_mu.unlock(d.io);
         if (d.reader) |*r| r.cancel(d.io);
         // A 1000 close ends the stream on the server.
         if (d.conn) |c| {
@@ -140,6 +146,9 @@ pub const Data = struct {
                 d.resume_window_ms = wl.window_ms;
             },
         }
+        d.conn_mu.lockUncancelable(d.io);
+        defer d.conn_mu.unlock(d.io);
+        if (d.closing.load(.acquire)) return error.Canceled; // closed while connecting
         d.conn = c;
     }
 
@@ -194,8 +203,11 @@ pub const Data = struct {
 
     /// Resume with the latest token and the exact count, retrying until the window passes.
     fn tryResume(d: *Data) bool {
-        if (d.conn) |c| c.deinit(d.gpa);
+        d.conn_mu.lockUncancelable(d.io);
+        const old = d.conn;
         d.conn = null;
+        d.conn_mu.unlock(d.io);
+        if (old) |c| c.deinit(d.gpa);
         const window: u64 = if (d.resume_window_ms == 0) 60_000 else d.resume_window_ms;
         var waited: u64 = 0;
         var backoff: u64 = 50;
