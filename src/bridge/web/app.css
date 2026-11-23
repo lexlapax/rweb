@@ -1,15 +1,15 @@
 :root {
   color-scheme: dark;
-  --bg: #111418; --panel: #171b21; --fg: #d7dae0; --dim: #8b93a1; --line: #2a2f38; --btn: #1c2128;
+  --bg: #181818; --panel: #1f1f1f; --fg: #ececec; --dim: #9a9a9a; --line: #2e2e2e; --btn: #232323;
   --accent: #5aa2ff; --warn: #e5a50a; --bad: #e5484d; --good: #3fb950;
-  --term-bg: #000; --vh: 100vh; --bar: 48px;
+  --term-bg: #181818; --vh: 100vh; --bar: 48px;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; overscroll-behavior: none; }
 body { display: flex; flex-direction: column; height: var(--vh); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 button, input, textarea { font: inherit; color: var(--fg); }
-button { background: var(--btn); border: 1px solid var(--line); border-radius: 7px; padding: 7px 12px; min-height: 40px; cursor: pointer; }
+button { background: var(--btn); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; min-height: 40px; cursor: pointer; }
 button:hover { border-color: #3a414d; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button:disabled { opacity: .4; cursor: default; }
@@ -94,7 +94,9 @@ dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px 
   html, body { font-size: 14px; }
   button { min-height: 38px; }
   :root { --bar: 46px; }
-  #crumb { max-width: 42vw; }
+  #crumb { max-width: 52vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #crumb-sep, #crumb-term { display: none; }
+  #crumb-session { font-weight: 600; }
   #tabs { display: none; }
   #list { position: absolute; z-index: 6; top: 0; bottom: 0; left: 0; width: min(300px, 80vw); box-shadow: 4px 0 18px rgba(0,0,0,.6); }
   main:has(#list.open) #scrim { display: block; position: absolute; inset: 0; z-index: 5; background: rgba(0,0,0,.45); }
@@ -113,3 +115,15 @@ dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px 
 /* wterm draws its own grid box; make it fill the stage seamlessly. */
 #term.rweb-wterm { border-radius: 0; box-shadow: none; padding: 0; width: 100%; height: 100% !important; max-height: none; }
 #stage:has(#term.rweb-wterm) { overflow: hidden; }
+
+/* On a narrow screen menus rise from the bottom as a sheet, as in Ovis. */
+.pop.sheet { left: 0 !important; right: 0; top: auto !important; bottom: 0; max-width: none; border-radius: 16px 16px 0 0; padding: 8px 10px calc(10px + env(safe-area-inset-bottom)); gap: 2px; max-height: 80vh; overflow-y: auto; }
+.pop.sheet::before { content: ""; align-self: center; width: 36px; height: 4px; border-radius: 2px; background: var(--line); margin: 2px 0 6px; }
+.pop.sheet button { min-height: 48px; font-size: 15px; }
+.pop .sheet-title { padding: 4px 10px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.pop .sheet-title b { display: block; }
+.pop .sheet-title small { color: var(--dim, #8b949e); }
+.pop.sheet .sheet-cancel { text-align: center; background: var(--btn); border: 1px solid var(--line); margin-top: 6px; border-radius: 10px; }
+
+/* The terminal uses the same neutral dark colours as Ovis; Rex's own theme is used only if turned on in the menu. */
+#term.rweb-wterm { --term-bg: #181818; --term-fg: #ececec; --term-cursor: #ececec; }

@@ -184,6 +184,7 @@ followViewport();
 
 function hex(c) { return c && !c.startsWith('#') ? '#' + c : c; }
 function applyTheme(t) {
+  if (termKind === 'wterm' && !LS.get('rextheme', false)) return;   // Ovis's colours, not Rex's
   const theme = {};
   if (t.foreground) theme.foreground = hex(t.foreground);
   if (t.background) {
@@ -403,10 +404,21 @@ function closePop() { $('pop').hidden = true; if (popFor) popFor.setAttribute('a
 function openPop(anchor, build) {
   if (popFor === anchor) return closePop();
   closePop();
-  const pop = $('pop'); pop.replaceChildren(); build(pop); pop.hidden = false;
-  const r = anchor.getBoundingClientRect();
-  pop.style.top = Math.round(r.bottom + 4) + 'px';
-  pop.style.left = Math.max(6, Math.min(innerWidth - pop.offsetWidth - 6, r.right - pop.offsetWidth)) + 'px';
+  const pop = $('pop'); pop.replaceChildren();
+  const sheet = NARROW.matches; pop.classList.toggle('sheet', sheet);
+  if (sheet) {
+    const info = currentInfo(), t = el('div', 'sheet-title');
+    const b = el('b', '', info ? info.s.label : 'rweb'), sm = el('small', '', info ? info.b.label : '');
+    t.append(b, sm); pop.append(t);
+  }
+  build(pop);
+  if (sheet) { const c = el('button', 'sheet-cancel', 'Cancel'); c.onclick = closePop; pop.append(c); }
+  pop.hidden = false;
+  if (!sheet) {
+    const r = anchor.getBoundingClientRect();
+    pop.style.top = Math.round(r.bottom + 4) + 'px';
+    pop.style.left = Math.max(6, Math.min(innerWidth - pop.offsetWidth - 6, r.right - pop.offsetWidth)) + 'px';
+  }
   anchor.setAttribute('aria-expanded', 'true'); popFor = anchor;
   const first = pop.querySelector('button:not(:disabled)'); if (first) first.focus();
 }
@@ -425,6 +437,7 @@ $('more').onclick = () => openPop($('more'), pop => {
   const ro = item(pop, 'View only', () => send({t: 'observe', on: !state.observe}), 'pop-ro');
   ro.setAttribute('role', 'menuitemcheckbox');
   if (termKind === 'wterm') { const af = item(pop, autoFitOn() ? 'Fit Rex to this screen: on' : 'Fit Rex to this screen: off', () => { LS.set('autofit', !autoFitOn()); lastFit = ''; closePop(); layout(); }); af.setAttribute('role', 'menuitemcheckbox'); af.setAttribute('aria-pressed', String(autoFitOn())); }
+  if (termKind === 'wterm') { const rt = item(pop, LS.get('rextheme', false) ? 'Use Rex colours: on' : 'Use Rex colours: off', () => { LS.set('rextheme', !LS.get('rextheme', false)); location.reload(); }); rt.setAttribute('role', 'menuitemcheckbox'); }
   item(pop, 'Fit terminal to this window…', async () => {
     closePop();
     const d = fitAddon.proposeDimensions();
