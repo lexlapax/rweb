@@ -30,6 +30,9 @@ pub const max_input_bytes = 32 * 1024;
 pub const max_id_bytes = 200;
 pub const max_label_bytes = 128;
 pub const max_cols_rows = 1000;
+/// A transfer is never announced as larger than this (the bridge's own cap is lower).
+pub const max_transfer_size: i64 = 1 << 40;
+pub const max_path_bytes = 1024;
 
 pub const Msg = union(enum) {
     tree,
@@ -46,6 +49,12 @@ pub const Msg = union(enum) {
     text,
     /// Title, folder, program and listening ports of the open terminal, for the page's header.
     info,
+    /// List a directory (empty: the terminal's folder) for the download picker.
+    ls: []const u8,
+    /// Ask for a download token for a file.
+    dl: []const u8,
+    /// Ask for an upload token for a file the browser is about to send.
+    ul: struct { name: []const u8, size: u64 },
     /// The newest text a program in the terminal copied (OSC 52).
     clip,
     /// `clear` or `reset` the open terminal.
@@ -82,6 +91,16 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (eql(u8, t, "more_history")) return .more_history;
     if (eql(u8, t, "text")) return .text;
     if (eql(u8, t, "info")) return .info;
+    if (eql(u8, t, "ls")) return .{ .ls = try pathField(o, "path", true) };
+    if (eql(u8, t, "dl")) return .{ .dl = try pathField(o, "path", false) };
+    if (eql(u8, t, "ul")) {
+        const name = try str(o, "name", 255);
+        if (name.len == 0 or !std.unicode.utf8ValidateSlice(name)) return error.BadField;
+        for (name) |c| if (c < 0x20 or c == 0x7f) return error.BadField;
+        const sv = o.get("size") orelse return error.BadField;
+        if (sv != .integer or sv.integer < 0 or sv.integer > max_transfer_size) return error.BadField;
+        return .{ .ul = .{ .name = name, .size = @intCast(sv.integer) } };
+    }
     if (eql(u8, t, "clip")) return .clip;
     if (eql(u8, t, "term_action")) {
         const a = try str(o, "action", 16);
@@ -172,6 +191,16 @@ fn keyJson(arena: Allocator, o: std.json.ObjectMap) ParseError![]const u8 {
     }, .{}) catch return error.OutOfMemory;
 }
 
+/// A file or folder path from the browser: bounded, valid UTF-8, no control characters (no NUL,
+/// no newline). `allow_empty` for a listing of the terminal's own folder.
+fn pathField(o: std.json.ObjectMap, name: []const u8, allow_empty: bool) ParseError![]const u8 {
+    const p = try str(o, name, max_path_bytes);
+    if (p.len == 0 and !allow_empty) return error.BadField;
+    if (!std.unicode.utf8ValidateSlice(p)) return error.BadField;
+    for (p) |c| if (c < 0x20 or c == 0x7f) return error.BadField;
+    return p;
+}
+
 /// A short field made of letters, digits, `_`, `+`, `,` and `-` only (key names and modifier lists).
 fn wordField(o: std.json.ObjectMap, name: []const u8, max: usize) ParseError![]const u8 {
     const v = o.get(name) orelse return error.BadField;
@@ -190,7 +219,7 @@ fn parseT(text: []const u8) ParseError!Msg {
     const m = try parse(arena.allocator(), text);
     // Copy out nothing: only check tags and simple values in the tests below.
     return switch (m) {
-        .in, .paste, .key, .open, .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => .tree, // marker: parsed
+        .in, .paste, .key, .ls, .dl, .ul, .open, .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => .tree, // marker: parsed
         else => m,
     };
 }
@@ -260,4 +289,28 @@ test "a key press is rebuilt from checked fields only" {
         "{\"t\":\"mouse\",\"payload\":{}}",
     };
     for (bad) |b| try testing.expect(std.meta.isError(parse(arena.allocator(), b)));
+}
+
+test "transfer messages are checked" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("/etc", (try parse(a, "{\"t\":\"ls\",\"path\":\"/etc\"}")).ls);
+    try testing.expectEqualStrings("", (try parse(a, "{\"t\":\"ls\",\"path\":\"\"}")).ls);
+    try testing.expectEqualStrings("a b/c.txt", (try parse(a, "{\"t\":\"dl\",\"path\":\"a b/c.txt\"}")).dl);
+    const u = try parse(a, "{\"t\":\"ul\",\"name\":\"pic.png\",\"size\":1234}");
+    try testing.expectEqualStrings("pic.png", u.ul.name);
+    try testing.expectEqual(@as(u64, 1234), u.ul.size);
+    const bad = [_][]const u8{
+        "{\"t\":\"dl\",\"path\":\"\"}", // nothing to download
+        "{\"t\":\"dl\",\"path\":\"a\\nb\"}", // a newline in a path
+        "{\"t\":\"dl\",\"path\":\"a\\u0000b\"}", // NUL
+        "{\"t\":\"ls\",\"path\":5}",
+        "{\"t\":\"ul\",\"name\":\"\",\"size\":1}",
+        "{\"t\":\"ul\",\"name\":\"a\\u0001\",\"size\":1}",
+        "{\"t\":\"ul\",\"name\":\"a\",\"size\":-1}",
+        "{\"t\":\"ul\",\"name\":\"a\",\"size\":1099511627777}",
+        "{\"t\":\"ul\",\"name\":\"a\",\"size\":\"1\"}",
+    };
+    for (bad) |b| try testing.expect(std.meta.isError(parse(a, b)));
 }

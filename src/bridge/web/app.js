@@ -274,7 +274,7 @@ setInterval(() => {
 
 function handleMessage(m) {
   switch (m.t) {
-    case 'mode': state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
+    case 'mode': state.canDownload = !!m.download; state.canUpload = !!m.upload; state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
     case 'rex': state.rexUp = m.up; renderStatus(); break;
     case 'tree': {
       state.tree = m.sessions; renderAll(); maybeRestore();
@@ -295,9 +295,15 @@ function handleMessage(m) {
     case 'exited': state.exited = m.code; renderStatus(); break;
     case 'closed': showEmpty('That terminal was closed.'); break;
     case 'notice': notice(m.msg); break;
-    case 'error': notice(m.for === 'manage' || m.for === 'input' ? m.msg : `${m.for}: ${m.msg}`); break;
+    case 'error':
+      if (m.for === 'ls') { xfNote(`Cannot list that folder: ${m.msg}`); break; }
+      if (m.for === 'dl') { xfNote(`Cannot download: ${m.msg}`); notice(`Cannot download: ${m.msg}`); break; }
+      if (m.for === 'ul') { notice(`Cannot upload: ${m.msg}`); xf.current = null; pumpUploads(); break; }
+      notice(m.for === 'manage' || m.for === 'input' ? m.msg : `${m.for}: ${m.msg}`); break;
     case 'text': openCopy(m.text, m.truncated); break;
     case 'clip': if (m.text) openCopy(m.text, false); else notice('Nothing has been copied by a program in this terminal yet.'); break;
+    case 'ls': renderDir(m); break;
+    case 'xfer': onXfer(m); break;
     case 'pong': break;
   }
 }
@@ -486,6 +492,8 @@ $('more').onclick = () => openPop($('more'), pop => {
   clip.disabled = !state.current; clip.title = 'Shows the last text a program such as vim or tmux copied inside the terminal, so you can copy it to your phone';
   clip.append(el('small', 'hint', 'What vim, tmux or similar last copied'));
   item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !state.current || state.observe;
+  if (state.canDownload) item(pop, 'Download a file…', () => { closePop(); openFiles(); }, 'pop-dl').disabled = !state.current || state.observe;
+  if (state.canUpload) item(pop, 'Upload files…', () => { closePop(); $('upfile').click(); }, 'pop-ul').disabled = !state.current || state.observe;
   item(pop, 'Clear screen', () => { closePop(); send({t: 'term_action', action: 'clear'}); }).disabled = !state.current || state.observe;
   item(pop, 'Reset terminal…', async () => { closePop(); if (await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'})) send({t: 'term_action', action: 'reset'}); }).disabled = !state.current || state.observe;
   const sz = el('div', 'sizer'); sz.append(el('span', '', 'Text size'));
@@ -718,6 +726,106 @@ setFontSize(state.fontSize);
 renderStatus();
 connect();
 if (startupNote) notice(startupNote);
+
+// ---- file transfer ----
+// Only offered when the bridge was started with it on. A download is asked for over the socket; the
+// answer is a one-time address the page opens as an ordinary download. An upload sends the file in
+// one request to a one-time address; the bridge saves it in its upload folder and pastes the path.
+const xf = {dir: '', home: '', entries: [], hidden: LS.get('showHidden', false), queue: [], current: null};
+
+function fmtSize(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+  return (n / 1073741824).toFixed(1) + ' GB';
+}
+function joinPath(dir, name) { return dir === '/' || dir === '' ? '/' + name : dir + '/' + name; }
+function parentOf(dir) { const i = dir.lastIndexOf('/'); return i <= 0 ? '/' : dir.slice(0, i); }
+function xfNote(text) { $('xf-note').textContent = text || ''; }
+
+function openFiles() {
+  $('xf-hidden').checked = xf.hidden; $('xf-filter').value = ''; xfNote('');
+  $('xferdlg').showModal();
+  listDir('');
+}
+function listDir(path) { $('xf-list').setAttribute('aria-busy', 'true'); send({t: 'ls', path}); }
+
+function renderDir(m) {
+  xf.dir = m.path || xf.dir; xf.home = m.home || xf.home; xf.entries = m.entries || [];
+  { let p = xf.home && xf.dir.startsWith(xf.home) ? '~' + xf.dir.slice(xf.home.length) : xf.dir; const parts = p.split('/'); if (parts.length > 4) p = '\u2026/' + parts.slice(-3).join('/'); $('xf-path').textContent = p; }
+  $('xf-up').disabled = xf.dir === '/' || !xf.dir;
+  $('xf-list').setAttribute('aria-busy', 'false');
+  xfNote(m.status === 'ok' ? (m.truncated ? 'A long folder: type in the filter to find the rest.' : '')
+    : m.status === 'denied' ? 'That folder cannot be read.' : m.status === 'missing' ? 'That folder is not there.' : 'That is not a folder.');
+  drawDir();
+}
+function drawDir() {
+  const list = $('xf-list'); list.replaceChildren();
+  const q = $('xf-filter').value.trim().toLowerCase();
+  const rows = xf.entries.filter(e => (xf.hidden || !e.n.startsWith('.')) && (!q || e.n.toLowerCase().includes(q)))
+    .sort((a, b) => (b.d - a.d) || a.n.localeCompare(b.n, undefined, {sensitivity: 'base'}));
+  for (const e of rows) {
+    const b = el('button', 'xf-row' + (e.d ? ' dir' : ''));
+    b.setAttribute('role', 'listitem');
+    b.append(el('span', 'xf-ico', e.d ? '\u{1F4C1}' : '\u{1F4C4}'), el('span', 'xf-name', e.n));
+    b.onclick = () => {
+      const full = joinPath(xf.dir, e.n);
+      if (e.d) { $('xf-filter').value = ''; listDir(full); }
+      else { send({t: 'dl', path: full}); xfNote(`Asking for ${e.n}…`); }
+    };
+    list.append(b);
+  }
+  if (!rows.length) list.append(el('div', 'dim xf-empty', q ? 'No names match.' : 'Nothing here.'));
+}
+$('xf-close').onclick = () => $('xferdlg').close();
+$('xferdlg').addEventListener('click', e => { if (e.target === $('xferdlg')) $('xferdlg').close(); });
+$('xf-up').onclick = () => listDir(parentOf(xf.dir));
+$('xf-home').onclick = () => listDir('~');
+$('xf-filter').oninput = drawDir;
+// A path typed in the filter box (starting with / or ~) and Enter goes there.
+$('xf-filter').onkeydown = e => {
+  const v = $('xf-filter').value.trim();
+  if (e.key === 'Enter' && (v.startsWith('/') || v.startsWith('~'))) { e.preventDefault(); $('xf-filter').value = ''; listDir(v); }
+};
+$('xf-hidden').onchange = e => { xf.hidden = e.target.checked; LS.set('showHidden', xf.hidden); drawDir(); };
+
+function onXfer(m) {
+  if (m.kind === 'download') {
+    const a = document.createElement('a');
+    a.href = '/xfer/' + m.token; a.download = m.name; a.hidden = true;
+    document.body.append(a); a.click(); a.remove();
+    notice(`Downloading ${m.name} (${fmtSize(m.size)})`);
+    if ($('xferdlg').open) { $('xferdlg').close(); }
+  } else if (m.kind === 'upload' && xf.current) {
+    putFile(xf.current, m.token);
+  }
+}
+
+$('upfile').onchange = e => {
+  for (const f of e.target.files) xf.queue.push(f);
+  e.target.value = '';
+  pumpUploads();
+};
+function pumpUploads() {
+  if (xf.current || !xf.queue.length || !canType()) return;
+  xf.current = xf.queue.shift();
+  send({t: 'ul', name: xf.current.name, size: xf.current.size});
+}
+function putFile(file, token) {
+  const req = new XMLHttpRequest();
+  req.open('PUT', '/xfer/' + token);
+  req.upload.onprogress = ev => { if (ev.lengthComputable) notice(`Uploading ${file.name} ${Math.round(100 * ev.loaded / ev.total)}%`); };
+  const done = msg => { notice(msg); xf.current = null; pumpUploads(); };
+  req.onload = () => {
+    if (req.status !== 200) return done(`Upload of ${file.name} failed (${req.status})`);
+    let name = file.name; try { name = JSON.parse(req.responseText).name || name; } catch {}
+    done(`Uploaded ${name}: its path is at the prompt`);
+  };
+  req.onerror = () => done(`Upload of ${file.name} failed`);
+  req.send(file);
+}
 }
 main().catch(e => { console.error(e); const el = document.getElementById('empty'); if (el) el.textContent = 'The page failed to start: ' + e.message; });
+
 

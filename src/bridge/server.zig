@@ -10,6 +10,7 @@ const rex = @import("rex");
 const access = @import("access.zig");
 const protocol = @import("protocol.zig");
 const hub_mod = @import("hub.zig");
+const xfer = @import("xfer.zig");
 const assets = @import("assets.zig");
 const Hub = hub_mod.Hub;
 
@@ -278,6 +279,7 @@ pub const Server = struct {
             .headers = hdrs[0..n],
             .query_token = access.queryToken(rest),
             .is_websocket_upgrade = upgrade == .websocket,
+            .requires_origin = req.head.method != .GET and req.head.method != .HEAD,
         };
         switch (access.decide(s.opts.access, areq)) {
             .allow => {
@@ -295,6 +297,23 @@ pub const Server = struct {
             },
         }
 
+        const is_xfer = std.mem.startsWith(u8, path, "/xfer/");
+        if (is_xfer and (req.head.method == .GET or req.head.method == .PUT)) {
+            if (!s.hub.cfg.transfer.enabled) {
+                try req.respond("not found\n", .{ .status = .not_found, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+                return;
+            }
+            // The token is the whole of the path after `/xfer/`; copy it, as reading a body
+            // invalidates the request's strings.
+            const tail = path["/xfer/".len..];
+            if (tail.len != 32) {
+                try req.respond("not found\n", .{ .status = .not_found, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+                return;
+            }
+            var xtoken: [32]u8 = undefined;
+            @memcpy(&xtoken, tail);
+            return if (req.head.method == .GET) s.serveDownload(&req, &xtoken) else s.serveUpload(&req, &xtoken);
+        }
         if (req.head.method != .GET) {
             try req.respond("method not allowed\n", .{ .status = .method_not_allowed, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
             return;
@@ -421,6 +440,134 @@ pub const Server = struct {
             n += 1;
         };
         try req.respond(body, .{ .keep_alive = false, .extra_headers = withSecurity(&hb, extra[0..n]) });
+    }
+
+    fn refuseXfer(req: *std.http.Server.Request, status: std.http.Status, text: []const u8) !void {
+        try req.respond(text, .{ .status = status, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+    }
+
+    /// `GET /xfer/<token>`: stream the file Rex opened for the token.
+    fn serveDownload(s: *Server, req: *std.http.Server.Request, xtoken: []const u8) !void {
+        var entry = s.hub.xfers.take(xtoken, .download) orelse return refuseXfer(req, .not_found, "not found\n");
+        defer entry.deinit(s.gpa);
+        if (!s.hub.xfers.acquire()) return refuseXfer(req, .too_many_requests, "too many transfers\n");
+        defer s.hub.xfers.release();
+
+        const max = s.hub.cfg.transfer.max_bytes;
+        var st = rex.transfer.Stream.open(s.gpa, s.io, s.hub.ctl.opts.socket_path, entry.ticket) catch |e| {
+            log.info("download: Rex refused the stream: {t}", .{e});
+            return refuseXfer(req, .bad_gateway, "Rex did not give the file\n");
+        };
+        defer st.deinit();
+
+        var nb: [128]u8 = undefined;
+        const shown = xfer.safeName(&nb, entry.name);
+        log.info("download start: {s} ({d} bytes announced)", .{ shown, entry.size });
+
+        var cd_buf: [400]u8 = undefined;
+        var hb: [16]std.http.Header = undefined;
+        const extra = [_]std.http.Header{
+            .{ .name = "content-type", .value = "application/octet-stream" },
+            .{ .name = "content-disposition", .value = xfer.contentDisposition(&cd_buf, entry.name) },
+            .{ .name = "cache-control", .value = "no-store" },
+        };
+        var out_buf: [16 * 1024]u8 = undefined;
+        var body = try req.respondStreaming(&out_buf, .{ .respond_options = .{ .keep_alive = false, .extra_headers = withSecurity(&hb, &extra) } });
+        var total: u64 = 0;
+        while (true) {
+            const chunk = (st.next() catch |e| {
+                log.info("download failed after {d} bytes: {t}", .{ total, e });
+                return error.TransferFailed; // the connection is cut: the browser sees a failed download
+            }) orelse break;
+            defer s.gpa.free(chunk);
+            total += chunk.len;
+            if (total > max) {
+                st.abort();
+                log.info("download stopped: more than {d} bytes", .{max});
+                return error.TransferTooLarge;
+            }
+            try body.writer.writeAll(chunk);
+        }
+        try body.end();
+        log.info("download done: {s} {d} bytes", .{ shown, total });
+    }
+
+    /// `PUT /xfer/<token>`: write the body into the upload directory under a safe, new name, then
+    /// paste its quoted path into the terminal.
+    fn serveUpload(s: *Server, req: *std.http.Server.Request, xtoken: []const u8) !void {
+        var entry = s.hub.xfers.take(xtoken, .upload) orelse return refuseXfer(req, .not_found, "not found\n");
+        defer entry.deinit(s.gpa);
+        const dir_path = s.hub.cfg.transfer.upload_dir orelse return refuseXfer(req, .not_found, "not found\n");
+        if (!s.hub.xfers.acquire()) return refuseXfer(req, .too_many_requests, "too many transfers\n");
+        defer s.hub.xfers.release();
+
+        const len = req.head.content_length orelse return refuseXfer(req, .length_required, "length required\n");
+        if (len != entry.size) return refuseXfer(req, .bad_request, "the size is not what was announced\n");
+        if (len > s.hub.cfg.transfer.max_bytes) return refuseXfer(req, .payload_too_large, "too large\n");
+
+        var dir = Io.Dir.cwd().openDir(s.io, dir_path, .{}) catch return refuseXfer(req, .internal_server_error, "the upload folder cannot be opened\n");
+        defer dir.close(s.io);
+
+        // A name that is safe, and that does not replace anything: "a.txt", "a (1).txt", ...
+        var nb: [128]u8 = undefined;
+        const safe = xfer.safeName(&nb, entry.name);
+        var name_buf: [160]u8 = undefined;
+        var final: []const u8 = safe;
+        var file: ?Io.File = null;
+        var attempt: u32 = 0;
+        while (attempt < 100) : (attempt += 1) {
+            if (attempt > 0) {
+                const dot = std.mem.lastIndexOfScalar(u8, safe, '.');
+                const stem = if (dot) |d| (if (d == 0) safe else safe[0..d]) else safe;
+                const ext = if (dot) |d| (if (d == 0) "" else safe[d..]) else "";
+                final = std.fmt.bufPrint(&name_buf, "{s} ({d}){s}", .{ stem, attempt, ext }) catch return refuseXfer(req, .internal_server_error, "name\n");
+            }
+            if (dir.createFile(s.io, final, .{ .exclusive = true, .permissions = @enumFromInt(0o600) })) |f| {
+                file = f;
+                break;
+            } else |e| switch (e) {
+                error.PathAlreadyExists => continue,
+                else => return refuseXfer(req, .internal_server_error, "cannot create the file\n"),
+            }
+        }
+        const f = file orelse return refuseXfer(req, .internal_server_error, "no free name\n");
+        var keep = false;
+        defer {
+            f.close(s.io);
+            if (!keep) dir.deleteFile(s.io, final) catch {};
+        }
+
+        // The body, exactly `len` bytes.
+        var body_buf: [16 * 1024]u8 = undefined;
+        const reader = try req.readerExpectContinue(&body_buf);
+        var chunk: [64 * 1024]u8 = undefined;
+        var left: u64 = len;
+        while (left > 0) {
+            const want: usize = @intCast(@min(left, chunk.len));
+            const n = reader.readSliceShort(chunk[0..want]) catch return error.UploadFailed;
+            if (n == 0) return error.UploadFailed; // the browser stopped early
+            f.writeStreamingAll(s.io, chunk[0..n]) catch return error.UploadFailed;
+            left -= n;
+        }
+        keep = true;
+        log.info("upload done: {s} {d} bytes", .{ final, len });
+
+        // Tell the terminal where it is: the quoted path, as if pasted (no Enter).
+        const full = try std.fs.path.join(s.gpa, &.{ dir_path, final });
+        defer s.gpa.free(full);
+        const quoted = try xfer.shellQuote(s.gpa, full);
+        defer s.gpa.free(quoted);
+        // A space after it, so that several uploads paste as separate words, not one glued together.
+        const typed = try std.fmt.allocPrint(s.gpa, "{s} ", .{quoted});
+        defer s.gpa.free(typed);
+        s.hub.api_mu.lockUncancelable(s.io);
+        const pasted = s.hub.api.paste(entry.session_id, entry.block_id, typed);
+        s.hub.api_mu.unlock(s.io);
+        pasted catch |e| log.info("upload: the path could not be pasted: {t}", .{e});
+
+        const reply = try std.json.Stringify.valueAlloc(s.gpa, .{ .ok = true, .name = final, .path = full }, .{});
+        defer s.gpa.free(reply);
+        try req.respond(reply, .{ .keep_alive = false, .extra_headers = &(security_headers ++ no_store ++ [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }}) });
     }
 
     /// Transport lab: echo what a browser sends, and push a message a second, so the page can
@@ -560,6 +707,7 @@ pub fn stripSecret(target: []const u8, secret: []const u8) ?[]const u8 {
 fn knownPath(path: []const u8) []const u8 {
     if (assets.indexOf(path)) |i| return assets.all[i].path;
     for ([_][]const u8{ "/ws", "/labws", "/api/tree", "/api/lab/hb", "/api/lab/result" }) |k| if (std.mem.eql(u8, path, k)) return k;
+    if (std.mem.startsWith(u8, path, "/xfer/")) return "/xfer/(token)"; // never the token itself
     return "(other)";
 }
 
@@ -1241,4 +1389,296 @@ test "server: a browser cannot make Rex do heavy work more than a few times a se
     // Twenty in a burst: the first few are answered, the rest are refused with a reason.
     for (0..20) |_| try sendJson(c, "{{\"t\":\"info\"}}", .{});
     try waitText(c, "too many requests");
+}
+
+// ---- file transfer ----
+
+/// Read text frames until one contains `needle`; return that message (owned by the caller).
+fn textWith(c: *rex.ws.Conn, needle: []const u8) ![]u8 {
+    var i: u32 = 0;
+    while (i < 200) : (i += 1) {
+        const m = try c.readMessage(testing.allocator);
+        if (m.opcode == .text and std.mem.indexOf(u8, m.data, needle) != null) return m.data;
+        testing.allocator.free(m.data);
+        if (m.opcode == .close) return error.Closed;
+    }
+    return error.NotSeen;
+}
+
+/// The value of `"token":"…"` in a message.
+fn tokenIn(msg: []const u8) ![]const u8 {
+    const k = "\"token\":\"";
+    const at = std.mem.indexOf(u8, msg, k) orelse return error.NoToken;
+    return msg[at + k.len ..][0..32];
+}
+
+/// A throwaway directory under /tmp, removed by the caller.
+fn tmpDir(buf: []u8) ![]const u8 {
+    var rnd: [4]u8 = undefined;
+    testing.io.random(&rnd);
+    const dir = try std.fmt.bufPrint(buf, "/tmp/rweb-test-xfer-{x}", .{rnd});
+    try Io.Dir.cwd().createDirPath(testing.io, dir);
+    return dir;
+}
+
+const Opened = struct { rig: Rig, c: *rex.ws.Conn };
+
+fn openRig(cfg: hub_mod.Config) !Opened {
+    const rig = try Rig.init(cfg, token_cfg, .{ .tcp_loopback = 0 });
+    errdefer rig.deinit();
+    const c = try browser(rig);
+    errdefer c.deinit(testing.allocator);
+    try waitText(c, "\"t\":\"tree\"");
+    try sendJson(c, "{{\"t\":\"open\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ rig.session_id, rig.block_id });
+    try waitText(c, "\"t\":\"opened\"");
+    return .{ .rig = rig, .c = c };
+}
+
+fn put(rig: Rig, token_path: []const u8, headers: []const u8, body: []const u8) !Http {
+    const req = try std.fmt.allocPrint(testing.allocator, "PUT {s}?token={s} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\n{s}Connection: close\r\n\r\n", .{ token_path, token, body.len, headers });
+    defer testing.allocator.free(req);
+    const all = try testing.allocator.alloc(u8, req.len + body.len);
+    defer testing.allocator.free(all);
+    @memcpy(all[0..req.len], req);
+    @memcpy(all[req.len..], body);
+    return httpRequest(try rig.tcp(), all);
+}
+
+test "server: file transfer is off by default, and says so" {
+    const o = try openRig(.{});
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"/etc/hosts\"}}", .{});
+    const e = try textWith(o.c, "file transfer is off");
+    testing.allocator.free(e);
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a\",\"size\":1}}", .{});
+    testing.allocator.free(try textWith(o.c, "file transfer is off"));
+    // And its address answers nothing.
+    const h = try get(o.rig, "/xfer/00000000000000000000000000000000?token=" ++ token, "");
+    defer freeHttp(h);
+    try testing.expectEqual(@as(u16, 404), h.status);
+}
+
+test "server: a download goes through a one-time token and nothing else" {
+    var db: [64]u8 = undefined;
+    const dir = try tmpDir(&db);
+    defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/my notes.txt", .{dir});
+    defer testing.allocator.free(path);
+    const content = try testing.allocator.alloc(u8, 200_000);
+    defer testing.allocator.free(content);
+    for (content, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+    {
+        const f = try Io.Dir.cwd().createFile(testing.io, path, .{});
+        defer f.close(testing.io);
+        try f.writeStreamingAll(testing.io, content);
+    }
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .max_bytes = 1 << 20 } });
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+
+    // Without a token, nothing: not even a guess at the shape.
+    for ([_][]const u8{ "/xfer/", "/xfer/short", "/xfer/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "/xfer/00000000000000000000000000000000" }) |p| {
+        const pp = try std.fmt.allocPrint(testing.allocator, "{s}?token={s}", .{ p, token });
+        defer testing.allocator.free(pp);
+        const h = try get(o.rig, pp, "");
+        defer freeHttp(h);
+        try testing.expectEqual(@as(u16, 404), h.status);
+    }
+
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\"}}", .{path});
+    const msg = try textWith(o.c, "\"t\":\"xfer\"");
+    defer testing.allocator.free(msg);
+    try testing.expect(std.mem.indexOf(u8, msg, "\"kind\":\"download\"") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "\"name\":\"my notes.txt\"") != null);
+    const tok = try tokenIn(msg);
+    const url = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}?token={s}", .{ tok, token });
+    defer testing.allocator.free(url);
+
+    const h = try get(o.rig, url, "");
+    defer freeHttp(h);
+    try testing.expectEqual(@as(u16, 200), h.status);
+    const joined = try dechunk(h.body);
+    defer testing.allocator.free(joined);
+    try testing.expectEqualSlices(u8, content, joined);
+    try testing.expectEqualStrings("application/octet-stream", headerValue(h.head, "content-type").?);
+    try testing.expect(std.mem.startsWith(u8, headerValue(h.head, "content-disposition").?, "attachment;"));
+    try testing.expectEqualStrings("no-store", headerValue(h.head, "cache-control").?);
+    try testing.expect(headerValue(h.head, "content-security-policy") != null);
+
+    // The token is spent.
+    const again = try get(o.rig, url, "");
+    defer freeHttp(again);
+    try testing.expectEqual(@as(u16, 404), again.status);
+}
+
+/// The body of a chunked response, joined; the caller frees it.
+fn dechunk(body: []const u8) ![]u8 {
+    const a = testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var rest = body;
+    while (true) {
+        const eol = std.mem.indexOf(u8, rest, "\r\n") orelse return error.BadChunks;
+        const n = try std.fmt.parseInt(usize, rest[0..eol], 16);
+        if (n == 0) break;
+        try out.appendSlice(a, rest[eol + 2 ..][0..n]);
+        rest = rest[eol + 2 + n + 2 ..];
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "server: a download of a missing file, or one over the size limit, is refused" {
+    var db: [64]u8 = undefined;
+    const dir = try tmpDir(&db);
+    defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    const big = try std.fmt.allocPrint(testing.allocator, "{s}/big.bin", .{dir});
+    defer testing.allocator.free(big);
+    {
+        const f = try Io.Dir.cwd().createFile(testing.io, big, .{});
+        defer f.close(testing.io);
+        const chunk: [4096]u8 = @splat('x');
+        for (0..300) |_| try f.writeStreamingAll(testing.io, &chunk); // 1.2 MB
+    }
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .max_bytes = 1 << 20 } });
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}/nope\"}}", .{dir});
+    testing.allocator.free(try textWith(o.c, "\"for\":\"dl\""));
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\"}}", .{big});
+    const e = try textWith(o.c, "too large");
+    testing.allocator.free(e);
+}
+
+test "server: observe-only viewers cannot start a transfer" {
+    const o = try openRig(.{ .observe_only = true, .transfer = .{ .enabled = true } });
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"/etc/hosts\"}}", .{});
+    testing.allocator.free(try textWith(o.c, "read-only"));
+    try sendJson(o.c, "{{\"t\":\"ls\",\"path\":\"/\"}}", .{});
+    testing.allocator.free(try textWith(o.c, "read-only"));
+}
+
+test "server: a directory listing for the picker" {
+    var db: [64]u8 = undefined;
+    const dir = try tmpDir(&db);
+    defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    const sub = try std.fmt.allocPrint(testing.allocator, "{s}/sub", .{dir});
+    defer testing.allocator.free(sub);
+    try Io.Dir.cwd().createDirPath(testing.io, sub);
+    const fp = try std.fmt.allocPrint(testing.allocator, "{s}/a.txt", .{dir});
+    defer testing.allocator.free(fp);
+    (try Io.Dir.cwd().createFile(testing.io, fp, .{})).close(testing.io);
+    const o = try openRig(.{ .transfer = .{ .enabled = true } });
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+    try sendJson(o.c, "{{\"t\":\"ls\",\"path\":\"{s}\"}}", .{dir});
+    const m = try textWith(o.c, "\"t\":\"ls\"");
+    defer testing.allocator.free(m);
+    try testing.expect(std.mem.indexOf(u8, m, "\"n\":\"a.txt\",\"d\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, m, "\"n\":\"sub\",\"d\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, m, "\"status\":\"ok\"") != null);
+}
+
+test "server: an upload lands only in the upload folder, under a safe new name, and its path is pasted" {
+    var db: [64]u8 = undefined;
+    const dir = try tmpDir(&db);
+    defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .max_bytes = 1 << 20 } });
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+    const content = "hello from a phone\nsecond line\n";
+
+    // A hostile name: path parts and shell characters.
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"../../etc/evil;rm -rf ~.txt\",\"size\":{d}}}", .{content.len});
+    const msg = try textWith(o.c, "\"kind\":\"upload\"");
+    defer testing.allocator.free(msg);
+    const url = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(msg)});
+    defer testing.allocator.free(url);
+    const r = try put(o.rig, url, "Origin: http://localhost\r\n", content);
+    defer freeHttp(r);
+    try testing.expectEqual(@as(u16, 200), r.status);
+
+    // Only the safe name, in the folder, with the content, closed to others.
+    const saved = try std.fmt.allocPrint(testing.allocator, "{s}/evil_rm -rf _.txt", .{dir});
+    defer testing.allocator.free(saved);
+    const got = try Io.Dir.cwd().readFileAlloc(testing.io, saved, testing.allocator, .limited(1 << 16));
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(content, got);
+    const st = try Io.Dir.cwd().statFile(testing.io, saved, .{});
+    try testing.expectEqual(@as(u32, 0o600), @intFromEnum(st.permissions) & 0o777);
+    try testing.expect(std.mem.indexOf(u8, r.body, "evil_rm -rf _.txt") != null);
+    // Nothing escaped into the folders above it.
+    try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, "/tmp/etc/evil;rm -rf ~.txt", .{}));
+
+    // The terminal was given the quoted path, to type or not.
+    const quoted = try std.fmt.allocPrint(testing.allocator, "'{s}' ", .{saved}); // with the space that separates it from the next
+    defer testing.allocator.free(quoted);
+    try waitBinary(o.c, quoted);
+
+    // The same name again does not replace it.
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"evil;rm -rf ~.txt\",\"size\":3}}", .{});
+    const msg2 = try textWith(o.c, "\"kind\":\"upload\"");
+    defer testing.allocator.free(msg2);
+    const url2 = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(msg2)});
+    defer testing.allocator.free(url2);
+    const r2 = try put(o.rig, url2, "Origin: http://localhost\r\n", "new");
+    defer freeHttp(r2);
+    try testing.expectEqual(@as(u16, 200), r2.status);
+    const second = try std.fmt.allocPrint(testing.allocator, "{s}/evil_rm -rf _ (1).txt", .{dir});
+    defer testing.allocator.free(second);
+    const got2 = try Io.Dir.cwd().readFileAlloc(testing.io, second, testing.allocator, .limited(64));
+    defer testing.allocator.free(got2);
+    try testing.expectEqualStrings("new", got2);
+    const got1 = try Io.Dir.cwd().readFileAlloc(testing.io, saved, testing.allocator, .limited(1 << 16));
+    defer testing.allocator.free(got1);
+    try testing.expectEqualStrings(content, got1); // the first is untouched
+}
+
+test "server: an upload is refused without the page's Origin, with the wrong size, twice, or too big" {
+    var db: [64]u8 = undefined;
+    const dir = try tmpDir(&db);
+    defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .max_bytes = 1000 } });
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+
+    // Too big, said at the first step.
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"big\",\"size\":5000}}", .{});
+    testing.allocator.free(try textWith(o.c, "too large"));
+
+    // Another site's page (a cross-site PUT carries its own Origin): 403 and the token is not spent.
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":4}}", .{});
+    const m = try textWith(o.c, "\"kind\":\"upload\"");
+    defer testing.allocator.free(m);
+    const url = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(m)});
+    defer testing.allocator.free(url);
+    const evil = try put(o.rig, url, "Origin: https://evil.example\r\n", "data");
+    defer freeHttp(evil);
+    try testing.expectEqual(@as(u16, 403), evil.status);
+    const noorigin = try put(o.rig, url, "", "data");
+    defer freeHttp(noorigin);
+    try testing.expectEqual(@as(u16, 403), noorigin.status);
+
+    // The wrong length spends the token (so a guess cannot be refined) and writes nothing.
+    const wrong = try put(o.rig, url, "Origin: http://localhost\r\n", "toolong!");
+    defer freeHttp(wrong);
+    try testing.expectEqual(@as(u16, 400), wrong.status);
+    const reuse = try put(o.rig, url, "Origin: http://localhost\r\n", "data");
+    defer freeHttp(reuse);
+    try testing.expectEqual(@as(u16, 404), reuse.status);
+    const ghost = try std.fmt.allocPrint(testing.allocator, "{s}/a.txt", .{dir});
+    defer testing.allocator.free(ghost);
+    try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, ghost, .{}));
+
+    // A download token cannot be used to upload.
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"/etc/hosts\"}}", .{});
+    const d = try textWith(o.c, "\"kind\":\"download\"");
+    defer testing.allocator.free(d);
+    const durl = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(d)});
+    defer testing.allocator.free(durl);
+    const swap = try put(o.rig, durl, "Origin: http://localhost\r\n", "x");
+    defer freeHttp(swap);
+    try testing.expectEqual(@as(u16, 404), swap.status);
 }

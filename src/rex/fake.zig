@@ -14,6 +14,7 @@ const log = std.log.scoped(.fake_rex);
 
 pub const control_subprotocol = "rex.control.v1";
 pub const data_subprotocol = "rex.data.terminal.v1";
+pub const bytes_subprotocol = "rex.data.bytes.v1";
 
 const Stream = struct {
     block_id: []u8,
@@ -39,7 +40,8 @@ const Session = struct {
     block: *Block,
 };
 
-const Ticket = struct { bytes: [16]u8, block_id: []u8 };
+/// `file`: for a download, the bytes to send.
+const Ticket = struct { bytes: [16]u8, block_id: []u8, file: ?[]u8 = null };
 
 pub const Fake = struct {
     gpa: Allocator,
@@ -140,7 +142,10 @@ pub const Fake = struct {
             f.gpa.destroy(st);
         }
         f.streams.clearRetainingCapacity();
-        for (f.tickets.items) |t| f.gpa.free(t.block_id);
+        for (f.tickets.items) |t| {
+            f.gpa.free(t.block_id);
+            if (t.file) |x| f.gpa.free(x);
+        }
         f.tickets.clearRetainingCapacity();
         var it = f.clients.iterator();
         while (it.next()) |e| {
@@ -324,7 +329,7 @@ pub const Fake = struct {
     }
 
     fn handleConn(f: *Fake, stream: Io.net.Stream) void {
-        const c = ws.Conn.accept(f.gpa, f.io, stream, &.{ control_subprotocol, data_subprotocol }) catch {
+        const c = ws.Conn.accept(f.gpa, f.io, stream, &.{ control_subprotocol, data_subprotocol, bytes_subprotocol }) catch {
             f.unregisterStream(stream);
             stream.close(f.io);
             return;
@@ -340,6 +345,8 @@ pub const Fake = struct {
                 break;
             };
             f.mu.unlock(f.io);
+        } else if (std.mem.eql(u8, c.subprotocol, bytes_subprotocol)) {
+            f.bytesConn(c) catch |e| log.debug("bytes ended: {t}", .{e});
         } else {
             f.dataConn(c) catch |e| log.debug("data ended: {t}", .{e});
         }
@@ -557,6 +564,32 @@ pub const Fake = struct {
                 try f.feedLocked(bid, strField(pl, "text") orelse "");
             }
             return f.respond(c, id, .{});
+        } else if (std.mem.eql(u8, method, "com.superlogical.terminal.download_begin")) {
+            // Real files, read whole: the fake is a test double, not a file server.
+            const sid = strField(p, "session_id") orelse return f.respondError(c, id, "bad_request", 400, "session_id required");
+            const bid = strField(p, "block_id") orelse return f.respondError(c, id, "bad_request", 400, "block_id required");
+            if (!isAttached(attached.items, sid)) return f.respondError(c, id, "conflict", 409, "not attached to the session");
+            const args = if (p.get("args")) |a| (if (a == .object) a.object else no_object) else no_object;
+            const path = strField(args, "path") orelse return f.respondError(c, id, "bad_request", 400, "args.path required");
+            const bytes = Io.Dir.cwd().readFileAlloc(f.io, path, f.gpa, .limited(64 * 1024 * 1024)) catch return f.respondError(c, id, "not_found", 404, "no such file");
+            var raw: [16]u8 = undefined;
+            f.io.random(&raw);
+            try f.tickets.append(f.gpa, .{ .bytes = raw, .block_id = try f.gpa.dupe(u8, bid), .file = bytes });
+            var enc: [22]u8 = undefined;
+            _ = std.base64.url_safe_no_pad.Encoder.encode(&enc, &raw);
+            const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| path[i + 1 ..] else path;
+            return f.respond(c, id, .{ .ticket = enc[0..], .expires_in_ms = 60000, .path = path, .name = base, .size = bytes.len });
+        } else if (std.mem.eql(u8, method, "com.superlogical.terminal.list_dir")) {
+            const args = if (p.get("args")) |a| (if (a == .object) a.object else no_object) else no_object;
+            const path = strField(args, "path") orelse "";
+            var dir = Io.Dir.cwd().openDir(f.io, if (path.len == 0) "." else path, .{ .iterate = true }) catch
+                return f.respond(c, id, .{ .path = path, .home = "", .status = "missing", .entries = &[_]u8{}, .truncated = false });
+            defer dir.close(f.io);
+            const Entry = struct { name: []const u8, file: bool };
+            var list: std.ArrayList(Entry) = .empty;
+            var it = dir.iterate();
+            while (try it.next(f.io)) |e| try list.append(arena, .{ .name = try arena.dupe(u8, e.name), .file = e.kind != .directory });
+            return f.respond(c, id, .{ .path = path, .home = "", .status = "ok", .entries = list.items, .truncated = false });
         } else if (std.mem.eql(u8, method, "com.superlogical.terminal.write")) {
             const sid = strField(p, "session_id") orelse return f.respondError(c, id, "bad_request", 400, "session_id required");
             const bid = strField(p, "block_id") orelse return f.respondError(c, id, "bad_request", 400, "block_id required");
@@ -575,6 +608,40 @@ pub const Fake = struct {
     fn isAttached(list: []const []const u8, sid: []const u8) bool {
         for (list) |a| if (std.mem.eql(u8, a, sid)) return true;
         return false;
+    }
+
+    /// A file download: HELLO with a file ticket, WELCOME, the bytes in 64 KiB messages, close 1000.
+    fn bytesConn(f: *Fake, c: *ws.Conn) !void {
+        const gpa = f.gpa;
+        const hs = try c.readMessage(gpa);
+        defer gpa.free(hs.data);
+        if (hs.opcode != .binary or hs.data.len < 17 or hs.data[0] != 0x01) return reject(c, 0x05);
+        var file: ?[]u8 = null;
+        {
+            f.mu.lockUncancelable(f.io);
+            defer f.mu.unlock(f.io);
+            var found: ?usize = null;
+            for (f.tickets.items, 0..) |t, i| if (t.file != null and std.mem.eql(u8, &t.bytes, hs.data[1..17])) {
+                found = i;
+            };
+            const i = found orelse return reject(c, 0x01);
+            const t = f.tickets.swapRemove(i);
+            gpa.free(t.block_id);
+            file = t.file;
+        }
+        defer if (file) |x| gpa.free(x);
+        var welcome: [32]u8 = @splat(0);
+        welcome[0] = 0x81;
+        std.mem.writeInt(u64, welcome[24..32], 1, .little);
+        try c.writeFrame(.binary, &welcome);
+        var off: usize = 0;
+        const bytes = file.?;
+        while (off < bytes.len) {
+            const n = @min(65536, bytes.len - off);
+            try c.writeFrame(.binary, bytes[off .. off + n]);
+            off += n;
+        }
+        closeWith(c, 1000, "");
     }
 
     fn dataConn(f: *Fake, c: *ws.Conn) !void {

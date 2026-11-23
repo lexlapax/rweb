@@ -41,6 +41,10 @@ pub const usage =
     \\  --observe-only            never write, resize or change anything in Rex
     \\  --history-lines N         scrollback rows sent when a terminal opens (default 1000)
     \\  --debug-input             log what browsers send (typed text included): for testing a keyboard, never for deployment
+    \\  --enable-file-transfer    let the page download any file the terminal's user can read (through
+    \\                            Rex) and, with --upload-dir, upload into one folder. Off by default
+    \\  --upload-dir PATH         the only folder uploads may go to (absolute; made 0700 if missing)
+    \\  --max-transfer-mb N       the most one transfer may carry, either way (default 256)
     \\  --enable-lab              serve the transport and selection lab pages (diagnostics; off by default)
     \\
 ;
@@ -59,6 +63,9 @@ pub const Parsed = struct {
     backend_secret_file: ?[]const u8 = null,
     allow_forgeable_loopback_identity: bool = false,
     lab: bool = false,
+    enable_file_transfer: bool = false,
+    upload_dir: ?[]const u8 = null,
+    max_transfer_mb: u32 = 256,
     own_addresses: []const []const u8 = &.{},
     allow_own_address: bool = false,
     detect_own_addresses: bool = false,
@@ -116,6 +123,13 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
             p.backend_secret_file = try value(args, &i);
         } else if (eql(u8, a, "--allow-forgeable-loopback-identity")) {
             p.allow_forgeable_loopback_identity = true;
+        } else if (eql(u8, a, "--enable-file-transfer")) {
+            p.enable_file_transfer = true;
+        } else if (eql(u8, a, "--upload-dir")) {
+            p.upload_dir = try value(args, &i);
+        } else if (eql(u8, a, "--max-transfer-mb")) {
+            p.max_transfer_mb = std.fmt.parseInt(u32, try value(args, &i), 10) catch return error.BadNumber;
+            if (p.max_transfer_mb == 0 or p.max_transfer_mb > 4096) return error.BadNumber;
         } else if (eql(u8, a, "--enable-lab")) {
             p.lab = true;
         } else if (eql(u8, a, "--random-token")) {
@@ -141,6 +155,11 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
     p.own_addresses = own.items;
     p.allowed_hosts = hosts.items;
     if (p.token != null and p.token_file != null) return error.Usage;
+    // Transfers are a way to read and write files: only when asked for, never beside observe-only,
+    // and uploads only into a folder that is named.
+    if (p.upload_dir != null and !p.enable_file_transfer) return error.Usage;
+    if (p.enable_file_transfer and p.observe_only) return error.Usage;
+    if (p.upload_dir) |d| if (d.len == 0 or d[0] != '/') return error.Usage;
 
     switch (p.listen) {
         .unix => {
@@ -186,6 +205,9 @@ fn parseT(args: []const []const u8) Error!Parsed {
         .random_token = p.random_token,
         .allow_own_address = p.allow_own_address,
         .backend_secret_file = p.backend_secret_file,
+        .enable_file_transfer = p.enable_file_transfer,
+        .upload_dir = p.upload_dir,
+        .max_transfer_mb = p.max_transfer_mb,
         .allow_forgeable_loopback_identity = p.allow_forgeable_loopback_identity,
         .detect_own_addresses = p.detect_own_addresses,
         .observe_only = p.observe_only,
@@ -252,4 +274,20 @@ test "token and token file are exclusive; hosts and lab are carried" {
     const p = try parse(arena.allocator(), &.{ "--listen-tcp", "0", "--allow-host", "a.example", "--allow-host", "b.example", "--enable-lab" });
     try testing.expectEqual(@as(usize, 2), p.allowed_hosts.len);
     try testing.expect(p.lab);
+}
+
+test "file transfer is off unless asked for, and uploads need a named absolute folder" {
+    const off = try parseT(&.{ "--listen-tcp", "0" });
+    try testing.expect(!off.enable_file_transfer and off.upload_dir == null);
+    const on = try parseT(&.{ "--listen-tcp", "0", "--enable-file-transfer", "--upload-dir", "/home/me/Uploads", "--max-transfer-mb", "50" });
+    try testing.expect(on.enable_file_transfer);
+    try testing.expectEqualStrings("/home/me/Uploads", on.upload_dir.?);
+    try testing.expectEqual(@as(u32, 50), on.max_transfer_mb);
+    // A folder without the switch, a relative folder, an empty one, observe-only with transfer, silly sizes.
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--upload-dir", "/x" }));
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--enable-file-transfer", "--upload-dir", "x" }));
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--enable-file-transfer", "--upload-dir", "" }));
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--enable-file-transfer", "--observe-only" }));
+    try testing.expectError(error.BadNumber, parseT(&.{ "--listen-tcp", "0", "--max-transfer-mb", "0" }));
+    try testing.expectError(error.BadNumber, parseT(&.{ "--listen-tcp", "0", "--max-transfer-mb", "99999" }));
 }

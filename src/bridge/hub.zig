@@ -16,6 +16,7 @@ const Mirror = rex.mirror.Mirror;
 const Data = rex.data.Data;
 const Input = rex.input.Input;
 const protocol = @import("protocol.zig");
+const xfer = @import("xfer.zig");
 
 const log = std.log.scoped(.hub);
 
@@ -26,6 +27,8 @@ pub const Config = struct {
     history_lines: u32 = 1000,
     /// Live output held for one viewer before it is dropped to a redraw.
     max_live_bytes: usize = 1 << 20,
+    /// File transfer: off unless the owner turns it on. See `xfer.zig`.
+    transfer: xfer.Config = .{},
 };
 
 pub const Frame = struct {
@@ -250,6 +253,8 @@ pub const Hub = struct {
     api: Api,
     /// Serialises calls through `api` (it keeps `last_error`).
     api_mu: Io.Mutex = .init,
+    /// One-time tokens for file transfers (see `xfer.zig`).
+    xfers: xfer.Registry,
 
     mu: Io.Mutex = .init,
     terminals: std.StringHashMapUnmanaged(*Terminal) = .empty,
@@ -269,7 +274,7 @@ pub const Hub = struct {
     pub fn open(gpa: Allocator, io: Io, ctl: *Control, cfg: Config) !*Hub {
         const h = try gpa.create(Hub);
         errdefer gpa.destroy(h);
-        h.* = .{ .gpa = gpa, .io = io, .cfg = cfg, .ctl = ctl, .api = Api.init(gpa, ctl) };
+        h.* = .{ .gpa = gpa, .io = io, .cfg = cfg, .ctl = ctl, .api = Api.init(gpa, ctl), .xfers = xfer.Registry.init(gpa, io) };
         ctl.mu.lockUncancelable(io);
         h.seen_generation = ctl.generation;
         ctl.mu.unlock(io);
@@ -293,6 +298,7 @@ pub const Hub = struct {
         h.viewers.deinit(h.gpa);
         if (h.tree_json) |t| h.gpa.free(t);
         h.api.deinit();
+        h.xfers.deinit();
         h.gpa.destroy(h);
     }
 
@@ -346,6 +352,8 @@ pub const Hub = struct {
             .observe = observe,
             .locked = h.cfg.observe_only,
             .rex_up = h.rex_up,
+            .download = h.cfg.transfer.enabled and !h.cfg.observe_only,
+            .upload = h.cfg.transfer.enabled and !h.cfg.observe_only and h.cfg.transfer.upload_dir != null,
         }, .{}) catch return;
         defer h.gpa.free(text);
         v.pushText(text);
@@ -371,7 +379,7 @@ pub const Hub = struct {
 
     pub fn handle(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
         switch (msg) {
-            .text, .info, .clip, .redraw, .more_history => if (!h.allowHeavy(v)) return h.refuse(v, "rate", "too many requests"),
+            .text, .info, .clip, .ls, .dl, .ul, .redraw, .more_history => if (!h.allowHeavy(v)) return h.refuse(v, "rate", "too many requests"),
             else => {},
         }
         switch (msg) {
@@ -379,6 +387,7 @@ pub const Hub = struct {
             .dbg => {},
             .text => h.sendText(v),
             .info => h.sendInfo(v),
+            .ls, .dl, .ul => h.transfer(v, msg),
             .clip => {
                 v.mu.lockUncancelable(h.io);
                 const t = v.term;
@@ -437,6 +446,65 @@ pub const Hub = struct {
     }
 
     /// The Copy view: the terminal's whole text, for the browser to select from.
+    /// Directory listings and the first step of a download or upload: checked here, answered with a
+    /// token the page then presents over HTTP (see `server.zig`).
+    fn transfer(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
+        const what = @tagName(msg);
+        if (!h.cfg.transfer.enabled) return h.refuse(v, what, "file transfer is off on this bridge");
+        if (h.isObserving(v)) return h.refuse(v, what, "read-only");
+        v.mu.lockUncancelable(h.io);
+        const t = v.term;
+        v.mu.unlock(h.io);
+        const term = t orelse return h.refuse(v, what, "no terminal open");
+
+        h.api_mu.lockUncancelable(h.io);
+        defer h.api_mu.unlock(h.io);
+        switch (msg) {
+            .ls => |path| {
+                var d = h.api.listDir(term.session_id, term.block_id, path) catch |e| return h.fail(v, what, e);
+                defer d.deinit();
+                const Out = struct { n: []const u8, d: bool };
+                var list: std.ArrayList(Out) = .empty;
+                defer list.deinit(h.gpa);
+                for (d.value.entries) |e| list.append(h.gpa, .{ .n = e.name, .d = e.dir }) catch return;
+                const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "ls", .path = d.value.path, .home = d.value.home, .status = d.value.status, .entries = list.items, .truncated = d.value.truncated }, .{}) catch return;
+                defer h.gpa.free(out);
+                v.pushText(out);
+            },
+            .dl => |path| {
+                const ref = rex.transfer.newRef(h.io, "download:");
+                var t_info = h.api.downloadBegin(term.session_id, term.block_id, &ref, path) catch |e| {
+                    return h.refuse(v, what, if (h.api.last_error) |le| le else @errorName(e));
+                };
+                defer t_info.deinit();
+                if (t_info.value.size > h.cfg.transfer.max_bytes) {
+                    var buf: [96]u8 = undefined;
+                    return h.refuse(v, what, std.fmt.bufPrint(&buf, "too large: the limit is {d} MB", .{h.cfg.transfer.max_bytes / (1024 * 1024)}) catch "too large");
+                }
+                const name = h.gpa.dupe(u8, t_info.value.name) catch return;
+                const token = h.xfers.add(.{ .token = undefined, .kind = .download, .expires_ms = 0, .ticket = t_info.value.ticket, .name = name, .size = t_info.value.size }) catch return h.refuse(v, what, "too many transfers waiting");
+                const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "download", .token = token, .name = t_info.value.name, .size = t_info.value.size }, .{}) catch return;
+                defer h.gpa.free(out);
+                v.pushText(out);
+            },
+            .ul => |u| {
+                if (h.cfg.transfer.upload_dir == null) return h.refuse(v, what, "uploads are off on this bridge");
+                if (u.size > h.cfg.transfer.max_bytes) {
+                    var buf: [96]u8 = undefined;
+                    return h.refuse(v, what, std.fmt.bufPrint(&buf, "too large: the limit is {d} MB", .{h.cfg.transfer.max_bytes / (1024 * 1024)}) catch "too large");
+                }
+                const name = h.gpa.dupe(u8, u.name) catch return;
+                const sid = h.gpa.dupe(u8, term.session_id) catch return;
+                const bid = h.gpa.dupe(u8, term.block_id) catch return;
+                const token = h.xfers.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = u.size, .session_id = sid, .block_id = bid }) catch return h.refuse(v, what, "too many transfers waiting");
+                const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "upload", .token = token, .size = u.size }, .{}) catch return;
+                defer h.gpa.free(out);
+                v.pushText(out);
+            },
+            else => unreachable,
+        }
+    }
+
     fn sendInfo(h: *Hub, v: *Viewer) void {
         v.mu.lockUncancelable(h.io);
         const t = v.term;

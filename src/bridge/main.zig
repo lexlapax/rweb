@@ -9,6 +9,7 @@ pub const access = @import("access.zig");
 pub const protocol = @import("protocol.zig");
 pub const hub = @import("hub.zig");
 pub const assets = @import("assets.zig");
+pub const xfer = @import("xfer.zig");
 pub const server = @import("server.zig");
 pub const cli = @import("cli.zig");
 
@@ -90,7 +91,25 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     defer ctl.close();
-    const h = try hub.Hub.open(gpa, io, ctl, .{ .observe_only = parsed.observe_only, .history_lines = parsed.history_lines });
+    // File transfer: off unless asked for; uploads only into a folder that is ours alone.
+    var transfer: xfer.Config = .{};
+    if (parsed.enable_file_transfer) {
+        transfer.enabled = true;
+        transfer.max_bytes = @as(u64, parsed.max_transfer_mb) * 1024 * 1024;
+        if (parsed.upload_dir) |dir| {
+            checkUploadDir(arena, io, dir) catch |e| {
+                std.debug.print("rweb: cannot use upload folder {s}: {t}\n", .{ dir, e });
+                std.process.exit(2);
+            };
+            transfer.upload_dir = dir;
+        }
+        std.debug.print("rweb: file transfer ON: the page can download any file the terminal's user can read; uploads {s}{s}; limit {d} MB\n", .{
+            if (transfer.upload_dir != null) "go to " else "are off",
+            transfer.upload_dir orelse "",
+            parsed.max_transfer_mb,
+        });
+    }
+    const h = try hub.Hub.open(gpa, io, ctl, .{ .observe_only = parsed.observe_only, .history_lines = parsed.history_lines, .transfer = transfer });
     defer h.close();
 
     const listen: server.Listen = switch (parsed.listen) {
@@ -180,6 +199,19 @@ fn tailscaleDnsName(arena: std.mem.Allocator, io: Io) ![]const u8 {
     return name;
 }
 
+/// The upload folder: made 0700 if missing; must then be a directory of ours that others cannot enter.
+fn checkUploadDir(arena: std.mem.Allocator, io: Io, path: []const u8) !void {
+    _ = Io.Dir.cwd().createDirPathStatus(io, path, @enumFromInt(0o700)) catch {}; // a new folder is 0700
+
+    const st = try Io.Dir.cwd().statFile(io, path, .{});
+    if (st.kind != .directory) return error.NotADirectory;
+    if (@intFromEnum(st.permissions) & 0o077 != 0) return error.TooOpen;
+    const path_z = try std.fmt.allocPrintSentinel(arena, "{s}", .{path}, 0);
+    var sb: std.c.Stat = undefined;
+    if (std.c.stat(path_z, &sb) != 0) return error.FileNotFound;
+    if (sb.uid != std.c.getuid()) return error.NotOwned;
+}
+
 const SecretError = error{ TooOpen, NotOwned, TooShort, BadCharacters, FileNotFound, OutOfMemory } || Io.Dir.ReadFileAllocError || Io.Dir.StatFileError;
 
 fn secretFileFailed(path: []const u8, e: anyerror) noreturn {
@@ -250,6 +282,7 @@ test {
     _ = protocol;
     _ = hub;
     _ = assets;
+    _ = xfer;
     _ = server;
     _ = cli;
 }

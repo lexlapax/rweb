@@ -5,6 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Control = @import("control.zig").Control;
+const wire = @import("wire.zig");
 
 pub const Error = error{
     /// Rex answered with an error; see `Api.last_error`.
@@ -299,6 +300,81 @@ pub const Api = struct {
             };
         }
         return .{ .arena = arena, .value = info };
+    }
+
+    // ---- files ----
+
+    /// What `download_begin` returns: the ticket for the bytes stream, and what Rex says the file is.
+    pub const DownloadTicket = struct { ticket: [16]u8, name: []const u8, path: []const u8, size: u64 };
+
+    /// Ask Rex to open `path` (absolute, `~/...`, or relative to the terminal's foreground
+    /// process) for download. `ref` is `download:` and a new lower-case UUID.
+    pub fn downloadBegin(a: *Api, sid: []const u8, bid: []const u8, ref: []const u8, path: []const u8) Error!Owned(DownloadTicket) {
+        const args = std.json.Stringify.valueAlloc(a.gpa, .{ .ref = ref, .path = path }, .{}) catch return error.OutOfMemory;
+        defer a.gpa.free(args);
+        const rest = try std.fmt.allocPrint(a.gpa, ",\"args\":{s}", .{args});
+        defer a.gpa.free(rest);
+        const body = try a.blockBody(sid, bid, rest);
+        defer a.gpa.free(body);
+        var res = try a.run("com.superlogical.terminal.download_begin", body);
+        defer res.deinit();
+        var arena = std.heap.ArenaAllocator.init(a.gpa);
+        errdefer arena.deinit();
+        const al = arena.allocator();
+        const ticket = try ticketOf(res.value);
+        const size_v = if (res.value == .object) res.value.object.get("size") else null;
+        const size: u64 = if (size_v) |sv| (if (sv == .integer and sv.integer >= 0) @intCast(sv.integer) else 0) else 0;
+        // Allocate first, then move the arena into the result: a literal would copy it empty.
+        const name = try dupe(al, try str(res.value, "name"));
+        const path_out = try dupe(al, optStr(res.value, "path") orelse "");
+        return .{ .arena = arena, .value = .{ .ticket = ticket, .name = name, .path = path_out, .size = size } };
+    }
+
+    /// Paste `text` into the terminal, as if the user had pasted it (no Enter is sent).
+    pub fn paste(a: *Api, sid: []const u8, bid: []const u8, text: []const u8) Error!void {
+        const payload = std.json.Stringify.valueAlloc(a.gpa, .{ .text = text }, .{}) catch return error.OutOfMemory;
+        defer a.gpa.free(payload);
+        const rest = try std.fmt.allocPrint(a.gpa, ",\"event\":{{\"type\":\"paste\",\"payload\":{s}}}", .{payload});
+        defer a.gpa.free(rest);
+        const body = try a.blockBody(sid, bid, rest);
+        defer a.gpa.free(body);
+        var res = try a.run("block.event", body);
+        res.deinit();
+    }
+
+    pub const DirEntry = struct { name: []const u8, dir: bool };
+    pub const Dir = struct { path: []const u8, home: []const u8, status: []const u8, entries: []const DirEntry, truncated: bool };
+
+    /// List a directory (empty `path`: the terminal's working directory), files included.
+    pub fn listDir(a: *Api, sid: []const u8, bid: []const u8, path: []const u8) Error!Owned(Dir) {
+        const args = std.json.Stringify.valueAlloc(a.gpa, .{ .path = path, .files = true, .limit = 1000 }, .{}) catch return error.OutOfMemory;
+        defer a.gpa.free(args);
+        const rest = try std.fmt.allocPrint(a.gpa, ",\"args\":{s}", .{args});
+        defer a.gpa.free(rest);
+        const body = try a.blockBody(sid, bid, rest);
+        defer a.gpa.free(body);
+        var res = try a.run("com.superlogical.terminal.list_dir", body);
+        defer res.deinit();
+        var arena = std.heap.ArenaAllocator.init(a.gpa);
+        errdefer arena.deinit();
+        const al = arena.allocator();
+        var list: std.ArrayList(DirEntry) = .empty;
+        if (res.value == .object) if (res.value.object.get("entries")) |es| if (es == .array) for (es.array.items) |e| {
+            const name = optStr(e, "name") orelse continue;
+            const is_file = if (e == .object) (if (e.object.get("file")) |f| f == .bool and f.bool else false) else false;
+            try list.append(al, .{ .name = try dupe(al, name), .dir = !is_file });
+        };
+        const trunc = if (res.value == .object) (if (res.value.object.get("truncated")) |t| t == .bool and t.bool else false) else false;
+        const path_out = try dupe(al, optStr(res.value, "path") orelse "");
+        const home = try dupe(al, optStr(res.value, "home") orelse "");
+        const status = try dupe(al, optStr(res.value, "status") orelse "ok");
+        const entries = try list.toOwnedSlice(al);
+        return .{ .arena = arena, .value = .{ .path = path_out, .home = home, .status = status, .entries = entries, .truncated = trunc } };
+    }
+
+    fn ticketOf(v: std.json.Value) Error![16]u8 {
+        const t = optStr(v, "ticket") orelse return error.BadShape;
+        return wire.decodeTicket(t) catch error.BadShape;
     }
 
     /// Clear the screen and scrollback (`clear`) or return the terminal to its starting state (`reset`).

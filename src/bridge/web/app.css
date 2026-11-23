@@ -240,3 +240,26 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #keys.expanded [data-pos="left"] { grid-column: 1; grid-row: 2; }
 #keys.expanded [data-pos="down"] { grid-column: 2; grid-row: 2; }
 #keys.expanded [data-pos="right"] { grid-column: 3; grid-row: 2; }
+
+/* File picker (downloads) */
+#xferdlg { width: min(560px, 100vw); height: min(640px, 100%); max-width: 100vw; max-height: 100%; padding: 0; display: none; flex-direction: column; margin: auto; }
+#xferdlg[open] { display: flex; }
+#xf-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 6px; }
+#xf-head h2 { margin: 0; font-size: 15px; }
+#xf-head button, #xf-bar button { height: 32px; min-height: 0; padding: 0 12px; font-size: 13px; }
+#xf-bar { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; }
+#xf-bar button { width: 36px; padding: 0; flex: none; }
+#xf-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, Menlo, monospace; }
+#xf-tools { display: flex; align-items: center; gap: 10px; padding: 0 12px 8px; }
+#xf-tools input[type="search"] { flex: 1; height: 34px; padding: 0 10px; font-size: 13px; }
+#xf-hidden-l { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; color: var(--dim); white-space: nowrap; }
+#xf-hidden-l input { width: auto; }
+#xf-list { flex: 1; min-height: 0; overflow-y: auto; border-top: 1px solid var(--line); padding: 4px 6px; }
+#xf-list[aria-busy="true"] { opacity: .5; }
+.xf-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 42px; border: 0; background: none; text-align: left; padding: 0 10px; font-size: 13px; border-radius: 8px; }
+.xf-row:hover, .xf-row:active { background: #262626; }
+.xf-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xf-row.dir .xf-name { font-weight: 600; }
+.xf-ico { flex: none; width: 20px; text-align: center; }
+.xf-empty { padding: 20px 10px; }
+#xf-note { margin: 0; padding: 8px 12px; min-height: 18px; font-size: 12px; border-top: 1px solid var(--line); }

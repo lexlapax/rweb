@@ -165,3 +165,14 @@ test "vendored files match their pinned checksums" {
     };
     try std.testing.expectEqual(vendored, seen);
 }
+
+// All of app.js runs inside `main()`, where `send`, `state` and the rest live. Code added after the
+// closing `main().catch(…)` line would run outside it and fail at run time with "send is not defined",
+// which nothing else here would notice.
+test "app.js has nothing after its main() call" {
+    const a = find("/app.js").?;
+    const trimmed = std.mem.trimEnd(u8, a.body, " \t\r\n");
+    const last_nl = std.mem.lastIndexOfScalar(u8, trimmed, '\n') orelse 0;
+    const last_line = std.mem.trim(u8, trimmed[last_nl..], " \t\r\n");
+    try std.testing.expect(std.mem.startsWith(u8, last_line, "main().catch("));
+}

@@ -115,7 +115,8 @@ each fix permanent with a test that fails without it.
 - linux-box (unix socket): `--listen-unix` in a 0700 directory, peer uid 0 (tailscaled) is the default;
   `--owner-from-tailscale`; no backend secret (the peer check is the boundary).
 - Never in a unit file or launch agent: `--token`, `--debug-input`, `--enable-lab`,
-  `--allow-forgeable-loopback-identity`. The bridge prints a warning if an owner rule runs without
+  `--allow-forgeable-loopback-identity`; `--enable-file-transfer` only as a deliberate choice, with
+  `--upload-dir` in a folder only the user can enter. The bridge prints a warning if an owner rule runs without
   `--allow-host`.
 - Release binary: build with `-Doptimize=ReleaseSafe` or faster; pin and checksum it as `AGENTS.md` requires.
 - Re-run the checks in §3 on the machine it will run on after any change to Tailscale, Rex or a vendored file.
@@ -137,8 +138,9 @@ each fix permanent with a test that fails without it.
   core or xterm.js upstream.
 - **Observe-only is not a confidentiality boundary:** it still allows reading terminals, metadata and the
   clipboard.
-- **File transfer is still not implemented and is not approved.** It would give the page the bridge user's
-  file access and needs its own design and review (paths, symlinks, authorization, size limits, disclosure).
+- **File transfer** was designed, reviewed and built afterwards; see [file-transfer.md](file-transfer.md). It is
+  off unless `--enable-file-transfer` is given, and downloads give the page the owner's own file access (no
+  per-folder allow-list), which is why. Never enable it in a unit file without deciding that on purpose.
 - **Limits are not proofs.** Message sizes, queues and the new caps bound memory and CPU, but no targeted
   stress test of snapshot decoding, slow readers or connection churn was run.
 - **The vendored files' provenance is as recorded in `phase3-result.md`**; the manifest pins what is in the

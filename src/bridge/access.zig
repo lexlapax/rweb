@@ -47,6 +47,8 @@ pub const Request = struct {
     /// The `token` query parameter, already extracted.
     query_token: ?[]const u8 = null,
     is_websocket_upgrade: bool = false,
+    /// A request that changes something (PUT): it needs a matching `Origin`, like a WebSocket.
+    requires_origin: bool = false,
 
     pub fn header(r: Request, name: []const u8) ?[]const u8 {
         for (r.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
@@ -146,7 +148,7 @@ pub fn decide(cfg: Config, request: Request) Decision {
         if (!hostAllowed(cfg.allowed_hosts, h)) return .{ .deny = .bad_host };
     }
 
-    if (request.is_websocket_upgrade) {
+    if (request.is_websocket_upgrade or request.requires_origin) {
         const origin = request.header("origin") orelse return .{ .deny = .no_origin };
         if (!originMatchesHost(origin, host orelse return .{ .deny = .bad_origin })) return .{ .deny = .bad_origin };
     }
@@ -439,4 +441,22 @@ test "a host list refuses any other Host, on every request" {
     try testing.expect(hostAllowed(&.{"::1"}, "[::1]:8080"));
     try testing.expect(!hostAllowed(&.{"a.example"}, "a.example.evil.com"));
     try testing.expect(!hostAllowed(&.{"a.example"}, ""));
+}
+
+test "a PUT needs the page's own Origin, as a WebSocket does" {
+    const login = Header{ .name = "Tailscale-User-Login", .value = owner };
+    const xff = Header{ .name = "X-Forwarded-For", .value = "100.64.0.9" };
+    const host = Header{ .name = "X-Forwarded-Host", .value = "box.tail1234.ts.net" };
+    const ok = [_]Header{ login, xff, host, .{ .name = "Origin", .value = "https://box.tail1234.ts.net" } };
+    var r = req(&ok);
+    r.requires_origin = true;
+    try testing.expectEqual(Decision.allow, decide(base_cfg, r));
+    const evil = [_]Header{ login, xff, host, .{ .name = "Origin", .value = "https://evil.example" } };
+    r = req(&evil);
+    r.requires_origin = true;
+    try expectDeny(.bad_origin, base_cfg, r);
+    const none = [_]Header{ login, xff, host };
+    r = req(&none);
+    r.requires_origin = true;
+    try expectDeny(.no_origin, base_cfg, r);
 }

@@ -71,6 +71,25 @@
   <div id="copytext" tabindex="-1" role="group" aria-label="Terminal text, one line per row. Tap a line to start a selection."></div>
 </dialog>
 
+<dialog id="xferdlg" aria-labelledby="xf-title">
+  <div id="xf-head">
+    <h2 id="xf-title">Download a file</h2>
+    <button id="xf-close" type="button" aria-label="Close">Close</button>
+  </div>
+  <div id="xf-bar">
+    <button id="xf-up" type="button" aria-label="Parent folder" title="Parent folder">&#8593;</button>
+    <button id="xf-home" type="button" aria-label="Home folder" title="Home folder">~</button>
+    <div id="xf-path" class="dim" aria-live="polite"></div>
+  </div>
+  <div id="xf-tools">
+    <input id="xf-filter" type="search" placeholder="Filter, or type a /path and press Enter" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Filter names">
+    <label id="xf-hidden-l"><input id="xf-hidden" type="checkbox"> Hidden</label>
+  </div>
+  <div id="xf-list" role="list"></div>
+  <p id="xf-note" class="dim"></p>
+</dialog>
+<input id="upfile" type="file" multiple hidden>
+
 <dialog id="pastedlg" aria-labelledby="paste-title">
   <form method="dialog">
     <h2 id="paste-title">Paste</h2>
