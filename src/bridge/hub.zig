@@ -60,6 +60,10 @@ pub const Viewer = struct {
     in_redraw: bool = false,
     /// Frames dropped because the viewer fell behind, for tests and logs.
     overflows: u32 = 0,
+    /// Calls that make Rex or the mirror do real work (info, clipboard, text, redraw, history),
+    /// counted per second: a page cannot turn one browser tab into a load on Rex.
+    heavy_window_start: i64 = 0,
+    heavy_count: u32 = 0,
 
     /// Wait up to `timeout_ms` for the next frame; null on timeout or when closed. Does any
     /// pending redraw first. The caller frees the frame.
@@ -350,7 +354,26 @@ pub const Hub = struct {
     // ---- commands from a browser ----
 
     /// Run one message from a viewer. Problems are answered as `error` frames, not returned.
+    /// At most this many heavy requests a second from one browser.
+    pub const max_heavy_per_second: u32 = 8;
+
+    fn allowHeavy(h: *Hub, v: *Viewer) bool {
+        const now = std.Io.Clock.awake.now(h.io).toMilliseconds();
+        v.mu.lockUncancelable(h.io);
+        defer v.mu.unlock(h.io);
+        if (now - v.heavy_window_start >= 1000) {
+            v.heavy_window_start = now;
+            v.heavy_count = 0;
+        }
+        v.heavy_count += 1;
+        return v.heavy_count <= max_heavy_per_second;
+    }
+
     pub fn handle(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
+        switch (msg) {
+            .text, .info, .clip, .redraw, .more_history => if (!h.allowHeavy(v)) return h.refuse(v, "rate", "too many requests"),
+            else => {},
+        }
         switch (msg) {
             .ping => v.pushText("{\"t\":\"pong\"}"),
             .dbg => {},
@@ -408,7 +431,7 @@ pub const Hub = struct {
                 defer h.mu.unlock(h.io);
                 h.pushModeLocked(v);
             },
-            .in, .key, .paste, .mouse, .fit => h.input(v, msg),
+            .in, .key, .paste, .fit => h.input(v, msg),
             .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => h.manage(v, msg),
         }
     }
@@ -485,7 +508,6 @@ pub const Hub = struct {
                 term.input.blockEvent("paste", body) catch |e| h.fail(v, "paste", e);
             },
             .key => |k| term.input.key(k) catch |e| h.fail(v, "key", e),
-            .mouse => |m| term.input.blockEvent("mouse", m) catch |e| h.fail(v, "mouse", e),
             .fit => |f| {
                 // Only on request: take the block, then ask for the size.
                 h.api_mu.lockUncancelable(h.io);

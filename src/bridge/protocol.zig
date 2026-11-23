@@ -7,7 +7,7 @@
 //!   close_view                    stop viewing
 //!   in {d}                        typed or composed text (xterm.js onData)
 //!   key {key}                     a physical key, as Rex's `client.key` takes it
-//!   paste {d}   mouse {payload}   `block.event`s
+//!   paste {d}   a `block.event`
 //!   fit {cols, rows}              take ownership and resize (only when the user asks)
 //!   redraw / more_history         a fresh redraw, the latter with all the scrollback
 //!   text                          the screen and scrollback as plain text (reply: `text`)
@@ -39,8 +39,6 @@ pub const Msg = union(enum) {
     /// The `key` object as JSON text, forwarded to `client.key`.
     key: []const u8,
     paste: []const u8,
-    /// The `payload` as JSON text, forwarded in a `mouse` `block.event`.
-    mouse: []const u8,
     fit: struct { cols: u16, rows: u16 },
     redraw,
     more_history,
@@ -96,8 +94,7 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (eql(u8, t, "open")) return .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } };
     if (eql(u8, t, "in")) return .{ .in = try str(o, "d", max_input_bytes) };
     if (eql(u8, t, "paste")) return .{ .paste = try str(o, "d", max_input_bytes) };
-    if (eql(u8, t, "key")) return .{ .key = try jsonOf(arena, o, "key", 4096) };
-    if (eql(u8, t, "mouse")) return .{ .mouse = try jsonOf(arena, o, "payload", 4096) };
+    if (eql(u8, t, "key")) return .{ .key = try keyJson(arena, o) };
     if (eql(u8, t, "fit")) {
         const cols = try dim(o, "cols");
         const rows = try dim(o, "rows");
@@ -138,12 +135,49 @@ fn dim(o: std.json.ObjectMap, name: []const u8) ParseError!u16 {
 }
 
 /// The JSON text of an object-valued field.
-fn jsonOf(arena: Allocator, o: std.json.ObjectMap, name: []const u8, max: usize) ParseError![]const u8 {
-    const v = o.get(name) orelse return error.BadField;
+/// A key press, rebuilt from fields checked one by one so that nothing the browser adds reaches
+/// Rex's `client.key`, and with every value of the shape Rex expects.
+fn keyJson(arena: Allocator, o: std.json.ObjectMap) ParseError![]const u8 {
+    const v = o.get("key") orelse return error.BadField;
     if (v != .object) return error.BadField;
-    const text = std.json.Stringify.valueAlloc(arena, v, .{}) catch return error.OutOfMemory;
-    if (text.len > max) return error.TooLarge;
-    return text;
+    const k = v.object;
+    var it = k.iterator();
+    while (it.next()) |e| {
+        const known = [_][]const u8{ "key", "mods", "consumed_mods", "text", "unshifted_codepoint", "composing", "action" };
+        for (known) |name| if (std.mem.eql(u8, e.key_ptr.*, name)) break else {} else return error.BadField;
+    }
+    const key = try wordField(k, "key", 40);
+    const mods = if (k.contains("mods")) try wordField(k, "mods", 40) else "";
+    const consumed = if (k.contains("consumed_mods")) try wordField(k, "consumed_mods", 40) else "";
+    const action = if (k.contains("action")) try wordField(k, "action", 8) else "press";
+    if (!std.mem.eql(u8, action, "press") and !std.mem.eql(u8, action, "repeat") and !std.mem.eql(u8, action, "release")) return error.BadField;
+    var text: []const u8 = "";
+    if (k.get("text")) |t| {
+        if (t != .string or t.string.len > 16 or !std.unicode.utf8ValidateSlice(t.string)) return error.BadField;
+        text = t.string;
+    }
+    var cp: i64 = 0;
+    if (k.get("unshifted_codepoint")) |c| {
+        if (c != .integer or c.integer < 0 or c.integer > 0x10FFFF) return error.BadField;
+        cp = c.integer;
+    }
+    var composing = false;
+    if (k.get("composing")) |c| {
+        if (c != .bool) return error.BadField;
+        composing = c.bool;
+    }
+    return std.json.Stringify.valueAlloc(arena, .{
+        .key = key, .mods = mods, .consumed_mods = consumed, .text = text,
+        .unshifted_codepoint = cp, .composing = composing, .action = action,
+    }, .{}) catch return error.OutOfMemory;
+}
+
+/// A short field made of letters, digits, `_`, `+`, `,` and `-` only (key names and modifier lists).
+fn wordField(o: std.json.ObjectMap, name: []const u8, max: usize) ParseError![]const u8 {
+    const v = o.get(name) orelse return error.BadField;
+    if (v != .string or v.string.len > max) return error.BadField;
+    for (v.string) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '+' and c != ',' and c != '-') return error.BadField;
+    return v.string;
 }
 
 // ---- tests ----
@@ -156,7 +190,7 @@ fn parseT(text: []const u8) ParseError!Msg {
     const m = try parse(arena.allocator(), text);
     // Copy out nothing: only check tags and simple values in the tests below.
     return switch (m) {
-        .in, .paste, .key, .mouse, .open, .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => .tree, // marker: parsed
+        .in, .paste, .key, .open, .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => .tree, // marker: parsed
         else => m,
     };
 }
@@ -179,7 +213,7 @@ test "values are carried" {
     try testing.expectEqualStrings("session:1", m.open.session);
     try testing.expectEqualStrings("block:2", m.open.block);
     const k = try parse(arena.allocator(), "{\"t\":\"key\",\"key\":{\"key\":\"key_a\",\"mods\":\"ctrl\"}}");
-    try testing.expectEqualStrings("{\"key\":\"key_a\",\"mods\":\"ctrl\"}", k.key);
+    try testing.expectEqualStrings("{\"key\":\"key_a\",\"mods\":\"ctrl\",\"consumed_mods\":\"\",\"text\":\"\",\"unshifted_codepoint\":0,\"composing\":false,\"action\":\"press\"}", k.key);
     const i = try parse(arena.allocator(), "{\"t\":\"in\",\"d\":\"ls\\r\"}");
     try testing.expectEqualStrings("ls\r", i.in);
     const s = try parse(arena.allocator(), "{\"t\":\"new_session\"}");
@@ -207,4 +241,23 @@ test "rejects what it should" {
     defer testing.allocator.free(big);
     @memset(big, ' ');
     try t.expectError(error.TooLarge, parseT(big));
+}
+
+test "a key press is rebuilt from checked fields only" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const good = "{\"t\":\"key\",\"key\":{\"key\":\"key_a\",\"mods\":\"ctrl,shift\",\"consumed_mods\":\"\",\"text\":\"a\",\"unshifted_codepoint\":97,\"composing\":false,\"action\":\"press\"}}";
+    const m = try parse(arena.allocator(), good);
+    try testing.expectEqualStrings("{\"key\":\"key_a\",\"mods\":\"ctrl,shift\",\"consumed_mods\":\"\",\"text\":\"a\",\"unshifted_codepoint\":97,\"composing\":false,\"action\":\"press\"}", m.key);
+    // An extra field, a missing one, a wrong type, a key name with odd characters, a bad action.
+    const bad = [_][]const u8{
+        "{\"t\":\"key\",\"key\":{\"key\":\"a\",\"mods\":\"\",\"consumed_mods\":\"\",\"text\":\"\",\"unshifted_codepoint\":0,\"composing\":false,\"action\":\"press\",\"session_id\":\"x\"}}",
+        "{\"t\":\"key\",\"key\":{\"mods\":\"ctrl\"}}",
+        "{\"t\":\"key\",\"key\":{\"key\":\"a\",\"mods\":\"\",\"consumed_mods\":\"\",\"text\":\"\",\"unshifted_codepoint\":\"97\",\"composing\":false,\"action\":\"press\"}}",
+        "{\"t\":\"key\",\"key\":{\"key\":\"a\\\"}\",\"mods\":\"\",\"consumed_mods\":\"\",\"text\":\"\",\"unshifted_codepoint\":0,\"composing\":false,\"action\":\"press\"}}",
+        "{\"t\":\"key\",\"key\":{\"key\":\"a\",\"mods\":\"\",\"consumed_mods\":\"\",\"text\":\"\",\"unshifted_codepoint\":0,\"composing\":false,\"action\":\"explode\"}}",
+        "{\"t\":\"key\",\"key\":{\"key\":\"a\",\"mods\":\"\",\"consumed_mods\":\"\",\"text\":\"\",\"unshifted_codepoint\":99999999,\"composing\":false,\"action\":\"press\"}}",
+        "{\"t\":\"mouse\",\"payload\":{}}",
+    };
+    for (bad) |b| try testing.expect(std.meta.isError(parse(arena.allocator(), b)));
 }

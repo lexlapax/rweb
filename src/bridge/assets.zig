@@ -137,3 +137,31 @@ test "the page script uses no browser pop-ups and no HTML injection" {
     try std.testing.expect(std.mem.indexOf(u8, js, "insertAdjacentHTML") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "eval(") == null);
 }
+
+// Vendored code runs in the owner's browser with the page's authority. Each file's hash is pinned
+// in `web/vendor/SHA256SUMS` (made when the file was fetched, see docs/phase3-result.md); a changed
+// file fails this test until a person updates the manifest on purpose.
+test "vendored files match their pinned checksums" {
+    const manifest = @embedFile("web/vendor/SHA256SUMS");
+    var seen: usize = 0;
+    var lines = std.mem.tokenizeScalar(u8, manifest, '\n');
+    while (lines.next()) |line| {
+        var parts = std.mem.tokenizeAny(u8, line, " \t");
+        const want = parts.next() orelse continue;
+        const name = parts.next() orelse return error.BadManifest;
+        var path_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "/vendor/{s}", .{name});
+        const a = find(path) orelse return error.NotEmbedded;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(a.body, &digest, .{});
+        const got = std.fmt.bytesToHex(digest, .lower);
+        try std.testing.expectEqualStrings(want, &got);
+        seen += 1;
+    }
+    // Every vendored asset is in the manifest.
+    var vendored: usize = 0;
+    for (all) |a| if (std.mem.startsWith(u8, a.path, "/vendor/")) {
+        vendored += 1;
+    };
+    try std.testing.expectEqual(vendored, seen);
+}

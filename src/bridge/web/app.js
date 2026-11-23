@@ -28,6 +28,12 @@ const link = {lastRx: performance.now(), healthy: false};
 // ordinary text rows, so the phone's own long-press selection, handles and Copy work on it.
 // `?term=wterm` or `?term=xterm` chooses, and the choice is remembered on this device.
 async function main() {
+// A test token in the address would stay in history and be sent on every request; the server has
+// put it in a cookie by now, so the address bar and the socket use the cookie from here on.
+if (new URLSearchParams(location.search).has('token')) {
+  const q = new URLSearchParams(location.search); q.delete('token');
+  history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash);
+}
 const kind = (() => {
   const q = new URLSearchParams(location.search).get('term');
   if (q === 'wterm' || q === 'xterm') { LS.set('term', q); return q; }
@@ -74,13 +80,15 @@ function clearLatched() {
 // Pastes, mouse reports and keys xterm.js encodes come through onData. On a touch device typed
 // text does not (see the soft keyboard below).
 term.onData(d => {
+  d = K.stripReplies(d);                    // never type a terminal's answer to a program's question
+  if (!d) return;
   if (!canType()) { if (state.current && !link.healthy) notice('Not connected: not sent'); return; }
   if (d === '\r') softReset();                       // a new line starts: forget what was typed
   const r = K.applyLatched(state.latched, d);
   if (r.used) clearLatched();
   send({t: 'in', d: r.text});
 });
-term.onBinary(d => { if (canType()) send({t: 'in', d}); });
+term.onBinary(d => { d = K.stripReplies(d); if (d && canType()) send({t: 'in', d}); });
 
 // ---- soft keyboard ----
 // Phone keyboards compose words, hold them back until you press space, and on Backspace re-open

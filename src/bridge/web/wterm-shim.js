@@ -16,10 +16,15 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
   const wt = new WTerm(host, {core, cols: 80, rows: 24, autoResize: false, cursorBlink: true, scrollbackLines: 10000, onData: d => handlers.data(d), onBinary: () => {}});
   await wt.init();
   // Drop wterm's replies to terminal queries (see above), draining them so they cannot pile up.
-  if (wt.bridge && typeof wt.bridge.getResponse === 'function') {
-    const orig = wt.bridge.getResponse.bind(wt.bridge);
-    wt.bridge.getResponse = () => { while (orig() !== null) {} return null; };
+  // This is a security rule, not a nicety: a program's query ("report the title") answered by the
+  // browser and typed into the shell would let program output type commands. If the hook this
+  // relies on is missing (a different wterm), refuse to run: the page then uses xterm.js.
+  if (!wt.bridge || typeof wt.bridge.getResponse !== 'function') {
+    try { wt.destroy && wt.destroy(); } catch {}
+    throw new Error('wterm: cannot silence terminal replies on this build');
   }
+  const orig = wt.bridge.getResponse.bind(wt.bridge);
+  wt.bridge.getResponse = () => { while (orig() !== null) {} return null; };
   host.classList.add('rweb-wterm');
 
   // The font size the grid is drawn at now. The page asks for a preferred size; when the grid would

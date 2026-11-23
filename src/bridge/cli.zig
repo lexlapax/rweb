@@ -16,19 +16,32 @@ pub const usage =
     \\Who may connect:
     \\  --owner LOGIN             required Tailscale-User-Login (Tailscale Serve sets it)
     \\  --owner-from-tailscale    take the owner from this node's own Tailscale login (`tailscale status`)
-    \\  --token TOKEN             shared secret in the `token` query or `rweb-token` header
+    \\  --token TOKEN             shared secret in the `token` query or `rweb-token` header (tests only:
+    \\                            it shows in the process list; prefer --token-file)
+    \\  --token-file PATH         the same, read from a file only you can read (mode 0600)
     \\  --random-token            make a token and print the URL (loopback tests)
     \\  --own-address IP          this node's Tailscale address (repeatable); requests from
     \\                            it are refused. With --owner and none given, `tailscale ip`
     \\                            is asked; if that fails the bridge will not start
     \\  --allow-own-address       accept requests from this node's own address (single-user hosts)
     \\  --allow-peer-uid N|self   unix socket peers allowed (default: 0, tailscaled)
+    \\  --allow-host NAME         the only Host names requests may be for (repeatable); with
+    \\                            --owner-from-tailscale this node's own DNS name is added
+    \\  --backend-secret-file PATH
+    \\                            loopback TCP behind Tailscale Serve: the file (mode 0600, 32+
+    \\                            letters, digits, - or _) holds a secret first path segment; point
+    \\                            Serve at http://127.0.0.1:PORT/<secret>. Without it any local
+    \\                            process can forge the owner's identity headers
+    \\  --allow-forgeable-loopback-identity
+    \\                            loopback TCP with --owner and no backend secret, for tests on a
+    \\                            machine with one user
     \\
     \\Behaviour:
     \\  --rex-socket PATH         Rex's unix socket (default: found from XDG_RUNTIME_DIR or the Mac app)
     \\  --observe-only            never write, resize or change anything in Rex
     \\  --history-lines N         scrollback rows sent when a terminal opens (default 1000)
     \\  --debug-input             log what browsers send (typed text included): for testing a keyboard, never for deployment
+    \\  --enable-lab              serve the transport and selection lab pages (diagnostics; off by default)
     \\
 ;
 
@@ -40,7 +53,12 @@ pub const Parsed = struct {
     owner: ?[]const u8 = null,
     owner_from_tailscale: bool = false,
     token: ?[]const u8 = null,
+    token_file: ?[]const u8 = null,
     random_token: bool = false,
+    allowed_hosts: []const []const u8 = &.{},
+    backend_secret_file: ?[]const u8 = null,
+    allow_forgeable_loopback_identity: bool = false,
+    lab: bool = false,
     own_addresses: []const []const u8 = &.{},
     allow_own_address: bool = false,
     detect_own_addresses: bool = false,
@@ -61,6 +79,8 @@ pub const Error = error{
     BadNumber,
     MissingValue,
     UnknownOption,
+    /// A loopback TCP listener with an owner rule needs `--backend-secret-file`.
+    NeedBackendSecret,
 } || Allocator.Error;
 
 /// Parse `args` (without the program name). Slices in the result point into `args`, except
@@ -70,6 +90,7 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
     var p: Parsed = .{ .listen = undefined };
     var own: std.ArrayList([]const u8) = .empty;
     var uids: std.ArrayList(PeerUid) = .empty;
+    var hosts: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -87,6 +108,16 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
             p.owner_from_tailscale = true;
         } else if (eql(u8, a, "--token")) {
             p.token = try value(args, &i);
+        } else if (eql(u8, a, "--token-file")) {
+            p.token_file = try value(args, &i);
+        } else if (eql(u8, a, "--allow-host")) {
+            try hosts.append(arena, try value(args, &i));
+        } else if (eql(u8, a, "--backend-secret-file")) {
+            p.backend_secret_file = try value(args, &i);
+        } else if (eql(u8, a, "--allow-forgeable-loopback-identity")) {
+            p.allow_forgeable_loopback_identity = true;
+        } else if (eql(u8, a, "--enable-lab")) {
+            p.lab = true;
         } else if (eql(u8, a, "--random-token")) {
             p.random_token = true;
         } else if (eql(u8, a, "--own-address")) {
@@ -108,20 +139,26 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
     }
     p.listen = listen orelse return error.NoListener;
     p.own_addresses = own.items;
+    p.allowed_hosts = hosts.items;
+    if (p.token != null and p.token_file != null) return error.Usage;
 
     switch (p.listen) {
         .unix => {
             // Tailscaled dials as root; anything else must be asked for.
             p.peer_uids = if (uids.items.len > 0) uids.items else &[_]PeerUid{.{ .uid = 0 }};
-            if (p.owner == null and !p.owner_from_tailscale and p.token == null and !p.random_token) return error.NoAccessRule;
+            if (p.owner == null and !p.owner_from_tailscale and p.token == null and p.token_file == null and !p.random_token) return error.NoAccessRule;
+            if (p.backend_secret_file != null) return error.Usage; // a unix socket has a real peer check
         },
         .tcp => {
             if (uids.items.len > 0) return error.Usage; // no peer check on TCP
-            if (p.owner == null and !p.owner_from_tailscale and p.token == null) p.random_token = true;
+            if (p.owner == null and !p.owner_from_tailscale and p.token == null and p.token_file == null) p.random_token = true;
+            // Any local process can send an owner's identity headers to a loopback port. The owner
+            // rule is only worth having there when a secret path segment stands behind it.
+            if ((p.owner != null or p.owner_from_tailscale) and p.backend_secret_file == null and !p.allow_forgeable_loopback_identity) return error.NeedBackendSecret;
         },
     }
     if (p.owner != null and p.owner_from_tailscale) return error.Usage;
-    if (p.token != null) p.random_token = false;
+    if (p.token != null or p.token_file != null) p.random_token = false;
     // With an owner rule the own-address rule must be enforceable: fail closed.
     if ((p.owner != null or p.owner_from_tailscale) and !p.allow_own_address and p.own_addresses.len == 0) p.detect_own_addresses = true;
     return p;
@@ -148,6 +185,8 @@ fn parseT(args: []const []const u8) Error!Parsed {
         .token = p.token,
         .random_token = p.random_token,
         .allow_own_address = p.allow_own_address,
+        .backend_secret_file = p.backend_secret_file,
+        .allow_forgeable_loopback_identity = p.allow_forgeable_loopback_identity,
         .detect_own_addresses = p.detect_own_addresses,
         .observe_only = p.observe_only,
         .history_lines = p.history_lines,
@@ -191,4 +230,26 @@ test "owner from Tailscale counts as an owner rule" {
     const p = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner-from-tailscale" });
     try testing.expect(p.detect_own_addresses);
     try testing.expectError(error.Usage, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "a@b", "--owner-from-tailscale" }));
+}
+
+test "loopback TCP with an owner rule needs a backend secret, unless forgeability is accepted" {
+    try testing.expectError(error.NeedBackendSecret, parseT(&.{ "--listen-tcp", "7695", "--owner-from-tailscale" }));
+    try testing.expectError(error.NeedBackendSecret, parseT(&.{ "--listen-tcp", "7695", "--owner", "a@b", "--allow-own-address" }));
+    const ok = try parseT(&.{ "--listen-tcp", "7695", "--owner-from-tailscale", "--backend-secret-file", "/x/secret" });
+    try testing.expect(ok.backend_secret_file != null);
+    const test_only = try parseT(&.{ "--listen-tcp", "7695", "--owner", "a@b", "--allow-forgeable-loopback-identity" });
+    try testing.expect(test_only.allow_forgeable_loopback_identity);
+    // A token-only loopback listener is the test setup and needs none of it.
+    _ = try parseT(&.{ "--listen-tcp", "0" });
+    // A unix socket has a real peer check: a backend secret there is a mistake.
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "a@b", "--backend-secret-file", "/x/s" }));
+}
+
+test "token and token file are exclusive; hosts and lab are carried" {
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--token", "a", "--token-file", "/x" }));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), &.{ "--listen-tcp", "0", "--allow-host", "a.example", "--allow-host", "b.example", "--enable-lab" });
+    try testing.expectEqual(@as(usize, 2), p.allowed_hosts.len);
+    try testing.expect(p.lab);
 }

@@ -115,6 +115,25 @@
     return lines.slice(r.from, r.to + 1).join('\n');
   }
 
+  // What a terminal writes back to answer a program's question (cursor position, device
+  // attributes, mode reports, title and colour reports, ...). Rex's own terminal has already
+  // answered the program; one answered here and typed into the shell would let program output
+  // type text. Keys, text, pastes, mouse and focus reports are not replies and pass.
+  const REPLIES = [
+    /\x1b\[[?>=]?[0-9;:]*[$ ]?[cn]/g,           // device attributes, device status (0n, ?..n, ...)
+    /\x1b\[[0-9]+;[0-9]+R/g,                   // cursor position report
+    /\x1b\[\??[0-9;:]*\$y/g,                    // mode report
+    /\x1b\[\?[0-9;]*u/g,                       // keyboard protocol flags report
+    /\x1b\[[0-9;]*[ ]?[xt]/g,                  // terminal parameters, window size reports
+    /\x1bP[^\x1b\x07]*(?:\x1b\\|\x07|\x9c)/g,   // DCS replies (XTVERSION, DECRQSS, XTGETTCAP)
+    /\x1b\][^\x1b\x07]*(?:\x1b\\|\x07|\x9c)/g,  // OSC replies (colours, title, clipboard)
+  ];
+  function stripReplies(text) {
+    let out = String(text);
+    for (const re of REPLIES) out = out.replace(re, '');
+    return out;
+  }
+
   const FONT_MIN = 8, FONT_MAX = 28, FONT_DEFAULT = 14;
   function clampFont(n) {
     n = Math.round(Number(n));
@@ -129,7 +148,7 @@
     return Math.max(floor === undefined ? 0.35 : floor, Math.min(1, stageWidth / screenWidth));
   }
 
-  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

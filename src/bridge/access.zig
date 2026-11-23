@@ -11,7 +11,13 @@
 //!   exposure is accepted and recorded for desktop-mac.
 //! - `X-Forwarded-For` naming one of this node's own Tailscale addresses means a local process
 //!   asked Serve for the node's name and got the owner's identity: refused unless the machine's
-//!   setting allows it (single-user hosts).
+//!   setting allows it (single-user hosts). Addresses are compared as addresses, not as text
+//!   (`::ffff:100.64.0.5` is `100.64.0.5`), and while the rule is on, a request with no
+//!   `X-Forwarded-For`, or one that is not an address, is refused too.
+//! - A security-relevant header that appears twice is ambiguous (which one did the proxy set?):
+//!   refused.
+//! - With `allowed_hosts`, the `Host` (or `X-Forwarded-Host`) of every request must be one of
+//!   them, so a page reaching the bridge through a rebound DNS name gets nothing.
 //! - A WebSocket upgrade must carry an `Origin` whose host is `X-Forwarded-Host` (or `Host`
 //!   when no proxy sits in front), so a page on another site cannot open one.
 //! - A test or loopback deployment may also require a shared token.
@@ -28,6 +34,8 @@ pub const Config = struct {
     allow_own_address: bool = false,
     /// For a unix listener: the peer uids allowed. Null for a TCP listener (no peer check).
     allowed_peer_uids: ?[]const u32 = null,
+    /// Host names (without port) a request may be for. Empty: not checked.
+    allowed_hosts: []const []const u8 = &.{},
 };
 
 pub const Header = struct { name: []const u8, value: []const u8 };
@@ -57,6 +65,10 @@ pub const Refusal = enum {
     no_origin,
     bad_origin,
     bad_token,
+    ambiguous_header,
+    bad_host,
+    no_forwarded_for,
+    bad_forwarded_for,
 
     pub fn text(r: Refusal) []const u8 {
         return switch (r) {
@@ -69,6 +81,10 @@ pub const Refusal = enum {
             .no_origin => "missing Origin",
             .bad_origin => "bad Origin",
             .bad_token => "bad token",
+            .ambiguous_header => "a header that must appear once appears twice",
+            .bad_host => "host not allowed",
+            .no_forwarded_for => "no X-Forwarded-For",
+            .bad_forwarded_for => "X-Forwarded-For is not an address",
         };
     }
 };
@@ -91,20 +107,31 @@ pub fn decide(cfg: Config, request: Request) Decision {
         if (!ok) return .{ .deny = .wrong_peer };
     }
 
-    if (request.header("tailscale-funnel-request") != null) return .{ .deny = .funnel };
+    if (duplicatedSecurityHeader(request.headers)) return .{ .deny = .ambiguous_header };
+
+    // Funnel marks public-internet requests; refuse any header in its family.
+    for (request.headers) |h| {
+        if (std.ascii.startsWithIgnoreCase(h.name, "tailscale-funnel")) return .{ .deny = .funnel };
+    }
 
     if (cfg.owner) |want_owner| {
         const login = request.header("tailscale-user-login") orelse return .{ .deny = .no_identity };
         if (!std.mem.eql(u8, login, want_owner)) return .{ .deny = .wrong_user };
     }
 
-    if (!cfg.allow_own_address) {
-        if (request.header("x-forwarded-for")) |xff| {
-            var it = std.mem.tokenizeAny(u8, xff, ", ");
-            while (it.next()) |addr| for (cfg.own_addresses) |own| {
-                if (std.mem.eql(u8, addr, own)) return .{ .deny = .own_address };
-            };
+    if (!cfg.allow_own_address and cfg.own_addresses.len > 0) {
+        const xff = request.header("x-forwarded-for") orelse return .{ .deny = .no_forwarded_for };
+        var seen = false;
+        var it = std.mem.tokenizeAny(u8, xff, ", ");
+        while (it.next()) |addr| {
+            seen = true;
+            const a = parseAddress(addr) orelse return .{ .deny = .bad_forwarded_for };
+            for (cfg.own_addresses) |own| {
+                const o = parseAddress(own) orelse continue;
+                if (sameAddress(a, o)) return .{ .deny = .own_address };
+            }
         }
+        if (!seen) return .{ .deny = .bad_forwarded_for };
     }
 
     if (cfg.token) |want| {
@@ -113,12 +140,67 @@ pub fn decide(cfg: Config, request: Request) Decision {
         if (!constantTimeEql(want, got)) return .{ .deny = .bad_token };
     }
 
+    const host = request.header("x-forwarded-host") orelse request.header("host");
+    if (cfg.allowed_hosts.len > 0) {
+        const h = host orelse return .{ .deny = .bad_host };
+        if (!hostAllowed(cfg.allowed_hosts, h)) return .{ .deny = .bad_host };
+    }
+
     if (request.is_websocket_upgrade) {
         const origin = request.header("origin") orelse return .{ .deny = .no_origin };
-        const host = request.header("x-forwarded-host") orelse request.header("host") orelse return .{ .deny = .bad_origin };
-        if (!originMatchesHost(origin, host)) return .{ .deny = .bad_origin };
+        if (!originMatchesHost(origin, host orelse return .{ .deny = .bad_origin })) return .{ .deny = .bad_origin };
     }
     return .allow;
+}
+
+/// Headers whose single value the decision relies on. Two of them cannot both be the proxy's.
+const single_headers = [_][]const u8{
+    "host",                 "origin",           "x-forwarded-host", "x-forwarded-for",
+    "tailscale-user-login", "rweb-token",       "x-forwarded-proto",
+};
+
+fn duplicatedSecurityHeader(headers: []const Header) bool {
+    for (single_headers) |name| {
+        var n: u32 = 0;
+        for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) {
+            n += 1;
+        };
+        if (n > 1) return true;
+    }
+    return false;
+}
+
+/// `host[:port]` against a list of bare host names.
+pub fn hostAllowed(allowed: []const []const u8, host: []const u8) bool {
+    var name = host;
+    if (name.len > 0 and name[0] == '[') { // [v6]:port
+        const close = std.mem.indexOfScalar(u8, name, ']') orelse return false;
+        name = name[1..close];
+    } else if (std.mem.lastIndexOfScalar(u8, name, ':')) |c| {
+        if (std.mem.indexOfScalar(u8, name[0..c], ':') == null) name = name[0..c]; // not a bare v6
+    }
+    for (allowed) |a| if (std.ascii.eqlIgnoreCase(a, name)) return true;
+    return false;
+}
+
+const Ip = union(enum) { v4: [4]u8, v6: [16]u8 };
+
+/// An IP literal as bytes, with an IPv4-mapped IPv6 address turned into IPv4 and any zone dropped.
+fn parseAddress(text: []const u8) ?Ip {
+    const t = std.mem.trim(u8, text, "[]");
+    if (std.Io.net.Ip4Address.parse(t, 0)) |a| return .{ .v4 = a.bytes } else |_| {}
+    const no_zone = t[0 .. std.mem.indexOfScalar(u8, t, '%') orelse t.len];
+    const a6 = std.Io.net.Ip6Address.parse(no_zone, 0) catch return null;
+    const b = a6.bytes;
+    if (std.mem.allEqual(u8, b[0..10], 0) and b[10] == 0xff and b[11] == 0xff) return .{ .v4 = b[12..16].* };
+    return .{ .v6 = b };
+}
+
+fn sameAddress(a: Ip, b: Ip) bool {
+    return switch (a) {
+        .v4 => |x| b == .v4 and std.mem.eql(u8, &x, &b.v4),
+        .v6 => |x| b == .v6 and std.mem.eql(u8, &x, &b.v6),
+    };
 }
 
 /// `Origin: https://host[:port]` against a `Host`-style `host[:port]`.
@@ -215,6 +297,7 @@ test "refuses the node's own address, unless the machine allows it" {
 test "websocket upgrades need an Origin that matches the forwarded host" {
     const ok = [_]Header{
         .{ .name = "Tailscale-User-Login", .value = owner },
+        .{ .name = "X-Forwarded-For", .value = "100.64.0.9" },
         .{ .name = "X-Forwarded-Host", .value = "box.tail1234.ts.net:10443" },
         .{ .name = "Origin", .value = "https://box.tail1234.ts.net:10443" },
     };
@@ -224,6 +307,7 @@ test "websocket upgrades need an Origin that matches the forwarded host" {
 
     const evil = [_]Header{
         .{ .name = "Tailscale-User-Login", .value = owner },
+        .{ .name = "X-Forwarded-For", .value = "100.64.0.9" },
         .{ .name = "X-Forwarded-Host", .value = "box.tail1234.ts.net:10443" },
         .{ .name = "Origin", .value = "https://evil.example" },
     };
@@ -231,7 +315,7 @@ test "websocket upgrades need an Origin that matches the forwarded host" {
     r.is_websocket_upgrade = true;
     try expectDeny(.bad_origin, base_cfg, r);
 
-    const none = [_]Header{.{ .name = "Tailscale-User-Login", .value = owner }};
+    const none = [_]Header{ .{ .name = "Tailscale-User-Login", .value = owner }, .{ .name = "X-Forwarded-For", .value = "100.64.0.9" } };
     r = req(&none);
     r.is_websocket_upgrade = true;
     try expectDeny(.no_origin, base_cfg, r);
@@ -255,7 +339,7 @@ test "unix peers: only the allowed uids" {
     var cfg = base_cfg;
     const uids = [_]u32{0};
     cfg.allowed_peer_uids = &uids;
-    const h = [_]Header{.{ .name = "Tailscale-User-Login", .value = owner }};
+    const h = [_]Header{ .{ .name = "Tailscale-User-Login", .value = owner }, .{ .name = "X-Forwarded-For", .value = "100.64.0.9" } };
     var r = req(&h);
     r.peer_uid = 0;
     try testing.expectEqual(Decision.allow, decide(cfg, r));
@@ -298,4 +382,61 @@ test "token from a cookie (subresources and the socket carry it, not the query)"
     try expectDeny(.bad_token, cfg, req(&other));
     try testing.expectEqualStrings("1", cookieValue("x=1; y=2; z=3", "x").?);
     try testing.expect(cookieValue("", "x") == null);
+}
+
+test "the own-address rule compares addresses, and fails closed" {
+    const login = Header{ .name = "Tailscale-User-Login", .value = owner };
+    // An IPv4-mapped IPv6 spelling, a differently written IPv6 spelling, bracketed, zoned.
+    const mapped = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "::ffff:100.64.0.5" } };
+    try expectDeny(.own_address, base_cfg, req(&mapped));
+    const long6 = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "FD7A:115C:A1E0:0:0:0:0:5" } };
+    try expectDeny(.own_address, base_cfg, req(&long6));
+    const zoned = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "[fd7a:115c:a1e0::5%1]" } };
+    try expectDeny(.own_address, base_cfg, req(&zoned));
+    // No X-Forwarded-For at all, an empty one, and one that is not an address.
+    try expectDeny(.no_forwarded_for, base_cfg, req(&.{login}));
+    const empty = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = " , " } };
+    try expectDeny(.bad_forwarded_for, base_cfg, req(&empty));
+    const junk = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "100.64.0.9, not-an-ip" } };
+    try expectDeny(.bad_forwarded_for, base_cfg, req(&junk));
+    // A near miss is somebody else.
+    const near = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "100.64.0.50" } };
+    try testing.expectEqual(Decision.allow, decide(base_cfg, req(&near)));
+}
+
+test "a security header that appears twice is refused, in any case" {
+    const login = Header{ .name = "Tailscale-User-Login", .value = owner };
+    const xff = Header{ .name = "X-Forwarded-For", .value = "100.64.0.9" };
+    const twice = [_]Header{ login, .{ .name = "tailscale-user-login", .value = owner }, xff };
+    try expectDeny(.ambiguous_header, base_cfg, req(&twice));
+    const two_xff = [_]Header{ login, xff, .{ .name = "x-forwarded-for", .value = "100.64.0.5" } };
+    try expectDeny(.ambiguous_header, base_cfg, req(&two_xff));
+    const two_host = [_]Header{ login, xff, .{ .name = "Host", .value = "a" }, .{ .name = "HOST", .value = "b" } };
+    try expectDeny(.ambiguous_header, base_cfg, req(&two_host));
+}
+
+test "every Funnel header refuses, not only one spelling" {
+    const login = Header{ .name = "Tailscale-User-Login", .value = owner };
+    const h = [_]Header{ login, .{ .name = "tailscale-funnel-something-new", .value = "1" } };
+    try expectDeny(.funnel, base_cfg, req(&h));
+}
+
+test "a host list refuses any other Host, on every request" {
+    var cfg = base_cfg;
+    cfg.allowed_hosts = &.{"box.tail1234.ts.net"};
+    const login = Header{ .name = "Tailscale-User-Login", .value = owner };
+    const xff = Header{ .name = "X-Forwarded-For", .value = "100.64.0.9" };
+    const ok = [_]Header{ login, xff, .{ .name = "X-Forwarded-Host", .value = "BOX.tail1234.ts.net:10443" } };
+    try testing.expectEqual(Decision.allow, decide(cfg, req(&ok)));
+    const rebound = [_]Header{ login, xff, .{ .name = "Host", .value = "evil.example" } };
+    try expectDeny(.bad_host, cfg, req(&rebound));
+    const none = [_]Header{ login, xff };
+    try expectDeny(.bad_host, cfg, req(&none));
+    // The forwarded host wins over Host, so a proxy-supplied name cannot be bypassed by Host.
+    const mixed = [_]Header{ login, xff, .{ .name = "Host", .value = "box.tail1234.ts.net" }, .{ .name = "X-Forwarded-Host", .value = "evil.example" } };
+    try expectDeny(.bad_host, cfg, req(&mixed));
+    try testing.expect(hostAllowed(&.{"a.example"}, "a.example"));
+    try testing.expect(hostAllowed(&.{"::1"}, "[::1]:8080"));
+    try testing.expect(!hostAllowed(&.{"a.example"}, "a.example.evil.com"));
+    try testing.expect(!hostAllowed(&.{"a.example"}, ""));
 }

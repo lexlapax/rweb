@@ -28,6 +28,18 @@ pub const Options = struct {
     max_connections: u32 = 64,
     /// Log what browsers send, typed text included. For keyboard testing only.
     debug_input: bool = false,
+    /// A secret first path segment every request must carry, for a loopback TCP listener where
+    /// any local process could otherwise forge the proxy's identity headers: Tailscale Serve is
+    /// pointed at `http://127.0.0.1:PORT/<secret>` and adds it, a local process does not know it.
+    /// Requests without it get a plain 404 before anything else is looked at.
+    backend_secret: ?[]const u8 = null,
+    /// Serve the transport-lab and selection-lab pages and endpoints (diagnostics, off by default).
+    lab: bool = false,
+    /// How long a new connection may take to send its request head.
+    head_timeout_ms: u32 = 10_000,
+    /// Connections that have not yet passed the access check, at most. The rest of
+    /// `max_connections` is for requests that did.
+    max_pending: u32 = 16,
 };
 
 const security_headers = [_]std.http.Header{
@@ -35,6 +47,9 @@ const security_headers = [_]std.http.Header{
     .{ .name = "x-content-type-options", .value = "nosniff" },
     .{ .name = "referrer-policy", .value = "no-referrer" },
     .{ .name = "cross-origin-opener-policy", .value = "same-origin" },
+    .{ .name = "cross-origin-resource-policy", .value = "same-origin" },
+    .{ .name = "x-frame-options", .value = "DENY" },
+    .{ .name = "permissions-policy", .value = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()" },
 };
 
 /// `security_headers` plus `extra`, in `buf`.
@@ -67,6 +82,8 @@ pub const Server = struct {
     accept_task: ?Io.Future(void) = null,
     group: Io.Group = .init,
     active: std.atomic.Value(u32) = .init(0),
+    /// Connections accepted but not yet through the access check.
+    pending: std.atomic.Value(u32) = .init(0),
     stopping: std.atomic.Value(bool) = .init(false),
     /// Accepted streams, so `stop` can shut them (cancelling a task blocked in a read is not
     /// reliable on its own).
@@ -88,7 +105,7 @@ pub const Server = struct {
         switch (opts.listen) {
             .unix => |path| {
                 try prepareSocketDir(io, path);
-                Io.Dir.deleteFileAbsolute(io, path) catch {};
+                try clearStaleSocket(io, path);
                 const old = umask(0o177); // the socket is created 0600
                 defer _ = umask(old);
                 const addr = try Io.net.UnixAddress.init(path);
@@ -151,15 +168,38 @@ pub const Server = struct {
                 conn.close(s.io);
                 return;
             }
-            if (s.active.load(.acquire) >= s.opts.max_connections) {
+            // A unix peer is checked at once, before it can hold anything.
+            if (s.opts.listen == .unix) if (s.opts.access.allowed_peer_uids) |uids| {
+                const uid = peerUid(conn);
+                const ok = if (uid) |u| std.mem.indexOfScalar(u32, uids, u) != null else false;
+                if (!ok) {
+                    s.last_refusal.store(@intFromEnum(access.Refusal.wrong_peer), .release);
+                    _ = s.refusals.fetchAdd(1, .acq_rel);
+                    log.info("refused: {s}", .{access.Refusal.wrong_peer.text()});
+                    conn.close(s.io);
+                    continue;
+                }
+            };
+            if (s.active.load(.acquire) >= s.opts.max_connections or s.pending.load(.acquire) >= s.opts.max_pending) {
                 conn.close(s.io);
                 continue;
             }
             _ = s.active.fetchAdd(1, .acq_rel);
+            _ = s.pending.fetchAdd(1, .acq_rel);
             s.group.concurrent(s.io, handleConn, .{ s, conn }) catch {
                 _ = s.active.fetchSub(1, .acq_rel);
+                _ = s.pending.fetchSub(1, .acq_rel);
                 conn.close(s.io);
             };
+        }
+    }
+
+    /// Cuts a connection that has not sent a complete request head in time.
+    fn headWatchdog(s: *Server, conn: Io.net.Stream, done: *std.atomic.Value(bool)) void {
+        s.io.sleep(.fromMilliseconds(s.opts.head_timeout_ms), .awake) catch return;
+        if (!done.load(.acquire)) {
+            log.info("dropping a connection that sent no request in {d} ms", .{s.opts.head_timeout_ms});
+            conn.shutdown(s.io, .both) catch {};
         }
     }
 
@@ -167,7 +207,12 @@ pub const Server = struct {
         s.conns_mu.lockUncancelable(s.io);
         s.conns.append(s.gpa, conn) catch {};
         s.conns_mu.unlock(s.io);
+        var pending = true;
+        var head_done: std.atomic.Value(bool) = .init(false);
+        var watchdog: ?Io.Future(void) = s.io.concurrent(headWatchdog, .{ s, conn, &head_done }) catch null;
         defer {
+            if (watchdog) |*w| w.cancel(s.io);
+            if (pending) _ = s.pending.fetchSub(1, .acq_rel);
             s.conns_mu.lockUncancelable(s.io);
             for (s.conns.items, 0..) |c, i| if (c.socket.handle == conn.socket.handle) {
                 _ = s.conns.swapRemove(i);
@@ -177,10 +222,10 @@ pub const Server = struct {
             _ = s.active.fetchSub(1, .acq_rel);
             conn.close(s.io);
         }
-        s.serve(conn) catch |e| log.debug("connection ended: {t}", .{e});
+        s.serve(conn, &pending, &head_done) catch |e| log.debug("connection ended: {t}", .{e});
     }
 
-    fn serve(s: *Server, conn: Io.net.Stream) !void {
+    fn serve(s: *Server, conn: Io.net.Stream, pending: *bool, head_done: *std.atomic.Value(bool)) !void {
         const gpa = s.gpa;
         const recv = try gpa.alloc(u8, 16 * 1024);
         defer gpa.free(recv);
@@ -190,28 +235,57 @@ pub const Server = struct {
         var w = conn.writer(s.io, send);
         var http = std.http.Server.init(&r.interface, &w.interface);
         var req = try http.receiveHead();
+        head_done.store(true, .release);
         const t_head = std.Io.Clock.awake.now(s.io).toMilliseconds();
-        defer log.info("request {s} {s} (head read at {d}, handled in {d} ms)", .{ @tagName(req.head.method), pathOf(req.head.target), t_head, std.Io.Clock.awake.now(s.io).toMilliseconds() - t_head });
+        // The request log names only a path the bridge knows (never the secret prefix, a query,
+        // or text a client chose, which could carry a token or forge log lines).
+        var logged_path: []const u8 = "(unparsed)";
+        defer log.info("request {s} {s} (head read at {d}, handled in {d} ms)", .{ @tagName(req.head.method), logged_path, t_head, std.Io.Clock.awake.now(s.io).toMilliseconds() - t_head });
+
+        // ---- the backend secret, if there is one: first, and answered with a bare 404 ----
+        const rest: []const u8 = if (s.opts.backend_secret) |secret|
+            (stripSecret(req.head.target, secret) orelse {
+                logged_path = "(wrong prefix)";
+                s.last_refusal.store(@intFromEnum(access.Refusal.wrong_peer), .release);
+                _ = s.refusals.fetchAdd(1, .acq_rel);
+                try req.respond("not found\n", .{ .status = .not_found, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+                return;
+            })
+        else
+            req.head.target;
+        const path_part = rest[0 .. std.mem.indexOfScalar(u8, rest, '?') orelse rest.len];
+        const path = if (path_part.len == 0) "/" else path_part;
+        logged_path = knownPath(path);
 
         // ---- access: before anything else ----
-        var hdrs: [48]access.Header = undefined;
+        var hdrs: [64]access.Header = undefined;
         var n: usize = 0;
         var it = req.iterateHeaders();
         while (it.next()) |h| {
-            if (n == hdrs.len) break;
+            if (n == hdrs.len) { // never judge a request on part of its headers
+                s.last_refusal.store(@intFromEnum(access.Refusal.ambiguous_header), .release);
+                _ = s.refusals.fetchAdd(1, .acq_rel);
+                log.info("refused: too many headers", .{});
+                try req.respond("too many headers\n", .{ .status = .request_header_fields_too_large, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+                return;
+            }
             hdrs[n] = .{ .name = h.name, .value = h.value };
             n += 1;
         }
-        const target = req.head.target;
         const upgrade = req.upgradeRequested();
         const areq: access.Request = .{
             .peer_uid = if (s.opts.listen == .unix) peerUid(conn) else null,
             .headers = hdrs[0..n],
-            .query_token = access.queryToken(target),
+            .query_token = access.queryToken(rest),
             .is_websocket_upgrade = upgrade == .websocket,
         };
         switch (access.decide(s.opts.access, areq)) {
-            .allow => {},
+            .allow => {
+                if (pending.*) {
+                    pending.* = false;
+                    _ = s.pending.fetchSub(1, .acq_rel);
+                }
+            },
             .deny => |why| {
                 s.last_refusal.store(@intFromEnum(why), .release);
                 _ = s.refusals.fetchAdd(1, .acq_rel);
@@ -225,7 +299,11 @@ pub const Server = struct {
             try req.respond("method not allowed\n", .{ .status = .method_not_allowed, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
             return;
         }
-        const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+        const is_lab = std.mem.startsWith(u8, path, "/lab") or std.mem.startsWith(u8, path, "/api/lab");
+        if (is_lab and !s.opts.lab) {
+            try req.respond("not found\n", .{ .status = .not_found, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+            return;
+        }
 
         if (std.mem.eql(u8, path, "/ws")) {
             const key = switch (upgrade) {
@@ -253,7 +331,7 @@ pub const Server = struct {
             return;
         }
         if (std.mem.eql(u8, path, "/api/lab/result")) {
-            log.info("lab result: {s}", .{target[@min(target.len, (std.mem.indexOfScalar(u8, target, '?') orelse target.len - 1) + 1)..]});
+            log.info("lab result received", .{}); // never the query: it can carry a token
             try req.respond("{\"ok\":true}", .{ .keep_alive = false, .extra_headers = &(security_headers ++ no_store ++ [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }}) });
             return;
         }
@@ -297,9 +375,13 @@ pub const Server = struct {
         const is_root = std.mem.eql(u8, a.path, "/");
         // A page opened with `?token=` keeps the token in a same-site cookie, so its scripts,
         // styles and socket need no query string. That response is never a 304.
-        var cookie_buf: [128]u8 = undefined;
+        var cookie_buf: [160]u8 = undefined;
+        var behind_https = false;
+        for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-proto") and std.ascii.eqlIgnoreCase(h.value, "https")) {
+            behind_https = true;
+        };
         const cookie: ?[]const u8 = if (s.opts.access.token != null and query_token != null and is_root)
-            std.fmt.bufPrint(&cookie_buf, "rweb-token={s}; Path=/; HttpOnly; SameSite=Strict", .{query_token.?}) catch null
+            std.fmt.bufPrint(&cookie_buf, "rweb-token={s}; Path=/; HttpOnly; SameSite=Strict{s}", .{ query_token.?, if (behind_https) "; Secure" else "" }) catch null
         else
             null;
 
@@ -461,9 +543,40 @@ pub const Server = struct {
     }
 };
 
-/// A request target without its query string (which may hold a token).
-fn pathOf(target: []const u8) []const u8 {
-    return target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+/// What follows the secret first segment of `target` (`/<secret>` then nothing, `/` or `?`),
+/// or null when the target does not start with the secret. The comparison takes the same time
+/// wherever the first difference is.
+pub fn stripSecret(target: []const u8, secret: []const u8) ?[]const u8 {
+    if (secret.len == 0 or target.len < 1 + secret.len or target[0] != '/') return null;
+    var diff: u8 = 0;
+    for (target[1 .. 1 + secret.len], secret) |a, b| diff |= a ^ b;
+    if (diff != 0) return null;
+    const rest = target[1 + secret.len ..];
+    if (rest.len != 0 and rest[0] != '/' and rest[0] != '?') return null; // a longer first segment
+    return rest;
+}
+
+/// The path to write in the log: one the bridge serves, or a fixed word. Never client text.
+fn knownPath(path: []const u8) []const u8 {
+    if (assets.indexOf(path)) |i| return assets.all[i].path;
+    for ([_][]const u8{ "/ws", "/labws", "/api/tree", "/api/lab/hb", "/api/lab/result" }) |k| if (std.mem.eql(u8, path, k)) return k;
+    return "(other)";
+}
+
+/// Remove a stale socket file at `path`, but never anything else: a file that is not a socket,
+/// or a socket something is still listening on, is an error.
+fn clearStaleSocket(io: Io, path: []const u8) !void {
+    const st = Io.Dir.cwd().statFile(io, path, .{}) catch |e| switch (e) {
+        error.FileNotFound => return,
+        else => return e,
+    };
+    if (st.kind != .unix_domain_socket) return error.NotASocket;
+    const addr = try Io.net.UnixAddress.init(path);
+    if (addr.connect(io)) |c| {
+        c.close(io);
+        return error.AddressInUse;
+    } else |_| {}
+    try Io.Dir.deleteFileAbsolute(io, path);
 }
 
 // ---- OS bits ----
@@ -519,7 +632,13 @@ const Rig = struct {
     session_id: []const u8,
     block_id: []const u8,
 
+    const Extra = struct { backend_secret: ?[]const u8 = null, head_timeout_ms: u32 = 10_000, max_pending: u32 = 16, lab: bool = true };
+
     fn init(hub_cfg: hub_mod.Config, acc: access.Config, listen: Listen) !Rig {
+        return initExtra(hub_cfg, acc, listen, .{});
+    }
+
+    fn initExtra(hub_cfg: hub_mod.Config, acc: access.Config, listen: Listen, extra: Extra) !Rig {
         const a = testing.allocator;
         const f = try fake.Fake.start(a, testing.io);
         errdefer f.deinit();
@@ -528,7 +647,7 @@ const Rig = struct {
         errdefer ctl.close();
         const h = try Hub.open(a, testing.io, ctl, hub_cfg);
         errdefer h.close();
-        const srv = try Server.start(a, testing.io, h, .{ .listen = listen, .access = acc });
+        const srv = try Server.start(a, testing.io, h, .{ .listen = listen, .access = acc, .backend_secret = extra.backend_secret, .head_timeout_ms = extra.head_timeout_ms, .max_pending = extra.max_pending, .lab = extra.lab });
         return .{ .f = f, .ctl = ctl, .hub = h, .srv = srv, .session_id = made.session_id, .block_id = made.block_id };
     }
 
@@ -862,7 +981,7 @@ fn tmpSocketPath(buf: []u8, io: Io) ![]const u8 {
 fn unixGet(rig: Rig, path: []const u8) !Http {
     const addr = try Io.net.UnixAddress.init(rig.srv.opts.listen.unix);
     const stream = try addr.connect(testing.io);
-    const req = try std.fmt.allocPrint(testing.allocator, "GET {s} HTTP/1.1\r\nHost: localhost\r\nTailscale-User-Login: owner@example.com\r\nConnection: close\r\n\r\n", .{path});
+    const req = try std.fmt.allocPrint(testing.allocator, "GET {s} HTTP/1.1\r\nHost: localhost\r\nTailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.9\r\nConnection: close\r\n\r\n", .{path});
     defer testing.allocator.free(req);
     return httpRequest(stream, req);
 }
@@ -898,9 +1017,11 @@ test "server: a unix socket is private, and only the allowed peers get in" {
         cfg.allowed_peer_uids = &uids;
         const rig = try Rig.init(.{}, cfg, .{ .unix = path });
         defer rig.deinit();
-        const no = try unixGet(rig, "/");
-        defer freeHttp(no);
-        try testing.expectEqual(@as(u16, 403), no.status);
+        // Refused at accept: the connection is closed without a word.
+        if (unixGet(rig, "/")) |no| {
+            freeHttp(no);
+            return error.PeerWasServed;
+        } else |_| {}
         try testing.expectEqual(@intFromEnum(access.Refusal.wrong_peer), rig.srv.last_refusal.load(.acquire));
     }
 }
@@ -964,4 +1085,160 @@ test "live: a browser socket drives a throwaway terminal on a real Rex (needs RE
     try waitText(c, "\"observe\":true");
     try sendJson(c, "{{\"t\":\"in\",\"d\":\"echo should-not-run-$((1+1))\\n\"}}", .{});
     try waitText(c, "read-only");
+}
+
+// ---- the fixes from the 2026-11-23 security review ----
+
+const owner_hdrs = "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.9\r\n";
+
+test "server: headers past the 48th can no longer hide a refusal" {
+    const rig = try Rig.init(.{}, owner_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    // The node's own address in the 70th header: before, it was never looked at.
+    var hdrs: std.ArrayList(u8) = .empty;
+    defer hdrs.deinit(testing.allocator);
+    for (0..68) |i| try hdrs.print(testing.allocator, "X-Filler-{d}: x\r\n", .{i});
+    try hdrs.appendSlice(testing.allocator, "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.5\r\n");
+    const h = try get(rig, "/", hdrs.items);
+    defer freeHttp(h);
+    try testing.expectEqual(@as(u16, 431), h.status);
+    // A request with room to spare, in the same shape, is judged normally.
+    var few: std.ArrayList(u8) = .empty;
+    defer few.deinit(testing.allocator);
+    for (0..20) |i| try few.print(testing.allocator, "X-Filler-{d}: x\r\n", .{i});
+    try few.appendSlice(testing.allocator, "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.5\r\n");
+    try expectRefusedWith(rig, few.items, .own_address);
+}
+
+test "server: a repeated identity header is refused" {
+    const rig = try Rig.init(.{}, owner_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    try expectRefusedWith(rig, owner_hdrs ++ "Tailscale-User-Login: owner@example.com\r\n", .ambiguous_header);
+    try expectRefusedWith(rig, owner_hdrs ++ "X-Forwarded-For: 100.64.0.5\r\n", .ambiguous_header);
+    // A missing X-Forwarded-For, with the own-address rule on, is refused too.
+    try expectRefusedWith(rig, "Tailscale-User-Login: owner@example.com\r\n", .no_forwarded_for);
+}
+
+test "server: the backend secret keeps local processes out, whatever headers they forge" {
+    const secret = "0123456789abcdef0123456789abcdef";
+    const rig = try Rig.initExtra(.{}, owner_cfg, .{ .tcp_loopback = 0 }, .{ .backend_secret = secret });
+    defer rig.deinit();
+    // The owner's identity, forged by a local process that does not know the secret: a bare 404,
+    // not even a 403 that would say the identity was looked at.
+    const forged = try get(rig, "/", owner_hdrs);
+    defer freeHttp(forged);
+    try testing.expectEqual(@as(u16, 404), forged.status);
+    const forged_api = try get(rig, "/api/tree", owner_hdrs);
+    defer freeHttp(forged_api);
+    try testing.expectEqual(@as(u16, 404), forged_api.status);
+    // A near miss: a longer first segment, a prefix of the secret, the secret with a typo.
+    for ([_][]const u8{ "/" ++ secret ++ "x/", "/0123456789abcdef0123456789abcde/", "/0123456789abcdef0123456789abcdeX/" }) |p| {
+        const h = try get(rig, p, owner_hdrs);
+        defer freeHttp(h);
+        try testing.expectEqual(@as(u16, 404), h.status);
+    }
+    // What Serve sends: the page and the tree under the secret, with the identity it adds.
+    const page = try get(rig, "/" ++ secret ++ "/", owner_hdrs);
+    defer freeHttp(page);
+    try testing.expectEqual(@as(u16, 200), page.status);
+    try testing.expect(std.mem.indexOf(u8, page.body, "<title>rweb</title>") != null);
+    const bare = try get(rig, "/" ++ secret, owner_hdrs);
+    defer freeHttp(bare);
+    try testing.expectEqual(@as(u16, 200), bare.status);
+    const js = try get(rig, "/" ++ secret ++ "/app.js", owner_hdrs);
+    defer freeHttp(js);
+    try testing.expectEqual(@as(u16, 200), js.status);
+    // With the secret, the identity rules still apply.
+    const wrong = try get(rig, "/" ++ secret ++ "/", "Tailscale-User-Login: someone@example.com\r\nX-Forwarded-For: 100.64.0.9\r\n");
+    defer freeHttp(wrong);
+    try testing.expectEqual(@as(u16, 403), wrong.status);
+}
+
+test "server: stripSecret" {
+    try testing.expectEqualStrings("/a", stripSecret("/abc/a", "abc").?);
+    try testing.expectEqualStrings("", stripSecret("/abc", "abc").?);
+    try testing.expectEqualStrings("?x=1", stripSecret("/abc?x=1", "abc").?);
+    try testing.expect(stripSecret("/abcd/a", "abc") == null);
+    try testing.expect(stripSecret("/ab", "abc") == null);
+    try testing.expect(stripSecret("abc/", "abc") == null);
+    try testing.expect(stripSecret("/abc/", "") == null);
+}
+
+test "server: the diagnostic pages are off unless asked for, and never log a query" {
+    const rig = try Rig.initExtra(.{}, token_cfg, .{ .tcp_loopback = 0 }, .{ .lab = false });
+    defer rig.deinit();
+    for ([_][]const u8{ "/lab", "/lab.js", "/labsel", "/labsel.js", "/api/lab/hb", "/api/lab/result" }) |p| {
+        const path = try std.fmt.allocPrint(testing.allocator, "{s}?token={s}", .{ p, token });
+        defer testing.allocator.free(path);
+        const h = try get(rig, path, "");
+        defer freeHttp(h);
+        try testing.expectEqual(@as(u16, 404), h.status);
+    }
+    const ok = try get(rig, "/?token=" ++ token, "");
+    defer freeHttp(ok);
+    try testing.expectEqual(@as(u16, 200), ok.status);
+}
+
+test "server: a connection that never sends a request is cut, and cannot fill the slots" {
+    // Two unauthenticated slots, 300 ms to send a head.
+    const rig = try Rig.initExtra(.{}, token_cfg, .{ .tcp_loopback = 0 }, .{ .max_pending = 2, .head_timeout_ms = 300 });
+    defer rig.deinit();
+    const idle1 = try rig.tcp();
+    defer idle1.close(testing.io);
+    const idle2 = try rig.tcp();
+    defer idle2.close(testing.io);
+    try testing.io.sleep(.fromMilliseconds(100), .awake);
+    // The slots for unauthenticated connections are full: a third is turned away at once.
+    const third = try rig.tcp();
+    var buf: [64]u8 = undefined;
+    var rd = third.reader(testing.io, &buf);
+    try testing.expectError(error.EndOfStream, rd.interface.takeByte());
+    third.close(testing.io);
+    // After the deadline the idle ones are gone and a real request is served.
+    try testing.io.sleep(.fromMilliseconds(600), .awake);
+    const ok = try get(rig, "/?token=" ++ token, "");
+    defer freeHttp(ok);
+    try testing.expectEqual(@as(u16, 200), ok.status);
+}
+
+test "server: a unix socket path that is a file, or in use, is never replaced" {
+    var pb: [96]u8 = undefined;
+    const path = try tmpSocketPath(&pb, testing.io);
+    const dir = std.fs.path.dirname(path).?;
+    defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    try prepareSocketDir(testing.io, path);
+
+    const a = testing.allocator;
+    const f = try fake.Fake.start(a, testing.io);
+    defer f.deinit();
+    const ctl = try rex.control.Control.open(a, testing.io, .{ .socket_path = f.path });
+    defer ctl.close();
+    const h = try Hub.open(a, testing.io, ctl, .{});
+    defer h.close();
+
+    // A regular file is not ours to delete.
+    {
+        const file = try Io.Dir.cwd().createFile(testing.io, path, .{});
+        file.close(testing.io);
+        try testing.expectError(error.NotASocket, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = token_cfg }));
+        const st = try Io.Dir.cwd().statFile(testing.io, path, .{});
+        try testing.expect(st.kind == .file);
+        try Io.Dir.cwd().deleteFile(testing.io, path);
+    }
+    // A live listener is not ours to replace; once it is gone, its stale file is.
+    const first = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = token_cfg });
+    try testing.expectError(error.AddressInUse, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = token_cfg }));
+    first.stop();
+    const again = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = token_cfg });
+    again.stop();
+}
+
+test "server: a browser cannot make Rex do heavy work more than a few times a second" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    const c = try browser(rig);
+    defer c.deinit(testing.allocator);
+    // Twenty in a burst: the first few are answered, the rest are refused with a reason.
+    for (0..20) |_| try sendJson(c, "{{\"t\":\"info\"}}", .{});
+    try waitText(c, "too many requests");
 }

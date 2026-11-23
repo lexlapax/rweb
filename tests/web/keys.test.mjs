@@ -133,3 +133,23 @@ test('the selected lines are what gets copied', () => {
   // A selection past the end is clipped, not an error.
   assert.equal(K.selectedText(lines, {anchor: 3, end: 99}), 'three\nfour');
 });
+
+test('terminal replies to a program\'s queries are never sent to Rex', () => {
+  const replies = [
+    '\x1b[12;40R', '\x1b[?62;4c', '\x1b[>0;276;0c', '\x1b[=1c', '\x1b[0n', '\x1b[?997;1n', '\x1b[?1;2$y', '\x1b[4$y',
+    '\x1b[?0u', '\x1b[8;24;80t', '\x1bP>|XTerm(1)\x1b\\', '\x1bP1$r0m\x1b\\', '\x1b]11;rgb:0000/0000/0000\x07',
+    '\x1b]10;rgb:ffff/ffff/ffff\x1b\\', '\x1b]52;c;aGk=\x07', '\x1b]lA title a program set\x1b\\',
+  ];
+  for (const r of replies) assert.equal(K.stripReplies(r), '', JSON.stringify(r));
+  // A reply that carries text a program chose still goes, whatever the text says.
+  assert.equal(K.stripReplies('\x1b]lrm -rf ~\r\x1b\\'), '');
+  assert.equal(K.stripReplies('\x1bP1$rrm -rf ~\r\x1b\\'), '');
+});
+
+test('what a person types, pastes or does with the mouse is not a reply', () => {
+  const real = ['ls -la\r', '\x1b[A', '\x1b[1;5C', '\x1b[15~', '\x1b[<0;10;5M', '\x1b[<0;10;5m', '\x1b[I', '\x1b[O',
+    '\x1b[200~paste me\x1b[201~', 'héllo wörld ✓', '\x1bOP', '\x7f', '\x03', '\x1b[Z'];
+  for (const t of real) assert.equal(K.stripReplies(t), t, JSON.stringify(t));
+  assert.equal(K.stripReplies('ab\x1b[1;1Rcd'), 'abcd');
+  assert.equal(K.stripReplies('\x1b[?62;4c\x1b[A'), '\x1b[A');
+});

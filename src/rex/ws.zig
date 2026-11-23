@@ -120,6 +120,10 @@ pub fn acceptKey(key: []const u8) [28]u8 {
 pub const Client = Conn;
 
 /// One end of a WebSocket. A client masks what it sends; a server does not.
+/// Most pings and pongs between two data messages, and most frames in one fragmented message.
+pub const max_control_run: u32 = 256;
+pub const max_frames_per_message: u32 = 4096;
+
 pub const Conn = struct {
     io: Io,
     stream: Io.net.Stream,
@@ -137,6 +141,9 @@ pub const Conn = struct {
     subprotocol: []const u8 = "",
     /// Largest message accepted, after reassembly.
     max_message: u64 = 64 * 1024 * 1024,
+    /// Ping and pong frames seen since the last data message. A peer that sends nothing else is
+    /// making us write a pong for each: past `max_control_run` the connection is a protocol error.
+    control_run: u32 = 0,
     read_buf: [64 * 1024]u8 = undefined,
     write_buf: [64 * 1024]u8 = undefined,
 
@@ -319,7 +326,10 @@ pub const Conn = struct {
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(gpa);
         var msg_op: ?Opcode = null;
+        var frames: u32 = 0;
         while (true) {
+            frames += 1;
+            if (frames > max_frames_per_message) return error.Protocol; // a message made of endless empty fragments
             // The longest header is 14 bytes; peek progressively.
             var h: Header = undefined;
             var want: usize = 2;
@@ -333,6 +343,11 @@ pub const Conn = struct {
                     else => |e| return e,
                 }
             }
+            // RFC 6455 5.1: a client masks every frame it sends, a server masks none. A peer that
+            // breaks the rule is not a browser (or is behind a proxy that must not see our data
+            // as plain frames): close rather than guess.
+            if (!c.is_client and !h.masked) return error.Protocol;
+            if (c.is_client and h.masked) return error.Protocol;
             r.toss(h.size);
             const len: usize = @intCast(h.len);
             const op = h.opcode;
@@ -348,6 +363,8 @@ pub const Conn = struct {
 
             switch (op) {
                 .ping => {
+                    c.control_run += 1;
+                    if (c.control_run > max_control_run) return error.Protocol;
                     const payload = try gpa.dupe(u8, buf.items[start..]);
                     defer gpa.free(payload);
                     buf.shrinkRetainingCapacity(start);
@@ -355,6 +372,8 @@ pub const Conn = struct {
                     continue;
                 },
                 .pong => {
+                    c.control_run += 1;
+                    if (c.control_run > max_control_run) return error.Protocol;
                     buf.shrinkRetainingCapacity(start);
                     continue;
                 },
@@ -366,7 +385,10 @@ pub const Conn = struct {
                 .continuation => {},
                 else => msg_op = op,
             }
-            if (h.fin) return .{ .opcode = msg_op.?, .data = try buf.toOwnedSlice(gpa) };
+            if (h.fin) {
+                c.control_run = 0;
+                return .{ .opcode = msg_op.?, .data = try buf.toOwnedSlice(gpa) };
+            }
         }
     }
 };
@@ -419,6 +441,99 @@ test "acceptKey matches the RFC 6455 example" {
 }
 
 
+
+/// A server-side connection over bytes in memory, for frame-level tests.
+fn memConn(bytes: []const u8, out: *std.Io.Writer, r: *std.Io.Reader, is_client: bool) Conn {
+    r.* = std.Io.Reader.fixed(bytes);
+    return .{ .io = std.testing.io, .stream = undefined, .reader = undefined, .writer = undefined, .r = r, .w = out, .owns_stream = false, .is_client = is_client, .max_message = 1 << 16 };
+}
+
+fn maskedFrame(al: std.mem.Allocator, op: u8, fin: bool, payload: []const u8) ![]u8 {
+    const mask = [4]u8{ 0x11, 0x22, 0x33, 0x44 };
+    var f: std.ArrayList(u8) = .empty;
+    try f.append(al, (if (fin) @as(u8, 0x80) else 0) | op);
+    try f.append(al, 0x80 | @as(u8, @intCast(payload.len)));
+    try f.appendSlice(al, &mask);
+    for (payload, 0..) |b, i| try f.append(al, b ^ mask[i % 4]);
+    return f.toOwnedSlice(al);
+}
+
+test "a server refuses an unmasked frame, a client refuses a masked one" {
+    const gpa = std.testing.allocator;
+    var sink: std.Io.Writer.Allocating = .init(gpa);
+    defer sink.deinit();
+    var r: std.Io.Reader = undefined;
+    // Unmasked text frame "hi" to a server.
+    var server = memConn(&.{ 0x81, 0x02, 'h', 'i' }, &sink.writer, &r, false);
+    try std.testing.expectError(error.Protocol, server.readMessage(gpa));
+    // The same, masked: accepted.
+    const ok = try maskedFrame(gpa, 0x1, true, "hi");
+    defer gpa.free(ok);
+    var server2 = memConn(ok, &sink.writer, &r, false);
+    const m = try server2.readMessage(gpa);
+    defer gpa.free(m.data);
+    try std.testing.expectEqualStrings("hi", m.data);
+    // A masked frame sent to a client (what a server must never do).
+    const bad = try maskedFrame(gpa, 0x1, true, "hi");
+    defer gpa.free(bad);
+    var client = memConn(bad, &sink.writer, &r, true);
+    try std.testing.expectError(error.Protocol, client.readMessage(gpa));
+    var client2 = memConn(&.{ 0x81, 0x02, 'h', 'i' }, &sink.writer, &r, true);
+    const m2 = try client2.readMessage(gpa);
+    defer gpa.free(m2.data);
+    try std.testing.expectEqualStrings("hi", m2.data);
+}
+
+test "a peer that sends only pings, or endless empty fragments, is cut off" {
+    const gpa = std.testing.allocator;
+    var sink: std.Io.Writer.Allocating = .init(gpa);
+    defer sink.deinit();
+    var r: std.Io.Reader = undefined;
+    // 300 masked pings in a row: the 257th is a protocol error.
+    var pings: std.ArrayList(u8) = .empty;
+    defer pings.deinit(gpa);
+    for (0..300) |_| {
+        const f = try maskedFrame(gpa, 0x9, true, "");
+        defer gpa.free(f);
+        try pings.appendSlice(gpa, f);
+    }
+    var c = memConn(pings.items, &sink.writer, &r, false);
+    try std.testing.expectError(error.Protocol, c.readMessage(gpa));
+    try std.testing.expect(c.control_run > max_control_run);
+
+    // A text frame then 5000 empty continuation frames, never finished.
+    var frags: std.ArrayList(u8) = .empty;
+    defer frags.deinit(gpa);
+    const first = try maskedFrame(gpa, 0x1, false, "");
+    defer gpa.free(first);
+    try frags.appendSlice(gpa, first);
+    for (0..5000) |_| {
+        const f = try maskedFrame(gpa, 0x0, false, "");
+        defer gpa.free(f);
+        try frags.appendSlice(gpa, f);
+    }
+    var c2 = memConn(frags.items, &sink.writer, &r, false);
+    try std.testing.expectError(error.Protocol, c2.readMessage(gpa));
+
+    // Pings between real messages are fine, and the count starts again after each message.
+    var ok: std.ArrayList(u8) = .empty;
+    defer ok.deinit(gpa);
+    for (0..3) |_| {
+        for (0..200) |_| {
+            const f = try maskedFrame(gpa, 0x9, true, "");
+            defer gpa.free(f);
+            try ok.appendSlice(gpa, f);
+        }
+        const t = try maskedFrame(gpa, 0x1, true, "x");
+        defer gpa.free(t);
+        try ok.appendSlice(gpa, t);
+    }
+    var c3 = memConn(ok.items, &sink.writer, &r, false);
+    for (0..3) |_| {
+        const m = try c3.readMessage(gpa);
+        gpa.free(m.data);
+    }
+}
 
 test "live: control hello against a real Rex (needs REX_SOCKET)" {
     const gpa = std.testing.allocator;
