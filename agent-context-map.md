@@ -263,3 +263,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Collapsed key bar is one line that scrolls sideways with the ^ button pinned at the right; the clipboard menu item is now "Text copied in the terminal…" with a one-line explanation. Checked in Chrome at 360px width.
 
 - Expanded key bar is three rows: a full-width extras strip that scrolls sideways, then the modifiers beside an inverted-T arrow pad with the collapse button in its corner. Collapse returns to the single scrolling line. Checked in Chrome at phone width.
+
+- Expanded key bar filled edge to edge: extras row (PgUp PgDn | ~ / \ - `) shares the full width; modifiers plus Home, End, Paste form an even 5x2 grid beside the arrow pad. Home/End/Paste move back to the extras row on collapse. Checked in Chrome at phone width.

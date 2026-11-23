@@ -643,6 +643,11 @@ async function doPaste() {
   K.ROW_MAIN.forEach(k => make(k, main));
   const toggle = el('button', '', '⌃'); toggle.setAttribute('aria-label', 'More keys'); toggle.setAttribute('aria-expanded', 'false');
   toggle.onpointerdown = e => { e.preventDefault(); const open = $('keys-more').hidden; $('keys-more').hidden = !open; toggle.setAttribute('aria-expanded', String(open)); toggle.textContent = open ? '⌄' : '⌃'; $('keys').classList.toggle('expanded', open);
+    // Expanded, Home, End and Paste join the modifiers so the left block is an even 5 x 2 grid.
+    const fill = [...$('keys').querySelectorAll('button')].filter(b => (b._k && (b._k.key === 'home' || b._k.key === 'end')) || b.dataset.keep === 'paste');
+    const order = b => (b._k && b._k.key === 'home') ? 0 : (b._k && b._k.key === 'end') ? 1 : 2;
+    fill.sort((a, b) => order(a) - order(b));
+    if (open) $('keys-mods').append(...fill); else more.prepend(...fill.filter(b => b.dataset.keep !== 'paste')), more.append(...fill.filter(b => b.dataset.keep === 'paste'));
     requestAnimationFrame(layout); };
   // The arrows and the toggle sit in one pad: in a line when collapsed, an inverted T when expanded.
   const pad = el('div', 'pad'); pad.id = 'keys-pad';
@@ -653,7 +658,7 @@ async function doPaste() {
   const mods = el('div', ''); mods.id = 'keys-mods'; mods.append(...main.querySelectorAll(':scope > button'));
   main.append(mods, pad);
   K.ROW_MORE.forEach(k => make(k, more));
-  const paste = el('button', '', 'Paste'); paste.onpointerdown = e => { e.preventDefault(); doPaste(); }; more.append(paste);
+  const paste = el('button', '', 'Paste'); paste.dataset.keep = 'paste'; paste.onpointerdown = e => { e.preventDefault(); doPaste(); }; more.append(paste);
 })();
 
 let hold = null;

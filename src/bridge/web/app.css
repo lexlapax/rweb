@@ -229,9 +229,10 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #keys-mods { display: contents; }
 #keys.expanded #keys-more { display: flex !important; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0; }
 #keys.expanded #keys-more::-webkit-scrollbar { display: none; }
-#keys.expanded #keys-more button { flex: none; }
+#keys.expanded #keys-more button { flex: 1 0 40px; width: auto; }
 #keys.expanded #keys-main { display: grid; grid-template-columns: 1fr 140px; column-gap: 4px; align-items: start; margin: 0; }
-#keys.expanded #keys-mods { display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start; }
+#keys.expanded #keys-mods { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+#keys.expanded #keys-mods button { width: auto; min-width: 0; padding: 0 2px; font-size: 12px; }
 #keys.expanded #keys-pad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: 36px 36px; gap: 4px; justify-self: end; }
 #keys.expanded #keys-pad button { order: 0; }
 #keys.expanded [data-pos="toggle"] { grid-column: 3; grid-row: 1; }
