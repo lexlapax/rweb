@@ -115,23 +115,24 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
    requests should be sent fragmented at 19; ours are small. `focus_history.reverse` unused. The real restart test is done on both machines.
    Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
-## Phase 2 in progress (bridge, `src/bridge/`)
+## Phase 2 (bridge, `src/bridge/`): built; owner's sign-off pending
 
-Owner's answers (2026-11-22): history on open = last ~1,000 lines (button loads the rest); a
-terminal wider than the screen shrinks to fit and the Rex size changes only on request; the
-read-only switch is on the page, off by default (a bridge-wide locked mode also exists).
-Done so far: `access.zig` (pure decisions, one test per refusal), `protocol.zig` (validated
-browser messages), `hub.zig` (terminals, viewers with bounded queues, fan-out, session tree,
-restart and 1013 recovery; tested against the fake). Mirror gained `redrawLocked` and capped
-history. Fixed a use-after-free in `Control.call` found by the restart test. Also done: `server.zig` (HTTP/WebSocket, access enforced first, unix 0600 + private dir, peer uid,
-loopback TCP, CSP), `assets.zig` + `web/` (page, vendored xterm.js 6.0.0 and fit addon 0.11.0),
-`cli.zig`, `main.zig` (`zig build run -- ...`). Closing now shuts sockets before cancelling
-tasks: cancelling a task blocked in a read deadlocked (seen in a sample). Not yet: live and
-browser checks, the Serve test, phase2 docs. Run tests with output to a file; piping `zig build test` into `head`
-can hang.
+Owner's answers (2026-11-22): history on open = last ~1,000 lines; a wide terminal shrinks to fit
+and Rex's size changes only on request; a read-only ("view only") switch on the page, off by
+default, plus a bridge-wide locked `--observe-only`. Built: `access.zig`, `protocol.zig`,
+`hub.zig`, `server.zig`, `assets.zig` + `web/` (page, vendored xterm.js), `cli.zig`, `main.zig`
+(`zig build run -- --listen-tcp 0 --random-token`). Evidence, findings, limits:
+[docs/phase2-result.md](docs/phase2-result.md). Checked on desktop-mac in Chrome, through Serve
+port 11443 (each refusal shown), and on the owner's Android tablet (Samsung Keyboard and Gboard
+both work); linux-box ran the full suite including live tests. Open: owner confirms the phone
+layout; phone-size layout was reworked (slide-over menu). Tip: run tests with output to a file;
+piping `zig build test` into `head` can hang. `mkdir -p .zig-cache/tmp` before `--fuzz`.
 
 ## Checks run for this update
 
+- 2026-11-22, linux-box: scratch copy, `zig build test` with `REX_SOCKET`: 97 pass + 1 skip incl.
+  Linux peer-uid and a live bridge test on Rex rev 19; copy removed; `rex ls` only
+  `drifting-tundra`.
 - 2026-11-22: bridge server tests (each access refusal over real HTTP, WebSocket end to end,
   observe-only over the wire, unix socket 0600/0700 and peer refusal); `zig build test` 89 pass +
   7 skip, six runs in a row.

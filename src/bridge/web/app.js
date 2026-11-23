@@ -61,6 +61,16 @@ term.attachCustomKeyEventHandler(e => {
   return false;
 });
 
+// Keyboard diagnostics for testing a phone keyboard: open the page with ?dbg=1.
+if (new URLSearchParams(location.search).get('dbg') === '1' && term.textarea) {
+  const dbg = o => send({t: 'dbg', ms: Math.round(performance.now()), ...o});
+  const ta = term.textarea;
+  for (const ev of ['keydown', 'keyup']) ta.addEventListener(ev, e => dbg({ev, key: e.key, code: e.code, kc: e.keyCode, comp: e.isComposing}), true);
+  for (const ev of ['beforeinput', 'input']) ta.addEventListener(ev, e => dbg({ev, it: e.inputType, data: e.data, comp: e.isComposing, val: ta.value}), true);
+  for (const ev of ['compositionstart', 'compositionupdate', 'compositionend']) ta.addEventListener(ev, e => dbg({ev, data: e.data}), true);
+  term.onData(d => dbg({ev: 'onData', d}));
+}
+
 // ---- layout: draw at Rex's size and shrink to fit; never change Rex's size unasked ----
 function layout() {
   const stage = $('stage');
@@ -130,7 +140,7 @@ function onMessage(m) {
 
 function updateButtons() {
   const ro = $('ro'); ro.classList.toggle('on', state.observe); ro.disabled = state.locked;
-  ro.textContent = state.locked ? 'read-only (locked)' : (state.observe ? 'read-only: on' : 'read-only');
+  ro.textContent = state.locked ? 'view only (locked)' : (state.observe ? 'view only: on' : 'view only');
   $('fit').disabled = !state.current || state.observe;
   $('history').disabled = !state.current || state.historyRows === 0;
   $('new-session').disabled = state.observe;
@@ -143,6 +153,9 @@ $('fit').onclick = () => {
   if (d && confirm(`Resize this terminal to ${d.cols}x${d.rows}? It changes for everyone viewing it.`)) send({t: 'fit', cols: d.cols, rows: d.rows});
 };
 $('menu').onclick = () => $('list').classList.toggle('open');
+$('scrim').onclick = () => $('list').classList.remove('open');
+function closeListIfNarrow() { if (matchMedia('(max-width: 900px)').matches) $('list').classList.remove('open'); }
+// On a narrow screen the list starts closed once a terminal is showing, and open before.
 $('new-session').onclick = () => { const l = prompt('Name for the new session (optional)'); if (l !== null) send({t: 'new_session', ...(l ? {label: l} : {})}); };
 $('ctrl').onclick = () => { state.ctrl = !state.ctrl; $('ctrl').classList.toggle('on', state.ctrl); term.focus(); };
 $('keys').addEventListener('click', e => {
@@ -162,9 +175,9 @@ function renderTree() {
     name.append(el('span', 'label', s.label));
     const add = el('button', 'small', '+'); add.title = 'New terminal';
     add.onclick = () => send({t: 'new_terminal', session: s.id});
-    const ren = el('button', 'small', 'rename');
+    const ren = el('button', 'small', '\u270e'); ren.title = 'Rename';
     ren.onclick = () => { const l = prompt('New name', s.label); if (l) send({t: 'rename_session', session: s.id, label: l}); };
-    const del = el('button', 'small', 'close');
+    const del = el('button', 'small', '\u2715'); del.title = 'Close session';
     del.onclick = () => { if (confirm(`Close session "${s.label}" and every terminal in it?`)) send({t: 'destroy_session', session: s.id}); };
     for (const b of [add, ren, del]) b.disabled = state.observe;
     name.append(add, ren, del);
@@ -174,9 +187,9 @@ function renderTree() {
       const open = el('button', 'label', b.label + (b.owner ? ' •' : ''));
       open.title = b.owner ? `claimed by ${b.owner}` : '';
       open.onclick = () => openBlock(s.id, b.id);
-      const rn = el('button', 'small', 'rename');
+      const rn = el('button', 'small', '\u270e'); rn.title = 'Rename';
       rn.onclick = () => { const l = prompt('New name', b.label); if (l) send({t: 'rename_block', session: s.id, block: b.id, label: l}); };
-      const cl = el('button', 'small', 'close');
+      const cl = el('button', 'small', '\u2715'); cl.title = 'Close terminal';
       cl.onclick = () => { if (confirm(`Close terminal "${b.label}"? The program in it ends.`)) send({t: 'close_block', session: s.id, block: b.id}); };
       for (const x of [rn, cl]) x.disabled = state.observe;
       row.append(open, rn, cl);
@@ -189,7 +202,7 @@ function renderTree() {
 function openBlock(session, block) {
   state.current = {session, block}; term.reset();
   send({t: 'open', session, block});
-  if (matchMedia('(max-width: 700px)').matches) $('list').classList.remove('open');
+  closeListIfNarrow();
   renderTree(); updateButtons();
 }
 

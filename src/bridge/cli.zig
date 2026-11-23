@@ -27,6 +27,7 @@ pub const usage =
     \\  --rex-socket PATH         Rex's unix socket (default: found from XDG_RUNTIME_DIR or the Mac app)
     \\  --observe-only            never write, resize or change anything in Rex
     \\  --history-lines N         scrollback rows sent when a terminal opens (default 1000)
+    \\  --debug-input             log what browsers send (typed text included): for testing a keyboard, never for deployment
     \\
 ;
 
@@ -45,6 +46,7 @@ pub const Parsed = struct {
     peer_uids: ?[]const PeerUid = null,
     observe_only: bool = false,
     history_lines: u32 = 1000,
+    debug_input: bool = false,
 };
 
 pub const PeerUid = union(enum) { uid: u32, self };
@@ -94,6 +96,8 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
             p.rex_socket = try value(args, &i);
         } else if (eql(u8, a, "--observe-only")) {
             p.observe_only = true;
+        } else if (eql(u8, a, "--debug-input")) {
+            p.debug_input = true;
         } else if (eql(u8, a, "--history-lines")) {
             p.history_lines = std.fmt.parseInt(u32, try value(args, &i), 10) catch return error.BadNumber;
         } else return error.UnknownOption;

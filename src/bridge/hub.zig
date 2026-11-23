@@ -351,6 +351,7 @@ pub const Hub = struct {
     pub fn handle(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
         switch (msg) {
             .ping => v.pushText("{\"t\":\"pong\"}"),
+            .dbg => {},
             .tree => {
                 h.mu.lockUncancelable(h.io);
                 defer h.mu.unlock(h.io);

@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // Rex's socket.
-    const rex_socket = parsed.rex_socket orelse try findRexSocket(arena, init.environ_map);
+    const rex_socket = parsed.rex_socket orelse try findRexSocket(arena, io, init.environ_map);
 
     // Own addresses: needed to refuse requests that came from this machine itself.
     var own: std.ArrayList([]const u8) = .empty;
@@ -74,6 +74,7 @@ pub fn main(init: std.process.Init) !void {
     };
     const srv = try server.Server.start(gpa, io, h, .{
         .listen = listen,
+        .debug_input = parsed.debug_input,
         .access = .{
             .owner = parsed.owner,
             .token = token,
@@ -97,26 +98,26 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// Rex's user socket: `$XDG_RUNTIME_DIR/rex/server.sock` on Linux, the app's on a Mac.
-fn findRexSocket(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]const u8 {
+fn findRexSocket(arena: std.mem.Allocator, io: Io, env: *std.process.Environ.Map) ![]const u8 {
     if (env.get("XDG_RUNTIME_DIR")) |dir| {
         const p = try std.fmt.allocPrint(arena, "{s}/rex/server.sock", .{dir});
-        if (exists(p)) return p;
+        if (exists(io, p)) return p;
     }
     if (builtin.os.tag == .macos) {
         if (env.get("HOME")) |home| {
             const p = try std.fmt.allocPrint(arena, "{s}/Library/Application Support/Rex/server.sock", .{home});
-            if (exists(p)) return p;
+            if (exists(io, p)) return p;
         }
     }
     const uid = std.c.getuid();
     const p = try std.fmt.allocPrint(arena, "/run/user/{d}/rex/server.sock", .{uid});
-    if (exists(p)) return p;
+    if (exists(io, p)) return p;
     std.debug.print("rweb: cannot find Rex's socket; pass --rex-socket\n", .{});
     std.process.exit(1);
 }
 
-fn exists(path: []const u8) bool {
-    _ = Io.Dir.cwd().statFile(std.testing.io, path, .{}) catch return false;
+fn exists(io: Io, path: []const u8) bool {
+    _ = Io.Dir.cwd().statFile(io, path, .{}) catch return false;
     return true;
 }
 

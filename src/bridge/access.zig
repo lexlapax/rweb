@@ -108,7 +108,8 @@ pub fn decide(cfg: Config, request: Request) Decision {
     }
 
     if (cfg.token) |want| {
-        const got = request.header("rweb-token") orelse request.query_token orelse return .{ .deny = .bad_token };
+        const got = request.header("rweb-token") orelse request.query_token orelse
+            cookieValue(request.header("cookie") orelse "", "rweb-token") orelse return .{ .deny = .bad_token };
         if (!constantTimeEql(want, got)) return .{ .deny = .bad_token };
     }
 
@@ -138,6 +139,16 @@ fn constantTimeEql(a: []const u8, b: []const u8) bool {
     var diff: u8 = 0;
     for (a, b) |x, y| diff |= x ^ y;
     return diff == 0;
+}
+
+/// The value of cookie `name` in a `Cookie` header.
+pub fn cookieValue(header: []const u8, name: []const u8) ?[]const u8 {
+    var it = std.mem.tokenizeAny(u8, header, "; ");
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        if (std.mem.eql(u8, kv[0..eq], name)) return kv[eq + 1 ..];
+    }
+    return null;
 }
 
 /// Pull `token=` out of a request target's query string.
@@ -275,4 +286,16 @@ test "queryToken" {
     try testing.expectEqualStrings("abc", queryToken("/?x=1&token=abc&y=2").?);
     try testing.expect(queryToken("/ws") == null);
     try testing.expect(queryToken("/ws?tokenx=1") == null);
+}
+
+test "token from a cookie (subresources and the socket carry it, not the query)" {
+    const cfg: Config = .{ .token = "tok123" };
+    const good = [_]Header{.{ .name = "Cookie", .value = "a=b; rweb-token=tok123; c=d" }};
+    try testing.expectEqual(Decision.allow, decide(cfg, req(&good)));
+    const bad = [_]Header{.{ .name = "Cookie", .value = "rweb-token=nope" }};
+    try expectDeny(.bad_token, cfg, req(&bad));
+    const other = [_]Header{.{ .name = "Cookie", .value = "xrweb-token=tok123" }};
+    try expectDeny(.bad_token, cfg, req(&other));
+    try testing.expectEqualStrings("1", cookieValue("x=1; y=2; z=3", "x").?);
+    try testing.expect(cookieValue("", "x") == null);
 }

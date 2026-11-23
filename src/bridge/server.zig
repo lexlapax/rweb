@@ -26,6 +26,8 @@ pub const Options = struct {
     listen: Listen,
     access: access.Config,
     max_connections: u32 = 64,
+    /// Log what browsers send, typed text included. For keyboard testing only.
+    debug_input: bool = false,
 };
 
 const security_headers = [_]std.http.Header{
@@ -220,7 +222,21 @@ pub const Server = struct {
             return;
         }
         if (assets.find(path)) |a| {
-            try req.respond(a.body, .{ .keep_alive = false, .extra_headers = &(security_headers ++ [_]std.http.Header{.{ .name = "content-type", .value = a.content_type }}) });
+            // A page opened with `?token=` keeps the token in a same-site cookie, so its scripts,
+            // styles and socket need no query string.
+            var cookie_buf: [128]u8 = undefined;
+            const cookie: ?[]const u8 = if (s.opts.access.token != null and areq.query_token != null and std.mem.eql(u8, path, "/"))
+                std.fmt.bufPrint(&cookie_buf, "rweb-token={s}; Path=/; HttpOnly; SameSite=Strict", .{areq.query_token.?}) catch null
+            else
+                null;
+            if (cookie) |ck| {
+                try req.respond(a.body, .{ .keep_alive = false, .extra_headers = &(security_headers ++ [_]std.http.Header{
+                    .{ .name = "content-type", .value = a.content_type },
+                    .{ .name = "set-cookie", .value = ck },
+                }) });
+            } else {
+                try req.respond(a.body, .{ .keep_alive = false, .extra_headers = &(security_headers ++ [_]std.http.Header{.{ .name = "content-type", .value = a.content_type }}) });
+            }
             return;
         }
         try req.respond("not found\n", .{ .status = .not_found, .keep_alive = false, .extra_headers = &security_headers });
@@ -242,6 +258,7 @@ pub const Server = struct {
             switch (m.opcode) {
                 .close => break,
                 .text => {
+                    if (s.opts.debug_input) log.info("browser: {s}", .{m.data});
                     _ = arena_state.reset(.retain_capacity);
                     const msg = protocol.parse(arena_state.allocator(), m.data) catch |e| {
                         const text = std.fmt.allocPrint(gpa, "{{\"t\":\"error\",\"for\":\"message\",\"msg\":\"{t}\"}}", .{e}) catch continue;
@@ -492,7 +509,7 @@ fn waitText(c: *rex.ws.Conn, needle: []const u8) !void {
 
 fn waitBinary(c: *rex.ws.Conn, needle: []const u8) !void {
     var i: u32 = 0;
-    while (i < 80) : (i += 1) {
+    while (i < 3000) : (i += 1) {
         const m = try c.readMessage(testing.allocator);
         defer testing.allocator.free(m.data);
         if (m.opcode == .binary and std.mem.indexOf(u8, m.data, needle) != null) return;
@@ -633,9 +650,47 @@ test "server: refuses to start without any access rule, and in a directory other
     try Io.Dir.cwd().createDirPath(testing.io, dir);
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
     {
-        var d = try Io.Dir.cwd().openDir(testing.io, dir, .{});
-        defer d.close(testing.io);
-        try d.setPermissions(testing.io, @enumFromInt(0o755));
+        var z: [128:0]u8 = undefined;
+        const dz = try std.fmt.bufPrintSentinel(&z, "{s}", .{dir}, 0);
+        try testing.expectEqual(@as(c_int, 0), std.c.chmod(dz, 0o755));
     }
     try testing.expectError(error.SocketDirNotPrivate, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = owner_cfg }));
+}
+
+test "live: a browser socket drives a throwaway terminal on a real Rex (needs REX_SOCKET)" {
+    const a = testing.allocator;
+    const sock = std.testing.environ.getPosix("REX_SOCKET") orelse return error.SkipZigTest;
+    if (sock.len == 0) return error.SkipZigTest;
+    const ctl = try rex.control.Control.open(a, testing.io, .{ .socket_path = sock });
+    defer ctl.close();
+    const h = try Hub.open(a, testing.io, ctl, .{});
+    defer h.close();
+    const srv = try Server.start(a, testing.io, h, .{ .listen = .{ .tcp_loopback = 0 }, .access = token_cfg });
+    defer srv.stop();
+
+    // A throwaway session, made through the bridge's own protocol.
+    var api = rex.api.Api.init(a, ctl);
+    defer api.deinit();
+    var made = try api.createSession("rweb-test-live-bridge");
+    defer made.deinit();
+    const sid = made.value.session_id;
+    defer api.destroySession(sid) catch {};
+    const bid = made.value.block_id;
+
+    var addr = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(srv.port) };
+    const stream = try addr.connect(testing.io, .{ .mode = .stream });
+    const c = try rex.ws.Conn.connectStream(a, testing.io, stream, "/ws?token=" ++ token, null, "Origin: http://localhost\r\n");
+    defer c.deinit(a);
+    try waitText(c, "\"t\":\"tree\"");
+    try sendJson(c, "{{\"t\":\"open\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ sid, bid });
+    try waitText(c, "\"t\":\"opened\"");
+    // The shell may still be starting; type once it has drawn something.
+    try waitBinary(c, "\x1bc");
+    try sendJson(c, "{{\"t\":\"in\",\"d\":\"echo bridge-live-$((6*7))\\n\"}}", .{});
+    try waitBinary(c, "bridge-live-42");
+    // Read-only: refused, and the shell does not run it.
+    try sendJson(c, "{{\"t\":\"observe\",\"on\":true}}", .{});
+    try waitText(c, "\"observe\":true");
+    try sendJson(c, "{{\"t\":\"in\",\"d\":\"echo should-not-run-$((1+1))\\n\"}}", .{});
+    try waitText(c, "read-only");
 }

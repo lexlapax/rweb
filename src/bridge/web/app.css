@@ -1,5 +1,6 @@
 :root { color-scheme: dark; --bg: #111418; --fg: #d7dae0; --dim: #8b93a1; --line: #2a2f38; --accent: #5aa2ff; --warn: #e5a50a; }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
 body { display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 button { font: inherit; color: var(--fg); background: #1c2128; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; min-height: 40px; }
@@ -12,6 +13,7 @@ button.on { background: var(--warn); color: #000; border-color: var(--warn); }
 main { flex: 1; display: flex; min-height: 0; }
 #list { flex: none; width: 280px; overflow: auto; border-right: 1px solid var(--line); padding: 8px; }
 #list:not(.open) { display: none; }
+#bar button { white-space: nowrap; }
 #list .row { display: flex; gap: 6px; margin-bottom: 8px; }
 .session { margin-bottom: 10px; }
 .session > .name { display: flex; align-items: center; gap: 6px; font-weight: 600; padding: 4px 0; }
@@ -27,7 +29,15 @@ main { flex: 1; display: flex; min-height: 0; }
 #keys { display: flex; gap: 6px; padding: 6px; border-top: 1px solid var(--line); flex: none; overflow-x: auto; }
 #keys button { flex: 1; min-width: 44px; }
 #notice { position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%); background: #2d3340; border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; max-width: 90vw; z-index: 10; }
-@media (max-width: 700px) {
-  #list { position: absolute; z-index: 5; top: 53px; bottom: 0; left: 0; width: 86vw; background: var(--bg); }
+#scrim { display: none; }
+/* Phones and small tablets: the list is a slide-over, the header is compact. */
+@media (max-width: 900px) {
+  html, body { font-size: 14px; }
+  button { min-height: 36px; padding: 6px 9px; }
+  #bar { gap: 5px; padding: 4px 6px; }
   #title { display: none; }
+  #status { font-size: 12px; max-width: 28vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #list { position: absolute; z-index: 6; top: 49px; bottom: 0; left: 0; width: min(300px, 78vw); background: var(--bg); box-shadow: 4px 0 18px rgba(0,0,0,.6); }
+  #list.open ~ #scrim, main:has(#list.open) #scrim { display: block; position: fixed; inset: 49px 0 0 0; z-index: 5; background: rgba(0,0,0,.45); }
+  .session > .name .small, .block .small { padding: 4px 7px; min-width: 34px; }
 }

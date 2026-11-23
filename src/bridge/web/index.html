@@ -14,9 +14,9 @@
   <span id="title">rweb</span>
   <span id="status" class="dim">connecting</span>
   <span class="spacer"></span>
-  <button id="ro" title="Read-only: the page will not type, resize or change anything">read-only</button>
-  <button id="history" title="Load the rest of the scrollback" disabled>more history</button>
-  <button id="fit" title="Resize the terminal to this window (changes it for everyone viewing it)" disabled>fit window</button>
+  <button id="ro" title="View only: the page will not type, resize or change anything">view only</button>
+  <button id="history" title="Load the rest of the scrollback" disabled>history</button>
+  <button id="fit" title="Resize the terminal to this window (changes it for everyone viewing it)" disabled>fit</button>
 </header>
 <main>
   <nav id="list" class="open">
@@ -25,6 +25,7 @@
     </div>
     <div id="tree"></div>
   </nav>
+  <div id="scrim"></div>
   <section id="view">
     <div id="empty" class="dim">Pick a terminal from the list.</div>
     <div id="stage" hidden><div id="term"></div></div>

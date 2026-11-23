@@ -51,6 +51,9 @@ pub const Msg = union(enum) {
     close_block: struct { session: []const u8, block: []const u8 },
     destroy_session: []const u8,
     ping,
+    /// Keyboard diagnostics from the page (`?dbg=1`); logged by a bridge started with
+    /// `--debug-input`, ignored otherwise.
+    dbg,
 };
 
 pub const ParseError = error{ Malformed, TooLarge, UnknownType, BadField } || Allocator.Error;
@@ -71,6 +74,7 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (eql(u8, t, "redraw")) return .redraw;
     if (eql(u8, t, "more_history")) return .more_history;
     if (eql(u8, t, "ping")) return .ping;
+    if (eql(u8, t, "dbg")) return .dbg;
     if (eql(u8, t, "open")) return .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } };
     if (eql(u8, t, "in")) return .{ .in = try str(o, "d", max_input_bytes) };
     if (eql(u8, t, "paste")) return .{ .paste = try str(o, "d", max_input_bytes) };
