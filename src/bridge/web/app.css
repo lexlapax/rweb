@@ -182,3 +182,5 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #crumb-count { font-weight: 400; font-size: 12px; margin-left: 4px; }
 #crumb-sep, #crumb-term { display: none !important; }
 #crumb { max-width: none; flex: 1 1 auto; }
+#tab-menu { height: 32px; width: 32px; min-height: 0; padding: 0; border: 0; background: none; font-size: 16px; border-radius: 6px; margin-left: auto; }
+#tabs { flex: 0 1 auto; }

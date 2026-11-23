@@ -457,6 +457,12 @@ $('more').onclick = () => openPop($('more'), pop => {
   item(pop, 'Reconnect', () => { closePop(); if (state.ws) { const w = state.ws; state.ws = null; try { w.close(); } catch {} } connect(); });
   updateControls();
 });
+$('tab-menu').onclick = () => openPop($('tab-menu'), pop => {
+  const info = currentInfo(); if (!info) return; const {s, b} = info;
+  item(pop, 'Rename terminal…', async () => { closePop(); const l = await ask({title: 'Rename terminal', label: 'Name', value: b.label, ok: 'Rename'}); if (l) send({t: 'rename_block', session: s.id, block: b.id, label: l}); }).disabled = state.observe;
+  item(pop, 'New terminal', () => { closePop(); state.pendingNew = {session: s.id, count: s.blocks.length}; send({t: 'new_terminal', session: s.id}); }).disabled = state.observe;
+  item(pop, 'Close terminal…', async () => { closePop(); if (await confirmAction({title: 'Close terminal?', message: `The program running in "${b.label}" will end.`, ok: 'Close terminal'})) send({t: 'close_block', session: s.id, block: b.id}); }).disabled = state.observe;
+});
 $('tabsel').onclick = () => openPop($('tabsel'), pop => {
   const info = currentInfo(); if (!info) return;
   info.s.blocks.forEach(b => { const x = item(pop, b.label, () => openBlock(info.s.id, b.id)); if (b.id === state.current.block) x.setAttribute('aria-current', 'true'); });
