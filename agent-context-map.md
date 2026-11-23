@@ -235,3 +235,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Zig 0.17.1 (`/usr/bin/zig`) on linux-box. libghostty-vt: Ghostty tag `vt-1.0.1` (needs ≥ 0.17.0),
   package hash `ghostty-1.4.1-dev-5UdBC4lkpgUYGLDYGJQcJoa9zOGZNB3qVMgMoS9CUH5O`; snapshot format 1.
 - Deployment order for Phase 4: linux-box, then gateway-box, then desktop-mac.
+
+- wterm fit: font and row height now shrink to fit stage width and height (Rex owns the grid size). Checked in Chrome at 1300x930 on `rweb-test-try`: 49 rows fit, nothing scrolled off. Owner reported the terminal not showing on phone/desktop before this fix; desktop is now up, phone not re-checked.

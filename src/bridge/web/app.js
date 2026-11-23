@@ -145,7 +145,7 @@ function layout() {
   if (termKind === 'wterm') {
     // No CSS scaling for wterm (it would break its cell measuring and typing overlay): the font shrinks instead.
     $('term').style.transform = '';
-    term.fitFont(state.fontSize, stage.clientWidth - 2);
+    term.fitFont(state.fontSize, stage.clientWidth - 2, stage.clientHeight);
     return;
   }
   const screen = term.element && term.element.querySelector('.xterm-screen');

@@ -143,7 +143,7 @@ What was done:
   the display" on the phone, most likely): for wterm the font size is now reduced until all
   columns fit, with no scaling; (2) wterm sizes its box for the rows it was created with, so
   after Rex's terminal grew to 30 rows the top rows were scrolled out of view: the box now
-  fills the stage; (3) wterm's theme call needs 24-bit numbers and exactly 16 palette entries, so
+  fills the stage; (3) Rex sets the grid size (169×49 on the desktop) and the page only shrank the font for width, so the rows overflowed the stage; the font and row height now shrink to fit both width and height; (4) wterm's theme call needs 24-bit numbers and exactly 16 palette entries, so
   Rex's `RRGGBB` strings threw and the theme was silently ignored: the shim converts them and fills
   the palette from wterm's defaults.
 - Checked in Chrome: the live Rex terminal draws; typed commands run; colour; a wide character

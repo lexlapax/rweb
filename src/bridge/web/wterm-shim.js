@@ -27,7 +27,7 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
   // overlay from on-screen coordinates, so shrinking with a CSS scale would put text in the wrong
   // place: the font itself is made smaller instead.
   let applied = fontSize;
-  const setFont = px => { applied = px; host.style.setProperty('--term-font-size', px + 'px'); try { wt._measureCharSize && wt._measureCharSize(); } catch {} };
+  const setFont = px => { applied = px; host.style.setProperty('--term-font-size', px + 'px'); host.style.setProperty('--term-row-height', Math.round(px * 1.2) + 'px'); try { wt._measureCharSize && wt._measureCharSize(); } catch {} };
   setFont(fontSize);
   const cell = () => { try { return wt._measureCharSize(); } catch { return null; } };
 
@@ -84,11 +84,12 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
     },
     // Draw at `preferred` px, or smaller so that all columns fit in `stageWidth` pixels (never below
     // 5 px). Returns the size used.
-    fitFont(preferred, stageWidth) {
+    fitFont(preferred, stageWidth, stageHeight) {
       const m = cell();
       const ratio = m && m.charWidth && applied ? m.charWidth / applied : 0.6;   // glyph width per px of font
-      const wanted = ratio * wt.cols * preferred;
-      const px = wanted > stageWidth ? Math.max(5, Math.floor((preferred * stageWidth / wanted) * 10) / 10) : preferred;
+      let px = Math.min(preferred, stageWidth / (ratio * wt.cols), stageHeight ? Math.floor(stageHeight / wt.rows) / 1.2 : Infinity);   // whole-pixel rows, which setFont rounds up
+      px = Math.max(5, Math.floor(px * 10) / 10);
+      if (stageHeight) while (px > 5 && Math.round(px * 1.2) * wt.rows > stageHeight) px = Math.round((px - 0.1) * 10) / 10;
       if (Math.abs(px - applied) > 0.05) setFont(px);
       return px;
     },
