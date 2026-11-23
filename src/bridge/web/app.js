@@ -405,7 +405,7 @@ function openPop(anchor, build) {
   if (popFor === anchor) return closePop();
   closePop();
   const pop = $('pop'); pop.replaceChildren();
-  const sheet = NARROW.matches; pop.classList.toggle('sheet', sheet);
+  const sheet = false; pop.classList.remove('sheet');   // a dropdown from the button, not a bottom sheet
   if (sheet) {
     const info = currentInfo(), t = el('div', 'sheet-title');
     const b = el('b', '', info ? info.s.label : 'rweb'), sm = el('small', '', info ? info.b.label : '');
@@ -585,8 +585,16 @@ async function doPaste() {
   };
   K.ROW_MAIN.forEach(k => make(k, main));
   const toggle = el('button', '', '⌃'); toggle.setAttribute('aria-label', 'More keys'); toggle.setAttribute('aria-expanded', 'false');
-  toggle.onpointerdown = e => { e.preventDefault(); const open = $('keys-more').hidden; $('keys-more').hidden = !open; toggle.setAttribute('aria-expanded', String(open)); toggle.textContent = open ? '⌄' : '⌃'; requestAnimationFrame(layout); };
-  main.append(toggle);
+  toggle.onpointerdown = e => { e.preventDefault(); const open = $('keys-more').hidden; $('keys-more').hidden = !open; toggle.setAttribute('aria-expanded', String(open)); toggle.textContent = open ? '⌄' : '⌃'; $('keys').classList.toggle('expanded', open);
+    // Expanded, Esc and Tab join the symbols row so the modifiers row fits beside the arrow pad.
+    const et = [...$('keys').querySelectorAll('button')].filter(b => b._k && (b._k.key === 'escape' || b._k.key === 'tab'));
+    if (open) more.prepend(...et); else main.prepend(...et);
+    requestAnimationFrame(layout); };
+  // The arrows and the toggle sit in one pad: in a line when collapsed, an inverted T when expanded.
+  const pad = el('div', 'pad'); pad.id = 'keys-pad';
+  const pos = {'↑': 'up', '↓': 'down', '←': 'left', '→': 'right'};
+  for (const b of [...main.querySelectorAll('button')]) if (pos[b.textContent]) { b.dataset.pos = pos[b.textContent]; pad.append(b); }
+  toggle.dataset.pos = 'toggle'; pad.append(toggle); main.append(pad);
   K.ROW_MORE.forEach(k => make(k, more));
   const paste = el('button', '', 'Paste'); paste.onpointerdown = e => { e.preventDefault(); doPaste(); }; more.append(paste);
 })();

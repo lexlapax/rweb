@@ -245,3 +245,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Auto-fit loop fix: each device asks Rex for a size only when its own screen/font changes or a terminal is opened, never in reply to a size change by another device (owner saw the phone blink with the tablet also open). Not verified on the phone.
 
 - Layout sizes now taken from Ovis's own phone layout (measured in its page): 14px text, 52px header with 44px borderless icon buttons, key bar #1f1f1f with 44x36 (49 wide for Shift/Enter) transparent keys, 13px monospace, 4px gaps, left-aligned, 6px radius. Checked in Chrome at phone width only.
+
+- Ovis key bar details: expanded, the arrows form an inverted T beside the key rows with the collapse button in its top-right corner, and Esc/Tab move up beside the symbols. The ⋯ menu is a dropdown from the top right (bottom sheet dropped at the owner's request), no Cancel, closes on any outside click or the button again; menu and icon text is 13px like the keys. Checked in Chrome at phone width only.

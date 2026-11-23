@@ -145,3 +145,29 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 .pop.sheet button { min-height: 44px; font-size: 14px; padding: 0 12px; }
 .pop .sheet-title { font-size: 14px; }
 .pop .sheet-title small { font-size: 12px; }
+
+/* The arrows: one line when collapsed, an inverted T beside the key rows when expanded, as in Ovis. */
+#keys-pad { display: contents; }
+#keys-pad [data-pos="up"] { order: 1; } #keys-pad [data-pos="down"] { order: 2; } #keys-pad [data-pos="left"] { order: 3; }
+#keys-pad [data-pos="right"] { order: 4; } #keys-pad [data-pos="toggle"] { order: 5; }
+#keys.expanded { position: relative; }
+#keys.expanded #keys-more, #keys.expanded #keys-main { margin-right: 148px; }
+#keys.expanded #keys-pad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: 36px 36px; gap: 4px; position: absolute; right: 8px; bottom: 2px; }
+#keys.expanded #keys-pad button { order: 0; }
+#keys.expanded [data-pos="toggle"] { grid-column: 3; grid-row: 1; }
+#keys.expanded [data-pos="up"] { grid-column: 2; grid-row: 1; }
+#keys.expanded [data-pos="left"] { grid-column: 1; grid-row: 2; }
+#keys.expanded [data-pos="down"] { grid-column: 2; grid-row: 2; }
+#keys.expanded [data-pos="right"] { grid-column: 3; grid-row: 2; }
+
+/* The menus drop down from their button (top right for the ⋯ menu). */
+.pop { max-height: calc(var(--vh) - 64px); overflow-y: auto; min-width: 240px; padding: 4px; }
+.pop button { min-height: 40px; font-size: 14px; padding: 0 12px; border-radius: 6px; }
+
+/* Text in menus and the top-bar icons is the same size as the keys below (13px). */
+.pop button, .pop .sizer, .pop .sizer span, .pop .sizer button { font-size: 13px; }
+.pop button { min-height: 36px; padding: 0 10px; }
+.pop { min-width: 220px; }
+#bar button.icon { font-size: 16px; }
+#list, #list button, #list .name, #list .label { font-size: 13px; }
+.pop .sizer { padding: 0 10px; }
