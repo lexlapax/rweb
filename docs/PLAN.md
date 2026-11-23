@@ -204,6 +204,9 @@ Exit: daily use from a phone and a laptop browser for a week without falling bac
 
 ### Phase 4: packaging and deployment
 
+Status 2026-11-23: exit met for linux-box and desktop-mac; what changed from this plan, and what is open, is in
+[phase4-result.md](phase4-result.md).
+
 - Security review of the bridge before any deployment.
 - Release builds for Linux x64 and macOS ARM64 (`ReleaseSafe`) with checksums, libghostty-vt
   compiled in. libghostty-vt compiles C++ (simdutf, highway) and links `libc++`, so a static Linux
