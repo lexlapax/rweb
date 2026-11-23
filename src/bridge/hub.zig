@@ -355,6 +355,7 @@ pub const Hub = struct {
             .ping => v.pushText("{\"t\":\"pong\"}"),
             .dbg => {},
             .text => h.sendText(v),
+            .info => h.sendInfo(v),
             .tree => {
                 h.mu.lockUncancelable(h.io);
                 defer h.mu.unlock(h.io);
@@ -389,6 +390,24 @@ pub const Hub = struct {
     }
 
     /// The Copy view: the terminal's whole text, for the browser to select from.
+    fn sendInfo(h: *Hub, v: *Viewer) void {
+        v.mu.lockUncancelable(h.io);
+        const t = v.term;
+        v.mu.unlock(h.io);
+        const term = t orelse return;
+        h.api_mu.lockUncancelable(h.io);
+        var res = h.api.termInfo(term.session_id, term.block_id) catch |e| {
+            h.api_mu.unlock(h.io);
+            return h.fail(v, "info", e);
+        };
+        h.api_mu.unlock(h.io);
+        defer res.deinit();
+        const i = res.value;
+        const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "info", .title = i.title, .pwd = i.pwd, .program = i.program, .exit_code = i.exit_code, .ports = i.ports }, .{}) catch return;
+        defer h.gpa.free(out);
+        v.pushText(out);
+    }
+
     fn sendText(h: *Hub, v: *Viewer) void {
         v.mu.lockUncancelable(h.io);
         const t = v.term;

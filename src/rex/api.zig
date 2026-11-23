@@ -301,6 +301,61 @@ pub const Api = struct {
         return .{ .arena = arena, .value = info };
     }
 
+    /// What a terminal is showing the person: its title, working directory, foreground program and
+    /// listening ports. Each piece is optional; a piece Rex can't give is left out.
+    pub const TermInfo = struct { title: ?[]const u8 = null, pwd: ?[]const u8 = null, program: ?[]const u8 = null, exit_code: ?i64 = null, ports: []const u16 = &.{} };
+
+    pub fn termInfo(a: *Api, sid: []const u8, bid: []const u8) Error!Owned(TermInfo) {
+        var arena = std.heap.ArenaAllocator.init(a.gpa);
+        errdefer arena.deinit();
+        const al = arena.allocator();
+        var info: TermInfo = .{};
+        const body = try a.blockBody(sid, bid, ",\"args\":{}");
+        defer a.gpa.free(body);
+        if (a.run("com.superlogical.terminal.title", body)) |r| {
+            var res = r;
+            defer res.deinit();
+            info.title = try dupeOpt(al, optStr(res.value, "title"));
+        } else |e| if (e == error.OutOfMemory) return e;
+        if (a.run("com.superlogical.terminal.pwd", body)) |r| {
+            var res = r;
+            defer res.deinit();
+            info.pwd = try dupeOpt(al, optStr(res.value, "pwd"));
+        } else |e| if (e == error.OutOfMemory) return e;
+        if (a.run("com.superlogical.terminal.process", body)) |r| {
+            var res = r;
+            defer res.deinit();
+            const v = res.value;
+            if (v == .object) {
+                if (v.object.get("last_exit")) |le| if (le == .object) if (le.object.get("exit_code")) |c| if (c == .integer) {
+                    info.exit_code = c.integer;
+                };
+                if (v.object.get("foreground")) |fg| if (fg == .object) {
+                    info.program = try dupeOpt(al, optStr(fg, "name"));
+                    // A shell that never reports its folder: the program's own folder is the same place.
+                    if (info.pwd == null) info.pwd = try dupeOpt(al, optStr(fg, "cwd"));
+                };
+            }
+        } else |e| if (e == error.OutOfMemory) return e;
+        if (a.run("com.superlogical.terminal.ports", body)) |r| {
+            var res = r;
+            defer res.deinit();
+            if (res.value == .object) if (res.value.object.get("ports")) |ps| if (ps == .array) {
+                var list: std.ArrayList(u16) = .empty;
+                for (ps.array.items) |it| {
+                    if (it != .object) continue;
+                    const pv = it.object.get("port") orelse continue;
+                    if (pv != .integer or pv.integer < 1 or pv.integer > 65535) continue;
+                    const port: u16 = @intCast(pv.integer);
+                    if (std.mem.indexOfScalar(u16, list.items, port) == null) try list.append(al, port);
+                    if (list.items.len >= 8) break;
+                }
+                info.ports = try list.toOwnedSlice(al);
+            };
+        } else |e| if (e == error.OutOfMemory) return e;
+        return .{ .arena = arena, .value = info };
+    }
+
     // ---- ownership ----
 
     /// Claim a block. While a terminal has an owner it takes its size and colors from it.

@@ -275,6 +275,7 @@ function handleMessage(m) {
       break;
     }
     case 'opened':
+      state.info = null; renderInfo(); pollInfo();
       state.cols = m.cols; state.rows = m.rows; state.historyRows = m.history_rows;
       state.exited = (m.exited !== undefined && m.exited !== null) ? m.exited : null;
       $('empty').hidden = true; $('stage').hidden = false; $('keys').hidden = false;
@@ -282,6 +283,7 @@ function handleMessage(m) {
       if (!NARROW.matches) term.focus();
       break;
     case 'theme': applyTheme(m); break;
+    case 'info': state.info = m; renderInfo(); break;
     case 'exited': state.exited = m.code; renderStatus(); break;
     case 'closed': showEmpty('That terminal was closed.'); break;
     case 'notice': notice(m.msg); break;
@@ -292,6 +294,7 @@ function handleMessage(m) {
 }
 
 function showEmpty(text) {
+  state.info = null; renderInfo();
   state.current = null; state.exited = null; LS.set('last', null);
   $('stage').hidden = true; $('keys').hidden = true; $('empty').hidden = false; $('empty').textContent = text;
   renderAll(); updateControls(); renderStatus();
@@ -308,6 +311,34 @@ function iconButton(text, label, on) { const b = el('button', 'small', text); b.
 
 function renderAll() { renderTree(); renderCrumb(); updateControls(); }
 
+// What the terminal reports about itself (title, folder, program, listening ports), shown dim under
+// the workspace name and as port chips by the tabs.
+function shortPath(p) {
+  if (!p) return '';
+  let path = p.replace(/^file:\/\/[^/]*/, '');
+  try { path = decodeURIComponent(path); } catch {}
+  path = path.replace(/^\/(Users|home)\/[^/]+/, '~');
+  const parts = path.split('/').filter(Boolean);
+  return parts.length > 3 ? '…/' + parts.slice(-2).join('/') : path;
+}
+function renderInfo() {
+  const i = state.current ? state.info : null, sub = $('crumb-sub'), ports = $('ports');
+  sub.replaceChildren(); ports.replaceChildren();
+  if (!i) return;
+  const bits = [];
+  const what = i.program || i.title;
+  if (what) bits.push(what);
+  const where = shortPath(i.pwd); if (where) bits.push(where);
+  sub.textContent = bits.join(' · ');
+  if (i.exit_code) { const x = el('span', 'bad', ` exit ${i.exit_code}`); sub.append(x); }
+  for (const p of i.ports || []) { const c = el('span', 'chip', ':' + p); c.title = 'Listening on port ' + p; ports.append(c); }
+}
+let infoTimer = 0;
+function pollInfo() {
+  clearTimeout(infoTimer);
+  if (state.current && link.healthy && document.visibilityState === 'visible') send({t: 'info'});
+  infoTimer = setTimeout(pollInfo, 4000);
+}
 function renderCrumb() {
   const info = currentInfo();
   $('crumb-session').textContent = info ? info.s.label : 'rweb';
@@ -665,3 +696,4 @@ connect();
 if (startupNote) notice(startupNote);
 }
 main().catch(e => { console.error(e); const el = document.getElementById('empty'); if (el) el.textContent = 'The page failed to start: ' + e.message; });
+

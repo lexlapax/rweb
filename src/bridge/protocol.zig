@@ -46,6 +46,8 @@ pub const Msg = union(enum) {
     more_history,
     /// The screen and scrollback as plain text, for the page's Copy view.
     text,
+    /// Title, folder, program and listening ports of the open terminal, for the page's header.
+    info,
     observe: bool,
     new_session: ?[]const u8,
     new_terminal: []const u8,
@@ -77,6 +79,7 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (eql(u8, t, "redraw")) return .redraw;
     if (eql(u8, t, "more_history")) return .more_history;
     if (eql(u8, t, "text")) return .text;
+    if (eql(u8, t, "info")) return .info;
     if (eql(u8, t, "ping")) return .ping;
     if (eql(u8, t, "dbg")) return .dbg;
     if (eql(u8, t, "open")) return .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } };
@@ -151,6 +154,7 @@ test "simple messages" {
     try testing.expectEqual(Msg.tree, try parseT("{\"t\":\"tree\"}"));
     try testing.expectEqual(Msg.ping, try parseT("{\"t\":\"ping\"}"));
     try testing.expectEqual(Msg.redraw, try parseT("{\"t\":\"redraw\"}"));
+    try testing.expectEqual(Msg.info, try parseT("{\"t\":\"info\"}"));
     try testing.expectEqual(Msg{ .observe = true }, try parseT("{\"t\":\"observe\",\"on\":true}"));
     try testing.expectEqual(Msg{ .fit = .{ .cols = 100, .rows = 30 } }, try parseT("{\"t\":\"fit\",\"cols\":100,\"rows\":30}"));
 }

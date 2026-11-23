@@ -184,3 +184,15 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #crumb { max-width: none; flex: 1 1 auto; }
 #tab-menu { height: 32px; width: 32px; min-height: 0; padding: 0; border: 0; background: none; font-size: 16px; border-radius: 6px; margin-left: auto; }
 #tabs { flex: 0 1 auto; }
+
+/* Two-line title: workspace and count, then what the terminal is doing and where. */
+#crumb { display: flex; flex-direction: column; justify-content: center; line-height: 1.25; }
+#crumb-main { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#crumb-sub { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
+#crumb-sub:empty { display: none; }
+#crumb-sub .bad { color: var(--bad); }
+#ports { display: flex; gap: 4px; margin-left: auto; }
+.chip { font: 11px ui-monospace, Menlo, monospace; color: var(--good); border: 1px solid #2c4a33; background: #1d2a21; border-radius: 10px; padding: 2px 7px; }
+#tab-menu { margin-left: 0; }
+#ports:empty { display: none; }
+#ports:empty + #tab-menu { margin-left: auto; }
