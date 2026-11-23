@@ -106,3 +106,30 @@ test('the Copy buttons: the last lines of the text, without trailing blanks', ()
   assert.equal(K.lastLines('', 5), '');
   assert.equal(K.lastLines('one', 1), 'one');
 });
+
+test('tap-to-select lines: first tap starts, second extends either way, third restarts', () => {
+  let s = null;
+  s = K.tapLine(s, 3);
+  assert.deepEqual(K.selectedRange(s), {from: 3, to: 3});
+  assert.equal(s.open, true);
+  let down = K.tapLine(s, 6);
+  assert.deepEqual(K.selectedRange(down), {from: 3, to: 6});
+  assert.equal(down.open, false);
+  let up = K.tapLine(s, 1);
+  assert.deepEqual(K.selectedRange(up), {from: 1, to: 3});
+  // A third tap starts a new selection at that line.
+  const again = K.tapLine(down, 9);
+  assert.deepEqual(K.selectedRange(again), {from: 9, to: 9});
+  assert.equal(again.open, true);
+  assert.equal(K.selectedRange(null), null);
+});
+
+test('the selected lines are what gets copied', () => {
+  const lines = ['zero', 'one', 'two', 'three', 'four'];
+  assert.equal(K.selectedText(lines, {anchor: 1, end: 3}), 'one\ntwo\nthree');
+  assert.equal(K.selectedText(lines, {anchor: 3, end: 1}), 'one\ntwo\nthree');
+  assert.equal(K.selectedText(lines, {anchor: 4, end: 4}), 'four');
+  assert.equal(K.selectedText(lines, null), '');
+  // A selection past the end is clipped, not an error.
+  assert.equal(K.selectedText(lines, {anchor: 3, end: 99}), 'three\nfour');
+});

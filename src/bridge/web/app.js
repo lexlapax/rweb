@@ -422,7 +422,7 @@ async function confirmAction({title, message, ok}) {
 
 // ---- copy and paste ----
 function requestCopy() { send({t: 'text'}); }
-let copyFull = '';
+let copyFull = '', copyLines = [], copySel = null;
 function copyToClipboard(text) {
   // The clipboard API needs a secure page and a user action; the old way is the fallback.
   const old = () => new Promise((ok, no) => {
@@ -433,17 +433,37 @@ function copyToClipboard(text) {
   });
   return (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(text) : Promise.reject()).catch(old);
 }
+function renderCopySelection() {
+  const r = K.selectedRange(copySel);
+  const rows = $('copytext').children;
+  for (let i = 0; i < rows.length; i++) {
+    rows[i].classList.toggle('sel', !!r && i >= r.from && i <= r.to);
+    rows[i].classList.toggle('mark', !!copySel && copySel.open && i === copySel.anchor);
+  }
+  const n = r ? r.to - r.from + 1 : 0;
+  $('copy-sel').disabled = !n; $('copy-clear').disabled = !n;
+  $('copy-sel').textContent = n ? `Copy ${n} line${n === 1 ? '' : 's'}` : 'Copy selected';
+  $('copy-help').textContent = !copySel ? 'Tap a line to start a selection, then tap another line to select down (or up) to it.'
+    : copySel.open ? 'Now tap the last line to select down (or up) to it.' : 'Tap Copy, or tap a line to start again.';
+}
 function openCopy(text, truncated) {
   const dlg = $('copydlg'), box = $('copytext');
-  copyFull = text; box.textContent = text;
+  copyFull = text; copyLines = text.split('\n'); copySel = null;
+  box.replaceChildren();
+  const frag = document.createDocumentFragment();
+  copyLines.forEach((l, i) => { const d = document.createElement('div'); d.className = 'ln'; d.dataset.i = i; d.textContent = l === '' ? ' ' : l; frag.append(d); });
+  box.append(frag);
+  box.onclick = e => { const row = e.target.closest('.ln'); if (!row) return; copySel = K.tapLine(copySel, Number(row.dataset.i)); renderCopySelection(); };
   $('copy-note').textContent = truncated ? 'Showing the end of a long history.' : '';
-  const done = (what) => () => notice(what), fail = () => notice('Could not copy: select the text and use your device\u2019s copy');
+  const done = what => () => notice(what), fail = () => notice('Could not copy: your browser refused');
   $('copy-all').onclick = () => copyToClipboard(copyFull).then(done('Copied everything'), fail);
   $('copy-last').onclick = () => copyToClipboard(K.lastLines(copyFull, 100)).then(done('Copied the last 100 lines'), fail);
-  $('copy-select').onclick = () => { const r = document.createRange(); r.selectNodeContents(box); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); box.focus(); };
+  $('copy-sel').onclick = () => { const t = K.selectedText(copyLines, copySel); if (t) copyToClipboard(t).then(done('Copied the selected lines'), fail); };
+  $('copy-clear').onclick = () => { copySel = null; renderCopySelection(); };
   const share = $('copy-share'); share.hidden = !navigator.share;
-  share.onclick = () => navigator.share({text: copyFull}).catch(() => {});
+  share.onclick = () => navigator.share({text: copySel ? K.selectedText(copyLines, copySel) : copyFull}).catch(() => {});
   $('copy-close').onclick = () => dlg.close();
+  renderCopySelection();
   if (!dlg.open) dlg.showModal();
   box.scrollTop = box.scrollHeight;
 }

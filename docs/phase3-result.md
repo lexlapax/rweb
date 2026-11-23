@@ -79,9 +79,13 @@ Behaviour:
   rewritten by autocorrect (`soft` to `sofa`), Enter. The page sent `e c h o ␣ DEL DEL o ␣ s o
   f t DEL a`-style edits with nothing doubled, and Rex's own capture of the shell showed
   `echo sofa` and `sofa`. A real phone is still the proof.
-- **No selection handles in the Copy view** (a read-only text box). The Copy view is now plain
-  selectable text, and has buttons that need no selecting: Copy all, Copy last 100 lines, Select
-  all, and Share… (where the browser has it). Copying falls back to the old `execCommand` way.
+- **No selection handles in the Copy view** (a read-only text box first, then plain text; the
+  long press showed no handles on the owner's phone in either). Backspace and the Copy all and
+  Copy last 100 lines buttons were confirmed working on the phone. The Copy view now also has a
+  selection the page makes itself, which needs no OS handles: tap a line to start, tap another to
+  select down or up to it, then "Copy N lines" (and Clear, and Share… where the browser has it).
+  Copying falls back to the old `execCommand` way. Checked in Chrome on 40 numbered lines: start,
+  extend down, extend up, clear, and the button label.
 - Paste was not tried yet.
 
 ## Not verified, and limits

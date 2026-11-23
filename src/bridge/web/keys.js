@@ -97,6 +97,24 @@
     return lines.slice(Math.max(0, lines.length - n)).join('\n');
   }
 
+  // Tap-to-select lines in the Copy view. `sel` is {anchor, end} (line numbers, or null). Tapping
+  // with nothing selected starts at that line; tapping again extends to it (either direction);
+  // tapping a third time starts over from the tapped line.
+  function tapLine(sel, i) {
+    if (!sel) return {anchor: i, end: i, open: true};          // `open`: the next tap extends
+    if (sel.open) return {anchor: sel.anchor, end: i, open: false};
+    return {anchor: i, end: i, open: true};
+  }
+  function selectedRange(sel) {
+    if (!sel) return null;
+    return {from: Math.min(sel.anchor, sel.end), to: Math.max(sel.anchor, sel.end)};
+  }
+  function selectedText(lines, sel) {
+    const r = selectedRange(sel);
+    if (!r) return '';
+    return lines.slice(r.from, r.to + 1).join('\n');
+  }
+
   const FONT_MIN = 8, FONT_MAX = 28, FONT_DEFAULT = 14;
   function clampFont(n) {
     n = Math.round(Number(n));
@@ -111,7 +129,7 @@
     return Math.max(floor === undefined ? 0.35 : floor, Math.min(1, stageWidth / screenWidth));
   }
 
-  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, ROW_MAIN, ROW_MORE, clampFont, fitScale, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

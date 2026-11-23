@@ -62,10 +62,12 @@
   <div class="copy-actions">
     <button id="copy-all">Copy all</button>
     <button id="copy-last">Copy last 100 lines</button>
-    <button id="copy-select">Select all</button>
+    <button id="copy-sel" disabled>Copy selected</button>
+    <button id="copy-clear" disabled>Clear</button>
     <button id="copy-share" hidden>Share&hellip;</button>
   </div>
-  <pre id="copytext" tabindex="0" aria-label="Terminal text. Select with your device's selection handles."></pre>
+  <p id="copy-help" class="dim">Tap a line to start a selection, then tap another line to select down (or up) to it.</p>
+  <div id="copytext" role="group" aria-label="Terminal text, one line per row. Tap a line to start a selection."></div>
 </dialog>
 
 <dialog id="pastedlg" aria-labelledby="paste-title">
