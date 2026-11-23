@@ -148,7 +148,7 @@ let fitTimer = 0, lastFit = '';
 function scheduleFit() {
   clearTimeout(fitTimer);
   fitTimer = setTimeout(() => {
-    if (!autoFitOn() || !state.current || state.observe || !state.rexUp) return;
+    if (!autoFitOn() || !state.current || state.observe || !state.rexUp || document.visibilityState !== 'visible') return;
     const stage = $('stage'); if (stage.hidden) return;
     const d = term.proposeDimensions(stage.clientWidth - 2, stage.clientHeight);
     if (!d || (d.cols === state.cols && d.rows === state.rows)) return;
@@ -270,7 +270,6 @@ function handleMessage(m) {
     case 'rex': state.rexUp = m.up; renderStatus(); break;
     case 'tree': state.tree = m.sessions; renderAll(); maybeRestore(); break;
     case 'opened':
-      lastFit = '';
       state.cols = m.cols; state.rows = m.rows; state.historyRows = m.history_rows;
       state.exited = (m.exited !== undefined && m.exited !== null) ? m.exited : null;
       $('empty').hidden = true; $('stage').hidden = false; $('keys').hidden = false;
@@ -371,6 +370,7 @@ function updateControls() {
 }
 
 function openBlock(session, block) {
+  lastFit = '';
   state.current = {session, block}; state.exited = null; LS.set('last', state.current);
   term.reset(); clearLatched(); softReset();
   send({t: 'open', session, block});

@@ -241,3 +241,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Ovis-style sizing (wterm only): on touch screens the text keeps the +/- size and the page asks Rex to resize the terminal to fit (menu toggle "Fit Rex to this screen", localStorage `rweb.autofit`); key row now has ← → in the main row as in Ovis. Checked in Chrome at phone width on `rweb-test-try`: 71x34 at 14 px, 55x26 at 18 px. Not yet checked on the owner's phone. Bottom-sheet ⋯ menu and title tab switcher from Ovis not done.
 
 - Ovis look (wterm): menus are bottom sheets with a title and Cancel on narrow screens; header shows the session name with the 1/N switcher; colours are Ovis's neutral dark (#181818 page, #ececec text, #1f1f1f bar, #2e2e2e lines, 6px buttons) and Rex's own colours are ignored unless "Use Rex colours" is on in the menu. Checked in Chrome at phone width only.
+
+- Auto-fit loop fix: each device asks Rex for a size only when its own screen/font changes or a terminal is opened, never in reply to a size change by another device (owner saw the phone blink with the tablet also open). Not verified on the phone.
