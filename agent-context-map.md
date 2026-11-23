@@ -259,3 +259,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Clipboard from the terminal: new `clip` message (Rex clipboard_read, newest copy up to 48 KiB) opens in the Copy view via "Copied by a program…" in the ⋯ menu; verified live with a real OSC 52 copy from a program in `rweb-test-try`. Tabs from different Rex windows get a thin divider. NOT built, by decision: file upload/download (would let the web page read and write any file on the machine; needs the Phase 4 security review first) and machine switching (bridge talks only to its own Rex socket).
 
 - Drawer restyled to match the header and tab strip (flat rows, borderless 28px icon buttons, accent "New session", current terminal highlighted with an accent bar). Checked in Chrome at phone width only.
+
+- Collapsed key bar is one line that scrolls sideways with the ^ button pinned at the right; the clipboard menu item is now "Text copied in the terminal…" with a one-line explanation. Checked in Chrome at 360px width.

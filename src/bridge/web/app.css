@@ -219,3 +219,12 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #list button.small:hover { background: #2c2c2c; color: var(--fg); }
 #list .session > .name button.small:first-of-type { color: var(--fg); }
 #scrim { background: rgba(0,0,0,.45); }
+
+.pop button .hint { display: block; color: var(--dim); font-size: 11px; margin-top: 1px; }
+.pop button:has(.hint) { height: auto; padding-top: 6px; padding-bottom: 6px; }
+
+/* Collapsed key bar: one line that scrolls sideways; the ^ button stays at the right edge. */
+#keys:not(.expanded) #keys-main { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+#keys:not(.expanded) #keys-main::-webkit-scrollbar { display: none; }
+#keys:not(.expanded) #keys-main button { flex: none; }
+#keys:not(.expanded) [data-pos="toggle"] { position: sticky; right: 0; background: var(--panel); box-shadow: -8px 0 8px var(--panel); }

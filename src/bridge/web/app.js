@@ -474,7 +474,9 @@ function item(pop, text, on, id) { const b = el('button', '', text); b.setAttrib
 
 $('more').onclick = () => openPop($('more'), pop => {
   item(pop, 'Copy text…', () => { closePop(); requestCopy(); }, 'pop-copy').disabled = !state.current;
-  item(pop, 'Copied by a program…', () => { closePop(); try { term.blur(); } catch {} send({t: 'clip'}); }, 'pop-clip').disabled = !state.current;
+  const clip = item(pop, 'Text copied in the terminal…', () => { closePop(); try { term.blur(); } catch {} send({t: 'clip'}); }, 'pop-clip');
+  clip.disabled = !state.current; clip.title = 'Shows the last text a program such as vim or tmux copied inside the terminal, so you can copy it to your phone';
+  clip.append(el('small', 'hint', 'What vim, tmux or similar last copied'));
   item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !state.current || state.observe;
   item(pop, 'Clear screen', () => { closePop(); send({t: 'term_action', action: 'clear'}); }).disabled = !state.current || state.observe;
   item(pop, 'Reset terminal…', async () => { closePop(); if (await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'})) send({t: 'term_action', action: 'reset'}); }).disabled = !state.current || state.observe;
