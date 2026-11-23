@@ -127,10 +127,11 @@ each fix permanent with a test that fails without it.
   read the secret file. The secret prefix protects against *other* local users and processes that cannot read
   the owner's files; it is not a sandbox. On macOS, a file the owner can read is readable by any process the
   owner runs.
-- **Serve behaviour was tested once**, on desktop-mac's Tailscale.app 1.104.7, for the path prefix. Header
-  order and rewriting by Serve (relevant to F2, now neutralised by rejecting overflow and duplicates), and
-  Serve's own connection timeouts, were not exercised under load. The linux-box unix-socket path with real Serve
-  was verified in Phase 2 but not re-run after these changes: re-run before deploying there.
+- **Serve under load and its own timeouts were not exercised.** Serve's behaviour with these checks was
+  measured on both machines (§6). One piece is still open: **Serve pointed at a unix socket on linux-box needs
+  root** (`tailscale serve … unix:PATH` answers "must be root, or be an operator and able to run `sudo
+  tailscale`"), so I could not run that exact chain, and `sudo` is the owner's to run. Everything either side
+  of it was tested; see §6 for the two commands that finish it.
 - **CSP keeps `style-src 'unsafe-inline'` and `script-src … 'wasm-unsafe-eval'`.** xterm.js injects `<style>`
   elements, and wterm needs WebAssembly compilation. Scripts and wasm are served from the bridge and pinned
   (F15); there is no `unsafe-eval` and no external origin (`default-src 'none'`, `connect-src 'self'`). Script
@@ -147,3 +148,39 @@ each fix permanent with a test that fails without it.
   repository, not what upstream published.
 - The first review's `--debug-input` remark stands: it logs typed text and must stay off.
 - Two cache directories left in `/tmp` by the first review (`rweb-security-*`) were not touched.
+
+## 6. linux-box (Linux, Rex preview.22 / API revision 19, Tailscale 1.104.7)
+
+Built from a scratch clone in `/tmp` of `1e6e873`, everything below removed afterwards (no bridge process, no
+file under `/tmp` or `/run/user/1000`, Serve back to the original three entries, `rex ls` shows only
+`drifting-tundra`).
+
+- **Tests.** `REX_SOCKET=… zig build test`: 194 of 195 pass (the skip is the restart test), including the live
+  tests against linux-box's Rex. This found a real bug the macOS run could not: the owner check for secret and
+  upload files used the C `stat`, which does not compile on Linux. Fixed with `statx` and committed.
+- **Unix socket, same-user forgery (the linux-box threat).** A process running as the same user connected to
+  the bridge's socket with the owner's `Tailscale-User-Login` and a forged `X-Forwarded-For`: the connection was
+  closed at accept ("refused: peer not allowed"), curl got a reset, no request was read. Only uid 0
+  (tailscaled) is allowed by default. The socket was 0600 in a 0700 directory.
+- **Serve to a unix socket: not run.** It needs root. To finish it, with the bridge running as
+  `rweb --listen-unix /run/user/1000/rweb-sv-test/bridge.sock --owner-from-tailscale`, the owner runs on
+  linux-box `sudo tailscale serve --bg --https=12445 unix:/run/user/1000/rweb-sv-test/bridge.sock`, and
+  afterwards `sudo tailscale serve --https=12445 off`. Expected: the owner's other nodes get 200, linux-box's own
+  address gets 403 "request from this node's own address".
+- **Serve to loopback TCP with the secret prefix, on linux-box (a deployment option that needs no root).**
+  Same mechanism as desktop-mac, without `--allow-own-address`:
+  from desktop-mac (another node of the owner) through Serve: page, script and `/api/tree` all 200; transfer
+  address 404 (transfer off); from linux-box itself through Serve: **403 "request from this node's own address"**
+  (the rule works on the real thing); forged headers sent directly to the loopback port without the secret: 404;
+  the port is not reachable from desktop-mac. A browser on desktop-mac loaded the page through Serve and its
+  WebSocket connected (one session listed, transfer not offered).
+- **What Serve does to headers (measured through the real proxy).** A client-supplied `Tailscale-User-Login`
+  is overwritten (the bridge still sees the owner), a client-supplied `Tailscale-Funnel-Request` is stripped,
+  other headers pass through: 70 extra headers reached the bridge and were refused with **431 "too many
+  headers"** (F2 holds on a real proxy), and a wrong `Host` was refused with **"host not allowed"** (F8 holds).
+  A client-supplied `X-Forwarded-For` does not make the request pass or fail by itself; the bridge refuses on
+  any listed address that is the node's own, and requires the header.
+- **Choice for the `setup-repo` module on linux-box:** either the unix socket (peer uid 0, needs the root-run
+  Serve command above, which a root-run setup-repo can do) or loopback TCP with the secret prefix (verified end
+  to end above, no special rights). Both are enforced boundaries; the unix socket has the stronger one (a kernel
+  peer check rather than a secret), the TCP one has the same mechanism on both machines.
