@@ -60,10 +60,10 @@
     {label: 'Enter', key: 'enter'},
     {label: '↑', key: 'arrow_up', repeat: true, title: 'Up'},
     {label: '↓', key: 'arrow_down', repeat: true, title: 'Down'},
-  ];
-  const ROW_MORE = [
     {label: '←', key: 'arrow_left', repeat: true, title: 'Left'},
     {label: '→', key: 'arrow_right', repeat: true, title: 'Right'},
+  ];
+  const ROW_MORE = [
     {label: 'Home', key: 'home'},
     {label: 'End', key: 'end'},
     {label: 'PgUp', key: 'page_up', repeat: true},

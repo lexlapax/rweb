@@ -139,9 +139,27 @@ term.attachCustomKeyEventHandler(e => {
 });
 
 // ---- layout: draw at Rex's size and shrink to fit; Rex's size changes only when asked ----
+// Like Ovis: on a touch screen the text keeps the size chosen with +/- and Rex's terminal is resized to
+// fit the screen (it changes for everyone viewing it). Elsewhere, and when switched off in the menu,
+// Rex's size is kept and wterm shrinks its text to fit instead.
+const COARSE = matchMedia('(pointer: coarse)');
+function autoFitOn() { return LS.get('autofit', COARSE.matches) === true && termKind === 'wterm'; }
+let fitTimer = 0, lastFit = '';
+function scheduleFit() {
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => {
+    if (!autoFitOn() || !state.current || state.observe || !state.rexUp) return;
+    const stage = $('stage'); if (stage.hidden) return;
+    const d = term.proposeDimensions(stage.clientWidth - 2, stage.clientHeight);
+    if (!d || (d.cols === state.cols && d.rows === state.rows)) return;
+    const key = d.cols + 'x' + d.rows; if (key === lastFit) return;     // asked already; do not repeat
+    lastFit = key; send({t: 'fit', cols: d.cols, rows: d.rows});
+  }, 350);
+}
 function layout() {
   const stage = $('stage');
   if (stage.hidden) return;
+  if (autoFitOn()) { $('term').style.transform = ''; term.setFontPx(state.fontSize); scheduleFit(); return; }
   if (termKind === 'wterm') {
     // No CSS scaling for wterm (it would break its cell measuring and typing overlay): the font shrinks instead.
     $('term').style.transform = '';
@@ -181,6 +199,7 @@ function applyTheme(t) {
 function setFontSize(n) {
   state.fontSize = K.clampFont(n); LS.set('fontSize', state.fontSize);
   if (termKind === 'xterm') term.options.fontSize = state.fontSize;
+  lastFit = '';
   requestAnimationFrame(layout);
   const el = $('font-now'); if (el) el.textContent = state.fontSize + ' px';
 }
@@ -250,6 +269,7 @@ function handleMessage(m) {
     case 'rex': state.rexUp = m.up; renderStatus(); break;
     case 'tree': state.tree = m.sessions; renderAll(); maybeRestore(); break;
     case 'opened':
+      lastFit = '';
       state.cols = m.cols; state.rows = m.rows; state.historyRows = m.history_rows;
       state.exited = (m.exited !== undefined && m.exited !== null) ? m.exited : null;
       $('empty').hidden = true; $('stage').hidden = false; $('keys').hidden = false;
@@ -404,6 +424,7 @@ $('more').onclick = () => openPop($('more'), pop => {
   sz.append(minus, now, plus); pop.append(sz);
   const ro = item(pop, 'View only', () => send({t: 'observe', on: !state.observe}), 'pop-ro');
   ro.setAttribute('role', 'menuitemcheckbox');
+  if (termKind === 'wterm') { const af = item(pop, autoFitOn() ? 'Fit Rex to this screen: on' : 'Fit Rex to this screen: off', () => { LS.set('autofit', !autoFitOn()); lastFit = ''; closePop(); layout(); }); af.setAttribute('role', 'menuitemcheckbox'); af.setAttribute('aria-pressed', String(autoFitOn())); }
   item(pop, 'Fit terminal to this window…', async () => {
     closePop();
     const d = fitAddon.proposeDimensions();

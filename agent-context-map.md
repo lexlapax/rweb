@@ -237,3 +237,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Deployment order for Phase 4: linux-box, then gateway-box, then desktop-mac.
 
 - wterm fit: font and row height now shrink to fit stage width and height (Rex owns the grid size). Checked in Chrome at 1300x930 on `rweb-test-try`: 49 rows fit, nothing scrolled off. Owner reported the terminal not showing on phone/desktop before this fix; desktop is now up, phone not re-checked.
+
+- Ovis-style sizing (wterm only): on touch screens the text keeps the +/- size and the page asks Rex to resize the terminal to fit (menu toggle "Fit Rex to this screen", localStorage `rweb.autofit`); key row now has ← → in the main row as in Ovis. Checked in Chrome at phone width on `rweb-test-try`: 71x34 at 14 px, 55x26 at 18 px. Not yet checked on the owner's phone. Bottom-sheet ⋯ menu and title tab switcher from Ovis not done.

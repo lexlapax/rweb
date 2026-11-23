@@ -51,7 +51,7 @@ test('latched modifiers apply to one soft-keyboard character, not to words', () 
 
 test('the key rows are what the owner asked for, and every entry is usable', () => {
   const main = K.ROW_MAIN.map(k => k.label);
-  assert.deepEqual(main, ['Esc', 'Tab', '^C', 'Ctrl', 'Alt', 'Shift', 'Enter', '↑', '↓']);
+  assert.deepEqual(main, ['Esc', 'Tab', '^C', 'Ctrl', 'Alt', 'Shift', 'Enter', '↑', '↓', '←', '→']);
   for (const k of [...K.ROW_MAIN, ...K.ROW_MORE]) {
     assert.ok(k.label && (k.latch || k.key), `entry ${k.label} does something`);
     if (k.latch) assert.ok(['ctrl', 'alt', 'shift'].includes(k.latch));

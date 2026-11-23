@@ -93,6 +93,8 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
       if (Math.abs(px - applied) > 0.05) setFont(px);
       return px;
     },
+    // Draw at exactly px (no shrinking); the page then resizes Rex's terminal to fit.
+    setFontPx(px) { if (Math.abs(px - applied) > 0.05) setFont(px); return px; },
     // Width in pixels of the whole grid, for shrink-to-fit.
     screenWidth() { const m = cell(); return m && m.charWidth ? Math.ceil(m.charWidth * wt.cols) : host.scrollWidth; },
     // Text of the visible rows, for tests.
