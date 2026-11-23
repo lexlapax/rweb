@@ -37,6 +37,8 @@ pub const Frame = struct {
     }
 };
 
+/// Most text the Copy view is sent (the end of the scrollback if there is more).
+pub const max_copy_bytes: usize = 1 << 20;
 /// Most control frames held for one viewer.
 pub const max_text_frames = 256;
 
@@ -352,6 +354,7 @@ pub const Hub = struct {
         switch (msg) {
             .ping => v.pushText("{\"t\":\"pong\"}"),
             .dbg => {},
+            .text => h.sendText(v),
             .tree => {
                 h.mu.lockUncancelable(h.io);
                 defer h.mu.unlock(h.io);
@@ -383,6 +386,28 @@ pub const Hub = struct {
             .in, .key, .paste, .mouse, .fit => h.input(v, msg),
             .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => h.manage(v, msg),
         }
+    }
+
+    /// The Copy view: the terminal's whole text, for the browser to select from.
+    fn sendText(h: *Hub, v: *Viewer) void {
+        v.mu.lockUncancelable(h.io);
+        const t = v.term;
+        if (t != null) v.in_redraw = true; // keeps the terminal alive, as a redraw does
+        v.mu.unlock(h.io);
+        const term = t orelse return h.refuse(v, "text", "no terminal open");
+        defer {
+            v.mu.lockUncancelable(h.io);
+            v.in_redraw = false;
+            v.mu.unlock(h.io);
+        }
+        term.tmu.lockUncancelable(h.io);
+        const res = term.mirror.plainTextAll(h.gpa, max_copy_bytes);
+        term.tmu.unlock(h.io);
+        const pt = res catch |e| return h.fail(v, "text", e);
+        defer h.gpa.free(pt.text);
+        const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "text", .text = pt.text, .truncated = pt.truncated }, .{}) catch return;
+        defer h.gpa.free(out);
+        v.pushText(out);
     }
 
     fn fail(h: *Hub, v: *Viewer, what: []const u8, e: anyerror) void {
@@ -1190,6 +1215,40 @@ test "hub: a stream that needs a new snapshot (1013) is rebuilt" {
     (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
     hs.hub.handle(v, .{ .in = "hi-there\n" });
     (try waitFrame(v, hasHi)).?.deinit(testing.allocator);
+}
+
+fn isText(d: []const u8, bin: bool) bool {
+    return !bin and std.mem.startsWith(u8, d, "{\"t\":\"text\"");
+}
+
+test "hub: the Copy view gets the screen and scrollback as plain text" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    var i: u32 = 0;
+    while (i < 120) : (i += 1) {
+        var buf: [40]u8 = undefined;
+        try hs.f.feed(hs.block_id, try std.fmt.bufPrint(&buf, "copy-line-{d:0>3} \x1b[31mred\x1b[0m\r\n", .{i}));
+    }
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    hs.hub.handle(v, .text);
+    const f = (try waitFrame(v, isText)).?;
+    defer f.deinit(testing.allocator);
+    // Whole history, no escape sequences, nothing cut.
+    try testing.expect(std.mem.indexOf(u8, f.data, "copy-line-000 red") != null);
+    try testing.expect(std.mem.indexOf(u8, f.data, "copy-line-119 red") != null);
+    try testing.expect(std.mem.indexOf(u8, f.data, "\\u001b") == null);
+    try testing.expect(std.mem.indexOf(u8, f.data, "\"truncated\":false") != null);
+}
+
+test "hub: Copy with no terminal open is an error frame" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    hs.hub.handle(v, .text);
+    (try waitFrame(v, isError)).?.deinit(testing.allocator);
 }
 
 test "hub: opening a terminal that does not exist is an error frame" {

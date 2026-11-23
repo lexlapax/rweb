@@ -1,19 +1,32 @@
 'use strict';
-// rweb page: a session list, one terminal, and the browser side of the bridge protocol.
-// No framework and no network access except this origin. Labels are untrusted text: only
-// textContent is used.
+// rweb page. No framework, no network access except this origin. Everything that comes from
+// Rex (labels, ids, terminal text) is untrusted: it only ever reaches the page as textContent
+// or as terminal input, never as HTML.
 
 const $ = id => document.getElementById(id);
+const K = window.RwebKeys;
+const NARROW = matchMedia('(max-width: 900px)');
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem('rweb.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('rweb.' + k, JSON.stringify(v)); } catch {} },
+};
+const dbgOn = new URLSearchParams(location.search).get('dbg') === '1';
+
 const state = {
   ws: null, retry: 500, observe: false, locked: false, rexUp: true,
-  tree: [], current: null,   // {session, block}
-  cols: 80, rows: 24, historyRows: 0, ctrl: false, soft: false,
+  tree: [], current: null,               // {session, block}
+  cols: 80, rows: 24, historyRows: 0,
+  soft: false,                            // a soft keyboard is in use
+  latched: {ctrl: false, alt: false, shift: false},
+  fontSize: K.clampFont(LS.get('fontSize', K.FONT_DEFAULT)),
+  exited: null, tried: false,             // tried: the remembered terminal has been looked for
 };
+const link = {lastRx: performance.now(), healthy: false};
 
 // ---- the terminal ----
 const term = new Terminal({
   cols: 80, rows: 24, scrollback: 10000, allowProposedApi: true,
-  fontFamily: 'ui-monospace, Menlo, Consolas, monospace', fontSize: 14, cursorBlink: true,
+  fontFamily: 'ui-monospace, Menlo, Consolas, monospace', fontSize: state.fontSize, cursorBlink: true,
 });
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
@@ -27,133 +40,124 @@ term.parser.registerDcsHandler({intermediates:'$', final:'q'}, () => true);
 for (const n of [4, 10, 11, 12]) term.parser.registerOscHandler(n, data => data.includes('?'));
 
 function send(obj) { if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(obj)); }
-function canType() { return state.current && !state.observe && state.rexUp && link.healthy; }
+function canType() { return !!state.current && !state.observe && state.rexUp && link.healthy; }
 
-// Composed text, soft-keyboard text, pastes and mouse reports come from xterm.js.
-term.onData(d => { if (canType()) send({t: 'in', d: state.ctrl ? ctrlOf(d) : d}); });
-term.onBinary(d => { if (canType()) send({t: 'in', d}); });
-
-function ctrlOf(d) {
-  state.ctrl = false; $('ctrl').classList.remove('on');
-  if (d.length === 1) { const c = d.toUpperCase().charCodeAt(0); if (c >= 64 && c <= 95) return String.fromCharCode(c - 64); }
-  return d;
+function clearLatched() {
+  state.latched = {ctrl: false, alt: false, shift: false};
+  for (const b of document.querySelectorAll('#keys [data-latch]')) b.setAttribute('aria-pressed', 'false');
 }
 
+// Composed text, soft-keyboard text, pastes and mouse reports come from xterm.js.
+term.onData(d => {
+  if (!canType()) { if (state.current && !link.healthy) notice('Not connected: not sent'); return; }
+  const r = K.applyLatched(state.latched, d);
+  if (r.used) clearLatched();
+  send({t: 'in', d: r.text});
+});
+term.onBinary(d => { if (canType()) send({t: 'in', d}); });
+
 // Physical keys go to Rex, which encodes them for the program's keyboard mode. Phone keyboards
-// and input methods report no usable key: those go through xterm.js (onData) above, and while
-// one is in use Enter and Backspace do too, so they keep their order with the text before them.
-const snake = code => code.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Za-z])([0-9])/g, '$1_$2').toLowerCase();
+// and input methods report no usable key: those go through xterm.js (onData), and while one is
+// in use Enter and Backspace do too, so they keep their order with the text before them.
 term.attachCustomKeyEventHandler(e => {
   if (e.type !== 'keydown' && e.type !== 'keyup') return false;
   if (e.isComposing || e.keyCode === 229 || e.key === 'Unidentified' || !e.code) { state.soft = true; return true; }
   if (state.soft && (e.key === 'Enter' || e.key === 'Backspace')) return true;
-  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'v') return true;   // paste
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'v') return true;      // paste
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection()) return true; // copy
   if (!canType()) return false;
-  const mods = [e.shiftKey && 'shift', e.ctrlKey && 'ctrl', e.altKey && 'alt', e.metaKey && 'super'].filter(Boolean).join('+');
+  const mods = {shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, super: e.metaKey};
   const text = (e.key.length === 1 && !e.ctrlKey && !e.metaKey) ? e.key : '';
-  send({t: 'key', key: {
-    key: snake(e.code), mods, consumed_mods: (text && e.shiftKey) ? 'shift' : '', text,
-    unshifted_codepoint: e.key.length === 1 ? e.key.toLowerCase().codePointAt(0) : 0, composing: false,
-    action: e.type === 'keyup' ? 'release' : (e.repeat ? 'repeat' : 'press'),
-  }});
+  send({t: 'key', key: K.keyObject(K.snake(e.code), mods, e.type === 'keyup' ? 'release' : (e.repeat ? 'repeat' : 'press'), text)});
   e.preventDefault();
   return false;
 });
 
-// Keyboard diagnostics for testing a phone keyboard: open the page with ?dbg=1.
-const dbgOn = new URLSearchParams(location.search).get('dbg') === '1';
-if (dbgOn && term.textarea) {
-  const dbg = o => send({ms: Math.round(performance.now()), ...o, t: 'dbg'});
-  const ta = term.textarea;
-  for (const ev of ['keydown', 'keyup']) ta.addEventListener(ev, e => dbg({ev, key: e.key, code: e.code, kc: e.keyCode, comp: e.isComposing}), true);
-  for (const ev of ['beforeinput', 'input']) ta.addEventListener(ev, e => dbg({ev, it: e.inputType, data: e.data, comp: e.isComposing, val: ta.value}), true);
-  for (const ev of ['compositionstart', 'compositionupdate', 'compositionend']) ta.addEventListener(ev, e => dbg({ev, data: e.data}), true);
-  // How long the page load took, phase by phase, as this browser saw it.
-  const timing = () => {
-    const n = performance.getEntriesByType('navigation')[0];
-    if (!n) return;
-    const r = x => Math.round(x);
-    dbg({ev: 'timing', dns: r(n.domainLookupEnd - n.domainLookupStart), connect: r(n.connectEnd - n.connectStart),
-      tls: n.secureConnectionStart ? r(n.connectEnd - n.secureConnectionStart) : 0, wait: r(n.responseStart - n.requestStart),
-      download: r(n.responseEnd - n.responseStart), dom: r(n.domContentLoadedEventEnd), load: r(n.loadEventEnd), proto: n.nextHopProtocol,
-      resources: performance.getEntriesByType('resource').map(e => [e.name.replace(location.origin, '').split('?')[0], r(e.duration), e.transferSize, e.nextHopProtocol])});
-  };
-  if (document.readyState === 'complete') setTimeout(timing, 500); else addEventListener('load', () => setTimeout(timing, 500));
-  term.onData(d => {
-    dbg({ev: 'onData', d});
-    // What the page shows a moment later: did the shell's echo arrive, and where is it drawn?
-    setTimeout(() => {
-      const b = term.buffer.active, line = b.getLine(b.baseY + b.cursorY);
-      const st = $('stage'), sc = term.element.querySelector('.xterm-screen');
-      dbg({ev: 'shows', line: line ? line.translateToString(true) : null, cx: b.cursorX, cy: b.cursorY,
-        stage: [st.clientWidth, st.clientHeight, st.scrollLeft, st.scrollTop], screen: [sc.offsetWidth, sc.offsetHeight],
-        scale: $('term').style.transform, vv: visualViewport ? [Math.round(visualViewport.width), Math.round(visualViewport.height)] : null});
-    }, 400);
-  });
-  window.addEventListener('rweb-bytes', e => dbg({ev: 'bytes', n: e.detail.n, head: e.detail.head}));
-}
-
-// ---- layout: draw at Rex's size and shrink to fit; never change Rex's size unasked ----
+// ---- layout: draw at Rex's size and shrink to fit; Rex's size changes only when asked ----
 function layout() {
   const stage = $('stage');
   if (stage.hidden) return;
   const screen = term.element && term.element.querySelector('.xterm-screen');
   if (!screen) return;
-  const w = screen.offsetWidth, avail = stage.clientWidth;
-  const scale = w > 0 ? Math.max(0.35, Math.min(1, avail / w)) : 1;
+  const scale = K.fitScale(stage.clientWidth, screen.offsetWidth);
   $('term').style.transform = scale < 1 ? `scale(${scale})` : '';
-  $('term').style.height = '';
 }
 new ResizeObserver(layout).observe($('stage'));
+
+// The visible height changes when a soft keyboard opens: follow it so the cursor stays in view.
+function followViewport() {
+  const vv = window.visualViewport;
+  document.documentElement.style.setProperty('--vh', (vv ? Math.round(vv.height) : innerHeight) + 'px');
+  if (vv) scrollTo(0, 0);
+}
+if (window.visualViewport) { visualViewport.addEventListener('resize', followViewport); visualViewport.addEventListener('scroll', followViewport); }
+followViewport();
 
 function hex(c) { return c && !c.startsWith('#') ? '#' + c : c; }
 function applyTheme(t) {
   const theme = {};
   if (t.foreground) theme.foreground = hex(t.foreground);
-  if (t.background) { theme.background = hex(t.background); $('stage').style.background = theme.background; }
+  if (t.background) {
+    theme.background = hex(t.background);
+    document.documentElement.style.setProperty('--term-bg', theme.background);
+    $('theme-color').setAttribute('content', theme.background);
+  }
   if (t.cursor) theme.cursor = hex(t.cursor);
   term.options.theme = theme;
 }
 
-// ---- connection ----
-function setStatus(text, warn) { const s = $('status'); s.textContent = text; s.style.color = warn ? 'var(--warn)' : ''; }
-function notice(text) {
-  const n = $('notice'); n.textContent = text; n.hidden = false;
-  clearTimeout(notice.t); notice.t = setTimeout(() => { n.hidden = true; }, 5000);
+function setFontSize(n) {
+  state.fontSize = K.clampFont(n); LS.set('fontSize', state.fontSize);
+  term.options.fontSize = state.fontSize;
+  requestAnimationFrame(layout);
+  const el = $('font-now'); if (el) el.textContent = state.fontSize + ' px';
 }
 
-// A phone's connection through Tailscale Serve can go silently dead (nothing is delivered either
-// way until the browser notices, often half a minute later). So: ask for a reply every 3 s, and
-// if nothing has come back for 8 s, give the socket up and open a new one at once. Until
-// something arrives typing is refused, so no keystroke is sent into a dead connection.
-const link = {lastRx: performance.now(), healthy: false};
+// ---- status ----
+function notice(text) {
+  const n = $('notice'); n.textContent = text; n.hidden = false;
+  clearTimeout(notice.t); notice.t = setTimeout(() => { n.hidden = true; }, 4500);
+}
+function renderStatus() {
+  const dot = $('dot');
+  let cls = 'good', label = 'connected', banner = null, bad = false;
+  if (!state.ws || state.ws.readyState !== 1) { cls = 'warn'; label = 'reconnecting'; banner = 'Reconnecting…'; }
+  else if (!link.healthy) { cls = 'warn'; label = 'connection stalled'; banner = 'Connection stalled: typing is paused until it recovers.'; }
+  else if (!state.rexUp) { cls = 'bad'; label = 'Rex unreachable'; banner = 'Rex is not reachable. This page will reconnect when it is back.'; bad = true; }
+  else if (state.observe) { banner = state.locked ? 'View only (locked by the server): nothing you do here changes anything.' : 'View only: typing and changes are off.'; }
+  else if (state.exited !== null) { banner = `The program in this terminal exited (${state.exited}).`; }
+  dot.className = 'dot ' + cls; dot.setAttribute('aria-label', label); dot.title = label;
+  const b = $('banner'); b.hidden = banner === null; b.textContent = banner || ''; b.className = bad ? 'bad' : '';
+  requestAnimationFrame(layout);
+}
+
+// ---- connection ----
+// A phone's connection through Tailscale Serve can go silently dead. So: ask for a reply every
+// 3 s, and if nothing has come back for 8 s give the socket up and open a new one at once. Typing
+// is refused until something arrives, so no keystroke is sent into a dead connection.
 function connect() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws${location.search}`);
   state.ws = ws; ws.binaryType = 'arraybuffer';
-  const mine = () => state.ws === ws;       // a socket we abandoned must not act
-  link.lastRx = performance.now(); link.healthy = false;
+  const mine = () => state.ws === ws;          // a socket we abandoned must not act
+  link.lastRx = performance.now(); link.healthy = false; renderStatus();
   ws.onopen = () => {
     if (!mine()) return;
-    state.retry = 500; link.lastRx = performance.now(); setStatus('connected');
+    state.retry = 500; link.lastRx = performance.now();
     if (state.current) send({t: 'open', session: state.current.session, block: state.current.block});
+    renderStatus();
   };
   ws.onclose = () => {
     if (!mine()) return;
-    link.healthy = false; setStatus('disconnected, retrying', true);
+    link.healthy = false; renderStatus();
     setTimeout(() => { if (mine()) connect(); }, state.retry); state.retry = Math.min(state.retry * 2, 4000);
   };
   ws.onmessage = ev => {
     if (!mine()) return;
     link.lastRx = performance.now();
-    if (!link.healthy) { link.healthy = true; setStatus('connected'); }
-    if (typeof ev.data !== 'string') {
-      const u = new Uint8Array(ev.data);
-      if (dbgOn) window.dispatchEvent(new CustomEvent('rweb-bytes', {detail: {n: u.length, head: JSON.stringify(new TextDecoder().decode(u.subarray(0, 60)))}}));
-      term.write(u); return;
-    }
+    if (!link.healthy) { link.healthy = true; renderStatus(); }
+    if (typeof ev.data !== 'string') { term.write(new Uint8Array(ev.data)); return; }
     let m; try { m = JSON.parse(ev.data); } catch { return; }
-    onMessage(m);
+    try { handleMessage(m); } catch (e) { if (dbgOn) dbgSend({ev: 'handler-threw', mt: m.t, msg: String(e && e.stack || e).slice(0, 300)}); }
   };
 }
 setInterval(() => send({t: 'ping'}), 3000);
@@ -161,112 +165,304 @@ setInterval(() => {
   const ws = state.ws;
   if (!ws || ws.readyState !== 1) return;
   const quiet = performance.now() - link.lastRx;
-  if (quiet > 5000 && link.healthy) { link.healthy = false; setStatus('connection stalled', true); }
+  if (quiet > 5000 && link.healthy) { link.healthy = false; renderStatus(); }
   if (quiet > 8000) {
-    // Dead for 8 s: drop it without waiting for a close handshake that may never come.
     state.ws = null; try { ws.close(); } catch {}
-    setStatus('reconnecting', true); state.retry = 500; connect();
+    state.retry = 500; connect();
   }
 }, 1000);
 
-// The type goes last so no diagnostic field can ever override it.
-// With ?dbg=1 the page sends a heartbeat every second: the bridge log then shows how long the
-// phone's messages take to arrive, with or without the keyboard in use.
-setInterval(() => { if (dbgOn) dbgSend({ev: 'hb', vis: document.visibilityState}); }, 1000);
-function dbgSend(o) { if (dbgOn) send({ms: Math.round(performance.now()), ...o, t: 'dbg'}); }
-addEventListener('error', e => dbgSend({ev: 'jserror', msg: String(e.message), line: e.lineno, col: e.colno}));
-addEventListener('unhandledrejection', e => dbgSend({ev: 'jsreject', msg: String(e.reason)}));
-
-function onMessage(m) {
-  dbgSend({ev: 'msg', mt: m.t});
-  try { handleMessage(m); } catch (e) { dbgSend({ev: 'handler-threw', mt: m.t, msg: String(e && e.stack || e).slice(0, 300)}); }
-}
-
 function handleMessage(m) {
   switch (m.t) {
-    case 'mode': state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateButtons(); break;
-    case 'rex': state.rexUp = m.up; setStatus(m.up ? 'connected' : 'Rex is not reachable', !m.up); break;
-    case 'tree': state.tree = m.sessions; renderTree(); break;
+    case 'mode': state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
+    case 'rex': state.rexUp = m.up; renderStatus(); break;
+    case 'tree': state.tree = m.sessions; renderAll(); maybeRestore(); break;
     case 'opened':
       state.cols = m.cols; state.rows = m.rows; state.historyRows = m.history_rows;
+      state.exited = (m.exited !== undefined && m.exited !== null) ? m.exited : null;
       $('empty').hidden = true; $('stage').hidden = false; $('keys').hidden = false;
-      term.resize(m.cols, m.rows); layout(); updateButtons(); term.focus();
-      if (m.exited !== undefined && m.exited !== null) notice(`the program exited (${m.exited})`);
+      term.resize(m.cols, m.rows); layout(); updateControls(); renderStatus();
+      if (!NARROW.matches) term.focus();
       break;
     case 'theme': applyTheme(m); break;
-    case 'exited': notice(`the program exited (${m.code})`); break;
-    case 'closed': state.current = null; $('stage').hidden = true; $('keys').hidden = true; $('empty').hidden = false; $('empty').textContent = 'That terminal was closed.'; renderTree(); updateButtons(); break;
+    case 'exited': state.exited = m.code; renderStatus(); break;
+    case 'closed': showEmpty('That terminal was closed.'); break;
     case 'notice': notice(m.msg); break;
-    case 'error': notice(`${m.for}: ${m.msg}`); break;
+    case 'error': notice(m.for === 'manage' || m.for === 'input' ? m.msg : `${m.for}: ${m.msg}`); break;
+    case 'text': openCopy(m.text, m.truncated); break;
+    case 'pong': break;
   }
 }
 
-function updateButtons() {
-  const ro = $('ro'); ro.classList.toggle('on', state.observe); ro.disabled = state.locked;
-  ro.textContent = state.locked ? 'view only (locked)' : (state.observe ? 'view only: on' : 'view only');
-  $('fit').disabled = !state.current || state.observe;
-  $('history').disabled = !state.current || state.historyRows === 0;
-  $('new-session').disabled = state.observe;
+function showEmpty(text) {
+  state.current = null; state.exited = null; LS.set('last', null);
+  $('stage').hidden = true; $('keys').hidden = true; $('empty').hidden = false; $('empty').textContent = text;
+  renderAll(); updateControls(); renderStatus();
 }
-$('ro').onclick = () => send({t: 'observe', on: !state.observe});
-$('history').onclick = () => send({t: 'more_history'});
-$('fit').onclick = () => {
-  const stage = $('stage'); term.resize(term.cols, term.rows);
-  const d = fitAddon.proposeDimensions();
-  if (d && confirm(`Resize this terminal to ${d.cols}x${d.rows}? It changes for everyone viewing it.`)) send({t: 'fit', cols: d.cols, rows: d.rows});
-};
-$('menu').onclick = () => $('list').classList.toggle('open');
-$('scrim').onclick = () => $('list').classList.remove('open');
-function closeListIfNarrow() { if (matchMedia('(max-width: 900px)').matches) $('list').classList.remove('open'); }
-// On a narrow screen the list starts closed once a terminal is showing, and open before.
-$('new-session').onclick = () => { const l = prompt('Name for the new session (optional)'); if (l !== null) send({t: 'new_session', ...(l ? {label: l} : {})}); };
-$('ctrl').onclick = () => { state.ctrl = !state.ctrl; $('ctrl').classList.toggle('on', state.ctrl); term.focus(); };
-$('keys').addEventListener('click', e => {
-  const k = e.target.dataset && e.target.dataset.k; if (!k || !canType()) return;
-  send({t: 'key', key: {key: k, mods: '', consumed_mods: '', text: '', unshifted_codepoint: 0, composing: false, action: 'press'}});
-  send({t: 'key', key: {key: k, mods: '', consumed_mods: '', text: '', unshifted_codepoint: 0, composing: false, action: 'release'}});
-  term.focus();
-});
 
-// ---- the session list ----
+// ---- the tree, tabs and controls ----
+function currentInfo() {
+  if (!state.current) return null;
+  for (const s of state.tree) for (const b of s.blocks) if (b.id === state.current.block) return {s, b};
+  return null;
+}
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function iconButton(text, label, on) { const b = el('button', 'small', text); b.setAttribute('aria-label', label); b.title = label; b.onclick = on; b.disabled = state.observe; return b; }
+
+function renderAll() { renderTree(); renderCrumb(); updateControls(); }
+
+function renderCrumb() {
+  const info = currentInfo();
+  $('crumb-session').textContent = info ? info.s.label : 'rweb';
+  $('crumb-term').textContent = info ? info.b.label : '';
+  $('crumb-sep').hidden = !info;
+  const tabs = $('tabs'); tabs.replaceChildren();
+  const sel = $('tabsel');
+  if (info && info.s.blocks.length > 1) {
+    info.s.blocks.forEach(b => {
+      const t = el('button', '', b.label);
+      if (b.id === state.current.block) t.setAttribute('aria-current', 'true');
+      t.onclick = () => openBlock(info.s.id, b.id);
+      tabs.append(t);
+    });
+    const i = info.s.blocks.findIndex(b => b.id === state.current.block) + 1;
+    sel.hidden = false; sel.textContent = `${i}/${info.s.blocks.length} ▾`;
+  } else { sel.hidden = true; }
+}
+
 function renderTree() {
   const root = $('tree'); root.replaceChildren();
   for (const s of state.tree) {
     const box = el('div', 'session');
     const name = el('div', 'name');
     name.append(el('span', 'label', s.label));
-    const add = el('button', 'small', '+'); add.title = 'New terminal';
-    add.onclick = () => send({t: 'new_terminal', session: s.id});
-    const ren = el('button', 'small', '\u270e'); ren.title = 'Rename';
-    ren.onclick = () => { const l = prompt('New name', s.label); if (l) send({t: 'rename_session', session: s.id, label: l}); };
-    const del = el('button', 'small', '\u2715'); del.title = 'Close session';
-    del.onclick = () => { if (confirm(`Close session "${s.label}" and every terminal in it?`)) send({t: 'destroy_session', session: s.id}); };
-    for (const b of [add, ren, del]) b.disabled = state.observe;
-    name.append(add, ren, del);
+    name.append(iconButton('+', `New terminal in ${s.label}`, () => send({t: 'new_terminal', session: s.id})));
+    name.append(iconButton('✎', `Rename session ${s.label}`, async () => {
+      const l = await ask({title: 'Rename session', label: 'Name', value: s.label, ok: 'Rename'});
+      if (l) send({t: 'rename_session', session: s.id, label: l});
+    }));
+    name.append(iconButton('✕', `Close session ${s.label}`, async () => {
+      if (await confirmAction({title: 'Close session?', message: `"${s.label}" and every terminal in it will end, and the programs running in them.`, ok: 'Close session'}))
+        send({t: 'destroy_session', session: s.id});
+    }));
     box.append(name);
     for (const b of s.blocks) {
-      const row = el('div', 'block' + (state.current && state.current.block === b.id ? ' current' : ''));
+      const cur = state.current && state.current.block === b.id;
+      const row = el('div', 'block' + (cur ? ' current' : ''));
       const open = el('button', 'label', b.label + (b.owner ? ' •' : ''));
-      open.title = b.owner ? `claimed by ${b.owner}` : '';
+      if (cur) open.setAttribute('aria-current', 'true');
+      open.title = b.owner ? `A desktop or another client is using this terminal's size` : '';
       open.onclick = () => openBlock(s.id, b.id);
-      const rn = el('button', 'small', '\u270e'); rn.title = 'Rename';
-      rn.onclick = () => { const l = prompt('New name', b.label); if (l) send({t: 'rename_block', session: s.id, block: b.id, label: l}); };
-      const cl = el('button', 'small', '\u2715'); cl.title = 'Close terminal';
-      cl.onclick = () => { if (confirm(`Close terminal "${b.label}"? The program in it ends.`)) send({t: 'close_block', session: s.id, block: b.id}); };
-      for (const x of [rn, cl]) x.disabled = state.observe;
-      row.append(open, rn, cl);
+      row.append(open);
+      row.append(iconButton('✎', `Rename terminal ${b.label}`, async () => {
+        const l = await ask({title: 'Rename terminal', label: 'Name', value: b.label, ok: 'Rename'});
+        if (l) send({t: 'rename_block', session: s.id, block: b.id, label: l});
+      }));
+      row.append(iconButton('✕', `Close terminal ${b.label}`, async () => {
+        if (await confirmAction({title: 'Close terminal?', message: `The program running in "${b.label}" will end.`, ok: 'Close terminal'}))
+          send({t: 'close_block', session: s.id, block: b.id});
+      }));
       box.append(row);
     }
     root.append(box);
   }
-  if (!state.tree.length) root.append(el('div', 'dim', 'No sessions.'));
+  if (!state.tree.length) root.append(el('div', 'dim', 'No sessions yet.'));
 }
+
+function updateControls() {
+  $('new-session').disabled = state.observe;
+  $('menu').setAttribute('aria-expanded', String($('list').classList.contains('open')));
+  const fit = $('pop-fit'); if (fit) fit.disabled = !state.current || state.observe;
+  const ro = $('pop-ro'); if (ro) { ro.setAttribute('aria-pressed', String(state.observe)); ro.disabled = state.locked; ro.textContent = state.locked ? 'View only (locked by the server)' : 'View only'; }
+  const hi = $('pop-hist'); if (hi) hi.disabled = !state.current || state.historyRows === 0;
+}
+
 function openBlock(session, block) {
-  state.current = {session, block}; term.reset();
+  state.current = {session, block}; state.exited = null; LS.set('last', state.current);
+  term.reset(); clearLatched();
   send({t: 'open', session, block});
-  closeListIfNarrow();
-  renderTree(); updateButtons();
+  closeListIfNarrow(); closePop();
+  renderAll(); renderStatus();
+}
+// Reopen the terminal this device had open last, once the tree says it still exists.
+function maybeRestore() {
+  if (state.tried) return;
+  state.tried = true;
+  const last = LS.get('last', null);
+  if (!last || state.current) return;
+  const exists = state.tree.some(s => s.id === last.session && s.blocks.some(b => b.id === last.block));
+  if (exists) openBlock(last.session, last.block);
+}
+
+// ---- list drawer ----
+function setList(open) { $('list').classList.toggle('open', open); LS.set('list', open); updateControls(); requestAnimationFrame(layout); }
+function closeListIfNarrow() { if (NARROW.matches) setList(false); }
+$('menu').onclick = () => setList(!$('list').classList.contains('open'));
+$('scrim').onclick = () => setList(false);
+$('new-session').onclick = async () => {
+  const l = await ask({title: 'New session', label: 'Name (optional)', value: '', ok: 'Create', optional: true});
+  if (l !== null) send({t: 'new_session', ...(l ? {label: l} : {})});
+};
+(function initList() { const saved = LS.get('list', null); $('list').classList.toggle('open', saved === null ? !NARROW.matches : (saved && !NARROW.matches)); updateControls(); })();
+
+// ---- popovers: the ... menu and the terminal switcher ----
+let popFor = null;
+function closePop() { $('pop').hidden = true; if (popFor) popFor.setAttribute('aria-expanded', 'false'); popFor = null; }
+function openPop(anchor, build) {
+  if (popFor === anchor) return closePop();
+  closePop();
+  const pop = $('pop'); pop.replaceChildren(); build(pop); pop.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  pop.style.top = Math.round(r.bottom + 4) + 'px';
+  pop.style.left = Math.max(6, Math.min(innerWidth - pop.offsetWidth - 6, r.right - pop.offsetWidth)) + 'px';
+  anchor.setAttribute('aria-expanded', 'true'); popFor = anchor;
+  const first = pop.querySelector('button:not(:disabled)'); if (first) first.focus();
+}
+document.addEventListener('pointerdown', e => { if (popFor && !$('pop').contains(e.target) && !popFor.contains(e.target)) closePop(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && popFor) { const a = popFor; closePop(); a.focus(); } });
+function item(pop, text, on, id) { const b = el('button', '', text); b.setAttribute('role', 'menuitem'); if (id) b.id = id; b.onclick = () => { on(b); }; pop.append(b); return b; }
+
+$('more').onclick = () => openPop($('more'), pop => {
+  item(pop, 'Copy text…', () => { closePop(); requestCopy(); }, 'pop-copy').disabled = !state.current;
+  item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !state.current || state.observe;
+  const sz = el('div', 'sizer'); sz.append(el('span', '', 'Text size'));
+  const minus = el('button', '', '−'); minus.setAttribute('aria-label', 'Smaller text'); minus.onclick = () => setFontSize(state.fontSize - 1);
+  const now = el('span', 'dim', state.fontSize + ' px'); now.id = 'font-now'; now.style.flex = '0 0 auto'; now.style.minWidth = '48px'; now.style.textAlign = 'center';
+  const plus = el('button', '', '+'); plus.setAttribute('aria-label', 'Larger text'); plus.onclick = () => setFontSize(state.fontSize + 1);
+  sz.append(minus, now, plus); pop.append(sz);
+  const ro = item(pop, 'View only', () => send({t: 'observe', on: !state.observe}), 'pop-ro');
+  ro.setAttribute('role', 'menuitemcheckbox');
+  item(pop, 'Fit terminal to this window…', async () => {
+    closePop();
+    const d = fitAddon.proposeDimensions();
+    if (d && await confirmAction({title: 'Resize the terminal?', message: `Resize it to ${d.cols} × ${d.rows}. It changes for everyone viewing it, including the desktop.`, ok: 'Resize'})) send({t: 'fit', cols: d.cols, rows: d.rows});
+  }, 'pop-fit');
+  item(pop, 'Load all scrollback', () => { closePop(); send({t: 'more_history'}); }, 'pop-hist');
+  item(pop, 'Reconnect', () => { closePop(); if (state.ws) { const w = state.ws; state.ws = null; try { w.close(); } catch {} } connect(); });
+  updateControls();
+});
+$('tabsel').onclick = () => openPop($('tabsel'), pop => {
+  const info = currentInfo(); if (!info) return;
+  info.s.blocks.forEach(b => { const x = item(pop, b.label, () => openBlock(info.s.id, b.id)); if (b.id === state.current.block) x.setAttribute('aria-current', 'true'); });
+});
+
+// ---- dialogs (in the page, so nothing depends on the browser's own pop-ups) ----
+function dialogResult(dlg, setup) {
+  return new Promise(resolve => {
+    let value = null;
+    const done = v => { value = v; if (dlg.open) dlg.close(); };
+    setup(done);
+    dlg.addEventListener('close', () => resolve(value), {once: true});
+    dlg.showModal();
+  });
+}
+function ask({title, label, value, ok, optional}) {
+  const dlg = $('dlg'), inp = $('dlg-input');
+  return dialogResult(dlg, done => {
+    $('dlg-title').textContent = title; $('dlg-msg').textContent = ''; $('dlg-msg').hidden = true;
+    $('dlg-label').textContent = label; $('dlg-label').hidden = false; inp.hidden = false; inp.value = value || '';
+    const okb = $('dlg-ok'); okb.textContent = ok || 'OK'; okb.className = '';
+    $('dlg-form').onsubmit = e => { e.preventDefault(); const v = inp.value.trim(); if (v || optional) done(v); };
+    $('dlg-cancel').onclick = () => done(null);
+    setTimeout(() => { inp.focus(); inp.select(); }, 0);
+  });
+}
+async function confirmAction({title, message, ok}) {
+  const dlg = $('dlg');
+  const r = await dialogResult(dlg, done => {
+    $('dlg-title').textContent = title; $('dlg-msg').textContent = message; $('dlg-msg').hidden = false;
+    $('dlg-label').hidden = true; $('dlg-input').hidden = true;
+    const okb = $('dlg-ok'); okb.textContent = ok || 'OK'; okb.className = 'danger';
+    $('dlg-form').onsubmit = e => { e.preventDefault(); done('yes'); };
+    $('dlg-cancel').onclick = () => done(null);
+    setTimeout(() => $('dlg-cancel').focus(), 0);   // the safe choice has the focus
+  });
+  return r === 'yes';
+}
+
+// ---- copy and paste ----
+function requestCopy() { send({t: 'text'}); }
+function openCopy(text, truncated) {
+  const dlg = $('copydlg'), ta = $('copytext');
+  ta.value = text;
+  $('copy-note').textContent = truncated ? 'Showing the end of a long history.' : '';
+  $('copy-all').onclick = async () => {
+    try { await navigator.clipboard.writeText(ta.value); notice('Copied'); }
+    catch { ta.focus(); ta.select(); notice('Select the text and use your device’s copy'); }
+  };
+  $('copy-close').onclick = () => dlg.close();
+  if (!dlg.open) dlg.showModal();
+  ta.scrollTop = ta.scrollHeight;
+}
+async function doPaste() {
+  if (!canType()) return;
+  let text = '';
+  try { text = await navigator.clipboard.readText(); } catch { text = null; }
+  if (text) return send({t: 'paste', d: text});
+  if (text === '') return notice('The clipboard is empty');
+  const dlg = $('pastedlg'), ta = $('pastetext'); ta.value = '';
+  const r = await dialogResult(dlg, done => {
+    $('paste-cancel').onclick = () => done(null);
+    dlg.querySelector('form').onsubmit = e => { e.preventDefault(); done(ta.value); };
+    setTimeout(() => ta.focus(), 0);
+  });
+  if (r) send({t: 'paste', d: r});
+}
+
+// ---- the key row ----
+(function buildKeys() {
+  const main = $('keys-main'), more = $('keys-more');
+  const make = (k, parent) => {
+    const b = el('button', '', k.label);
+    if (k.title) { b.title = k.title; b.setAttribute('aria-label', k.title); }
+    if (k.latch) { b.dataset.latch = k.latch; b.setAttribute('aria-pressed', 'false'); }
+    b._k = k; parent.append(b);
+  };
+  K.ROW_MAIN.forEach(k => make(k, main));
+  const toggle = el('button', '', '⌃'); toggle.setAttribute('aria-label', 'More keys'); toggle.setAttribute('aria-expanded', 'false');
+  toggle.onpointerdown = e => { e.preventDefault(); const open = $('keys-more').hidden; $('keys-more').hidden = !open; toggle.setAttribute('aria-expanded', String(open)); toggle.textContent = open ? '⌄' : '⌃'; requestAnimationFrame(layout); };
+  main.append(toggle);
+  K.ROW_MORE.forEach(k => make(k, more));
+  const paste = el('button', '', 'Paste'); paste.onpointerdown = e => { e.preventDefault(); doPaste(); }; more.append(paste);
+})();
+
+let hold = null;
+function pressKey(btn) {
+  const k = btn._k; if (!k) return;
+  if (k.latch) {
+    state.latched[k.latch] = !state.latched[k.latch];
+    btn.setAttribute('aria-pressed', String(state.latched[k.latch]));
+    return;
+  }
+  if (!canType()) { notice(link.healthy ? 'Typing is off' : 'Not connected: not sent'); return; }
+  const mods = Object.assign({}, k.mods || {});
+  const used = Object.keys(state.latched).some(m => state.latched[m]);
+  for (const m of Object.keys(state.latched)) if (state.latched[m]) mods[m] = true;
+  const text = k.text && !mods.ctrl && !mods.alt ? k.text : '';
+  send({t: 'key', key: K.keyObject(k.key, mods, 'press', text)});
+  if (used) clearLatched();
+  if (k.repeat) {
+    hold = {btn, mods, text, timer: setTimeout(() => { hold.iv = setInterval(() => send({t: 'key', key: K.keyObject(k.key, mods, 'repeat', text)}), 70); }, 420)};
+  } else hold = {btn, mods, text};
+}
+function releaseKey() {
+  if (!hold) return;
+  const {btn, mods, text} = hold; clearTimeout(hold.timer); clearInterval(hold.iv); hold = null;
+  const k = btn._k; if (k && !k.latch && canType()) send({t: 'key', key: K.keyObject(k.key, mods, 'release', text)});
+}
+// pointerdown with preventDefault keeps focus in the terminal, so the soft keyboard stays up.
+$('keys').addEventListener('pointerdown', e => { const b = e.target.closest('button'); if (!b || !b._k) return; e.preventDefault(); pressKey(b); });
+for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) $('keys').addEventListener(ev, releaseKey);
+
+// ---- diagnostics: open with ?dbg=1 (and start the bridge with --debug-input) ----
+function dbgSend(o) { if (dbgOn) send({ms: Math.round(performance.now()), ...o, t: 'dbg'}); }
+if (dbgOn && term.textarea) {
+  setInterval(() => dbgSend({ev: 'hb', vis: document.visibilityState}), 1000);
+  const ta = term.textarea;
+  for (const ev of ['keydown', 'keyup']) ta.addEventListener(ev, e => dbgSend({ev, key: e.key, code: e.code, kc: e.keyCode, comp: e.isComposing}), true);
+  for (const ev of ['beforeinput', 'input']) ta.addEventListener(ev, e => dbgSend({ev, it: e.inputType, data: e.data, comp: e.isComposing, val: ta.value}), true);
+  for (const ev of ['compositionstart', 'compositionupdate', 'compositionend']) ta.addEventListener(ev, e => dbgSend({ev, data: e.data}), true);
+  addEventListener('error', e => dbgSend({ev: 'jserror', msg: String(e.message), line: e.lineno, col: e.colno}));
 }
 
 // Test hooks: what the terminal shows, for automated checks.
@@ -274,4 +470,6 @@ window.rweb = {
   term, state,
   screen() { const b = term.buffer.active, out = []; for (let i = 0; i < term.rows; i++) out.push(b.getLine(b.viewportY + i).translateToString(true)); return out; },
 };
+setFontSize(state.fontSize);
+renderStatus();
 connect();

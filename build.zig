@@ -47,6 +47,10 @@ pub fn build(b: *std.Build) void {
     const run_fuzz = b.addRunArtifact(fuzz_tests);
     b.step("fuzz", "Fuzz the parsers: zig build fuzz --fuzz").dependOn(&run_fuzz.step);
 
+    // The page's pure logic (needs Node). Not part of `test`, so a machine without Node still builds.
+    const web_tests = b.addSystemCommand(&.{ "node", "--test", "tests/web/keys.test.mjs" });
+    b.step("web-test", "Test the page's key logic with Node").dependOn(&web_tests.step);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_bridge_tests.step);

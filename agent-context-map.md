@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-22 (desktop-mac). Read first; load linked context lazily. Keep this file short: current
+Last updated: 2026-11-22 (desktop-mac). Phase 3 built; phones to try. Read first; load linked context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
@@ -110,7 +110,7 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       `mkdir -p .zig-cache/tmp`); 90 s smoke run clean. Not a campaign.
    9. DONE: live tests pass on desktop-mac (preview.21, rev 18) and linux-box (preview.22, rev 19),
       59/59 each; see docs/phase1-result.md.
-2. **Next: Phase 3 (frontend)**, then 4 (security review comes first). `Control` now asks for revisions 18 to 19 (desktop-mac gets 18, linux-box 19) and surfaces
+2. **Phase 3 (frontend) is built; see [docs/phase3-result.md](docs/phase3-result.md).** Its exit (a week of daily use on a phone and a laptop) is the owner's. **Next: Phase 4**, whose first step is the security review. `Control` now asks for revisions 18 to 19 (desktop-mac gets 18, linux-box 19) and surfaces
    `event_dropped` as `Event.dropped`: the bridge must re-read state on it (Phase 2). Large
    requests should be sent fragmented at 19; ours are small. `focus_history.reverse` unused. The real restart test is done on both machines.
    Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
@@ -133,6 +133,10 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 
 ## Checks run for this update
 
+- 2026-11-22, Phase 3: desktop-mac `zig build test` 107 pass + 1 skip (live), `ReleaseSafe` too; `zig
+  build web-test` 8 pass; linux-box 145 pass + 1 skip (scratch copy removed). Chrome checks of the
+  page at desktop and 400 px wide (throwaway session, destroyed); `rex ls` shows only `calm-isle`
+  and `drifting-tundra`.
 - 2026-11-22, final Phase 2 runs: desktop-mac `zig build test` with `REX_SOCKET`: 102 pass + 1 skip;
   linux-box (scratch copy, removed) 140 pass + 1 skip; `rex ls` shows only `calm-isle` and
   `drifting-tundra`. Phone typing confirmed by the shell's own screen.

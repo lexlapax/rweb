@@ -2,47 +2,82 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#111418" id="theme-color">
 <title>rweb</title>
 <link rel="stylesheet" href="/vendor/xterm.css">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <header id="bar">
-  <button id="menu" aria-label="Sessions">&#9776;</button>
-  <span id="title">rweb</span>
-  <span id="status" class="dim">connecting</span>
+  <button id="menu" class="icon" aria-label="Sessions and terminals" aria-controls="list" aria-expanded="true">&#9776;</button>
+  <div id="crumb" aria-live="polite"><span id="crumb-session"></span><span id="crumb-sep" aria-hidden="true"> &rsaquo; </span><span id="crumb-term"></span></div>
+  <nav id="tabs" aria-label="Terminals in this session"></nav>
+  <button id="tabsel" hidden aria-haspopup="menu" aria-expanded="false" aria-label="Switch terminal"></button>
   <span class="spacer"></span>
-  <button id="ro" title="View only: the page will not type, resize or change anything">view only</button>
-  <button id="history" title="Load the rest of the scrollback" disabled>history</button>
-  <button id="fit" title="Resize the terminal to this window (changes it for everyone viewing it)" disabled>fit</button>
+  <span id="dot" class="dot" role="status" aria-label="connecting" title="connecting"></span>
+  <button id="more" class="icon" aria-label="More" aria-haspopup="menu" aria-expanded="false">&#8943;</button>
 </header>
+<div id="banner" hidden role="status"></div>
 <main>
-  <nav id="list" class="open">
-    <div class="row">
-      <button id="new-session">new session</button>
-    </div>
+  <nav id="list" aria-label="Sessions and terminals" class="open">
+    <div class="row"><button id="new-session">New session</button></div>
     <div id="tree"></div>
   </nav>
   <div id="scrim"></div>
   <section id="view">
     <div id="empty" class="dim">Pick a terminal from the list.</div>
     <div id="stage" hidden><div id="term"></div></div>
-    <div id="keys" hidden>
-      <button data-k="escape">Esc</button>
-      <button data-k="tab">Tab</button>
-      <button id="ctrl" data-mod="ctrl">Ctrl</button>
-      <button data-k="arrow_up">&uarr;</button>
-      <button data-k="arrow_down">&darr;</button>
-      <button data-k="arrow_left">&larr;</button>
-      <button data-k="arrow_right">&rarr;</button>
+    <div id="keys" hidden aria-label="Extra keys">
+      <div id="keys-more" hidden></div>
+      <div id="keys-main"></div>
     </div>
   </section>
 </main>
-<div id="notice" hidden></div>
+
+<div id="pop" class="pop" role="menu" hidden></div>
+<div id="notice" role="status" aria-live="polite" hidden></div>
+
+<dialog id="dlg" aria-labelledby="dlg-title">
+  <form method="dialog" id="dlg-form">
+    <h2 id="dlg-title"></h2>
+    <p id="dlg-msg" class="dim"></p>
+    <label id="dlg-label" for="dlg-input"></label>
+    <input id="dlg-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="128">
+    <div class="buttons">
+      <button type="button" id="dlg-cancel">Cancel</button>
+      <button type="submit" id="dlg-ok" value="ok">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="copydlg" aria-labelledby="copy-title">
+  <div class="copy-head">
+    <h2 id="copy-title">Copy text</h2>
+    <span id="copy-note" class="dim"></span>
+    <span class="spacer"></span>
+    <button id="copy-all">Copy all</button>
+    <button id="copy-close">Close</button>
+  </div>
+  <textarea id="copytext" readonly spellcheck="false" aria-label="Terminal text. Select with your device's selection handles."></textarea>
+</dialog>
+
+<dialog id="pastedlg" aria-labelledby="paste-title">
+  <form method="dialog">
+    <h2 id="paste-title">Paste</h2>
+    <p class="dim">This browser would not let the page read the clipboard. Paste here, then send.</p>
+    <textarea id="pastetext" rows="6" spellcheck="false" aria-label="Text to paste"></textarea>
+    <div class="buttons">
+      <button type="button" id="paste-cancel">Cancel</button>
+      <button type="submit" id="paste-send" value="ok">Send</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<script src="/keys.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

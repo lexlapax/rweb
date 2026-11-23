@@ -590,7 +590,7 @@ test "server: assets are served with a strict content security policy" {
     // Nothing in the page loads from elsewhere.
     try testing.expect(std.mem.indexOf(u8, h.body, "http://") == null and std.mem.indexOf(u8, h.body, "https://") == null);
 
-    for ([_][]const u8{ "/app.js", "/app.css", "/vendor/xterm.js", "/vendor/xterm.css", "/vendor/addon-fit.js", "/vendor/LICENSE-xterm.txt" }) |p| {
+    for ([_][]const u8{ "/app.js", "/keys.js", "/lab", "/lab.js", "/app.css", "/vendor/xterm.js", "/vendor/xterm.css", "/vendor/addon-fit.js", "/vendor/LICENSE-xterm.txt" }) |p| {
         const path = try std.fmt.allocPrint(testing.allocator, "{s}?token={s}", .{ p, token });
         defer testing.allocator.free(path);
         const a = try get(rig, path, "");

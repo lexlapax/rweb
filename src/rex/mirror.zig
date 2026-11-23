@@ -318,6 +318,27 @@ pub const Mirror = struct {
         return if (total > m.term.rows) total - m.term.rows else 0;
     }
 
+    pub const PlainAll = struct { text: []u8, truncated: bool };
+
+    /// The screen and all scrollback as plain text, soft-wrapped lines joined, trailing spaces
+    /// trimmed. At most `max_bytes` are kept (the end, cut at a line start). Caller frees `text`.
+    pub fn plainTextAll(m: *Mirror, gpa: Allocator, max_bytes: usize) !PlainAll {
+        m.mu.lockUncancelable(m.io);
+        defer m.mu.unlock(m.io);
+        if (m.status != .live) return error.NotLive;
+        var out: Io.Writer.Allocating = .init(gpa);
+        errdefer out.deinit();
+        var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, .{ .emit = .plain, .unwrap = true, .trim = true });
+        try f.format(&out.writer);
+        const all = out.written();
+        if (all.len <= max_bytes) return .{ .text = try out.toOwnedSlice(), .truncated = false };
+        var start = all.len - max_bytes;
+        while (start < all.len and all[start - 1] != '\n') start += 1; // begin at a line start
+        const kept = try gpa.dupe(u8, all[start..]);
+        out.deinit();
+        return .{ .text = kept, .truncated = true };
+    }
+
     /// The visible screen as plain text, for tests and logs. Caller frees.
     pub fn plainText(m: *Mirror, gpa: Allocator) ![]u8 {
         m.mu.lockUncancelable(m.io);
@@ -514,6 +535,31 @@ test "mirror: a redraw can cap how much scrollback it carries" {
     const text2 = try replay(a, all, 30, 5, &alt);
     defer a.free(text2);
     try testing.expect(std.mem.indexOf(u8, text2, "line-000") != null);
+}
+
+test "mirror: plainTextAll joins wrapped lines and keeps the end when it must cut" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 1, 20, 4, "");
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 1);
+    defer m.deinit();
+    try m.feed(stream);
+    // One 50-character line wraps on a 20-column terminal; it must come back as one line.
+    try m.feed("0123456789012345678901234567890123456789ABCDEFGHIJ\r\n");
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) {
+        var buf: [24]u8 = undefined;
+        try m.feed(try std.fmt.bufPrint(&buf, "row-{d:0>3}\r\n", .{i}));
+    }
+    const all = try m.plainTextAll(a, 1 << 20);
+    defer a.free(all.text);
+    try testing.expect(!all.truncated);
+    try testing.expect(std.mem.indexOf(u8, all.text, "0123456789012345678901234567890123456789ABCDEFGHIJ\n") != null);
+    const cut = try m.plainTextAll(a, 200);
+    defer a.free(cut.text);
+    try testing.expect(cut.truncated and cut.text.len <= 200);
+    try testing.expect(std.mem.indexOf(u8, cut.text, "row-099") != null);
+    try testing.expect(cut.text[0] == 'r'); // starts at a line start
 }
 
 test "mirror: not live until the snapshot has arrived" {

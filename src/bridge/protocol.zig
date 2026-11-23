@@ -10,6 +10,7 @@
 //!   paste {d}   mouse {payload}   `block.event`s
 //!   fit {cols, rows}              take ownership and resize (only when the user asks)
 //!   redraw / more_history         a fresh redraw, the latter with all the scrollback
+//!   text                          the screen and scrollback as plain text (reply: `text`)
 //!   observe {on}                  this browser's read-only switch
 //!   new_session {label?} / new_terminal {session} / rename_session {session, label}
 //!   rename_block {session, block, label} / close_block {session, block} / destroy_session {session}
@@ -43,6 +44,8 @@ pub const Msg = union(enum) {
     fit: struct { cols: u16, rows: u16 },
     redraw,
     more_history,
+    /// The screen and scrollback as plain text, for the page's Copy view.
+    text,
     observe: bool,
     new_session: ?[]const u8,
     new_terminal: []const u8,
@@ -73,6 +76,7 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (eql(u8, t, "close_view")) return .close_view;
     if (eql(u8, t, "redraw")) return .redraw;
     if (eql(u8, t, "more_history")) return .more_history;
+    if (eql(u8, t, "text")) return .text;
     if (eql(u8, t, "ping")) return .ping;
     if (eql(u8, t, "dbg")) return .dbg;
     if (eql(u8, t, "open")) return .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } };

@@ -16,6 +16,7 @@ pub const all = [_]Asset{
     .{ .path = "/lab", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/lab.html") },
     .{ .path = "/lab.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/lab.js") },
     .{ .path = "/app.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/app.js") },
+    .{ .path = "/keys.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/keys.js") },
     .{ .path = "/app.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/app.css") },
     .{ .path = "/vendor/xterm.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/xterm.js") },
     .{ .path = "/vendor/xterm.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/vendor/xterm.css") },
@@ -92,4 +93,40 @@ test "etag is stable and quoted; acceptsGzip" {
     try std.testing.expect(!acceptsGzip("br, deflate"));
     try std.testing.expect(!acceptsGzip("gzip;q=0"));
     try std.testing.expect(!acceptsGzip(""));
+}
+
+test "the page references only files that are embedded, and carries no inline code" {
+    const page = find("/").?.body;
+    var rest: []const u8 = page;
+    var refs: usize = 0;
+    // Every src="..." and href="..." on the page is a local path that exists.
+    for ([_][]const u8{ "src=\"", "href=\"" }) |attr| {
+        rest = page;
+        while (std.mem.indexOf(u8, rest, attr)) |i| {
+            rest = rest[i + attr.len ..];
+            const end = std.mem.indexOfScalar(u8, rest, '"').?;
+            const url = rest[0..end];
+            try std.testing.expect(url.len > 0 and (url[0] == '/' or url[0] == '#'));
+            if (url[0] == '/') try std.testing.expect(find(url) != null);
+            refs += 1;
+        }
+    }
+    try std.testing.expect(refs >= 5);
+    // A strict content security policy forbids inline scripts, so there must be none.
+    var scripts = std.mem.splitSequence(u8, page, "<script");
+    _ = scripts.next();
+    while (scripts.next()) |s| try std.testing.expect(std.mem.startsWith(u8, s, " src=\""));
+    try std.testing.expect(std.mem.indexOf(u8, page, " onclick=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "<style") == null);
+}
+
+test "the page script uses no browser pop-ups and no HTML injection" {
+    const js = find("/app.js").?.body;
+    try std.testing.expect(std.mem.indexOf(u8, js, "confirm(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "prompt(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "alert(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "innerHTML") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "outerHTML") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "insertAdjacentHTML") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "eval(") == null);
 }
