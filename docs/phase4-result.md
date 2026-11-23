@@ -2,8 +2,8 @@
 
 Status (2026-11-23): **exit condition met for linux-box and desktop-mac.** Each serves rweb after a reboot, and the
 deployment is recorded in `setup-repo` (task `work-rweb-deployment`, runbook `docs/runbooks/rweb.md`, action
-records of 2026-11-23). One change is in flight: linux-box is moving from loopback-plus-secret to a unix socket,
-which needs the owner's `sudo`; its reboot check is repeated after that move (see "Open").
+records of 2026-11-23). linux-box then moved from loopback-plus-secret to a unix socket (applied by the owner,
+verified through Serve); its reboot check is to be repeated on that setup (see "Open").
 
 Phase 3's own exit, a week of daily use on a phone and a laptop, is the owner's and has not been recorded.
 
@@ -23,7 +23,7 @@ program/terminal info in the header, and the Ovis-style layout work recorded in 
 ## How it is deployed
 
 - **linux-box (Linux):** a systemd user unit with lingering (starts at boot, before login), after `rex.service`,
-  restarting after 5 s if Tailscale or Rex is not ready. Moving to a unix socket (`$XDG_RUNTIME_DIR/rweb/bridge.sock`)
+  restarting after 5 s if Tailscale or Rex is not ready. Listens on a unix socket (`$XDG_RUNTIME_DIR/rweb/bridge.sock`)
   that only root, i.e. `tailscaled`, may connect to; same-user processes are refused at accept.
 - **desktop-mac (macOS):** a LaunchAgent that starts at login (FileVault is on, so a person unlocks the disk at
   boot and that unlock logs the user in). Loopback `127.0.0.1:7695` behind a secret first path segment, because
@@ -54,9 +54,9 @@ program/terminal info in the header, and the Ovis-style layout work recorded in 
 
 ## Open
 
-- **linux-box's move to the unix socket:** module changed, tested in a sandbox with stubbed `sudo`; the real
-  `sudo tailscale serve … unix:` has not been run. The owner's step: `git pull && bin/mls apply rweb &&
-  rweb-serve on` on linux-box. Then repeat the address checks and a reboot check, and record them.
+- **linux-box, reboot check on the unix-socket setup:** the move was applied by the owner and verified through
+  Serve (200 from desktop-mac, own address 403, same-user forgery refused at accept); what is left is one reboot to
+  confirm systemd recreates `/run/user/1000/rweb` (0700) at boot and the bridge comes up, to be recorded in setup-repo.
 - **Phase 3 exit:** a week of daily use (owner).
 - **Skipped by the owner:** a link between the two hosts' pages. **Paused:** an optional folder allow-list for
   downloads (downloads can read anything the terminal's user can read).

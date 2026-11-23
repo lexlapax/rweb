@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-23 (desktop-mac). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). One change is in flight: linux-box moves to a unix socket, waiting on the owner's `sudo` step. Read first; load linked contents only as needed.
+Last updated: 2026-11-23 (desktop-mac). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
@@ -16,7 +16,7 @@ Ghostty fetched). `spike/`'s Python probes remain Linux-only (`XDG_RUNTIME_DIR`,
 
 ## Current state
 
-- **2026-11-23, where things stand:** the bridge runs on both hosts behind Tailscale Serve (`https://<host>.example.ts.net:12443/`), deployed by the `rweb` module in setup-repo (runbook `docs/runbooks/rweb.md`), with file transfer on. The security review and hardening are done ([docs/security-hardening-2026-11-23.md](docs/security-hardening-2026-11-23.md)); the Phase 4 record is [docs/phase4-result.md](docs/phase4-result.md). **Next:** the owner runs `git pull && bin/mls apply rweb && rweb-serve on` on linux-box (unix socket move, needs `sudo`); then the assistant verifies and records it. Skipped by the owner: a link between the two hosts. Paused: a download folder allow-list.
+- **2026-11-23, where things stand:** the bridge runs on both hosts behind Tailscale Serve (`https://<host>.example.ts.net:12443/`), deployed by the `rweb` module in setup-repo (runbook `docs/runbooks/rweb.md`), with file transfer on. The security review and hardening are done ([docs/security-hardening-2026-11-23.md](docs/security-hardening-2026-11-23.md)); the Phase 4 record is [docs/phase4-result.md](docs/phase4-result.md). **Next:** at linux-box's next reboot, check `rweb-serve status` and the address, then record it in setup-repo. Skipped by the owner: a link between the two hosts. Paused: a download folder allow-list.
 
 - **Phase 0 done; the gate passed (2026-11-21).** A libghostty-vt mirror in a Zig spike shows a
   live Rex terminal in xterm.js correctly: prompt, colours, wide and combining characters, vim

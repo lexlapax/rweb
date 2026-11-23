@@ -6,8 +6,8 @@ plan that fixed them, and records what was verified and how.
 
 Scope and limits: source review plus tests, and one live test on desktop-mac. It is not a penetration test, a
 dependency audit of Zig, Ghostty, wterm, xterm.js, Rex or Tailscale, or a test of every browser. Phase 3's
-week of daily use has not been recorded, so **deployment still needs the owner's approval**. Nothing was
-deployed; the bridge is not running on any machine.
+week of daily use has not been recorded. This review changed nothing on a host; the owner deployed afterwards
+(§6 and [phase4-result.md](phase4-result.md)).
 
 ## 1. Findings, merged
 
@@ -128,10 +128,9 @@ each fix permanent with a test that fails without it.
   the owner's files; it is not a sandbox. On macOS, a file the owner can read is readable by any process the
   owner runs.
 - **Serve under load and its own timeouts were not exercised.** Serve's behaviour with these checks was
-  measured on both machines (§6). One piece is still open: **Serve pointed at a unix socket on linux-box needs
-  root** (`tailscale serve … unix:PATH` answers "must be root, or be an operator and able to run `sudo
-  tailscale`"), so I could not run that exact chain, and `sudo` is the owner's to run. Everything either side
-  of it was tested; see §6 for the two commands that finish it.
+  measured on both machines (§6). Serve pointed at a unix socket on linux-box needs root (`tailscale serve …
+  unix:PATH` answers "must be root, or be an operator and able to run `sudo tailscale`"), so the owner ran
+  that step and it was verified (§6).
 - **CSP keeps `style-src 'unsafe-inline'` and `script-src … 'wasm-unsafe-eval'`.** xterm.js injects `<style>`
   elements, and wterm needs WebAssembly compilation. Scripts and wasm are served from the bridge and pinned
   (F15); there is no `unsafe-eval` and no external origin (`default-src 'none'`, `connect-src 'self'`). Script
@@ -162,11 +161,13 @@ file under `/tmp` or `/run/user/1000`, Serve back to the original three entries,
   the bridge's socket with the owner's `Tailscale-User-Login` and a forged `X-Forwarded-For`: the connection was
   closed at accept ("refused: peer not allowed"), curl got a reset, no request was read. Only uid 0
   (tailscaled) is allowed by default. The socket was 0600 in a 0700 directory.
-- **Serve to a unix socket: not run.** It needs root. To finish it, with the bridge running as
-  `rweb --listen-unix /run/user/1000/rweb-sv-test/bridge.sock --owner-from-tailscale`, the owner runs on
-  linux-box `sudo tailscale serve --bg --https=12445 unix:/run/user/1000/rweb-sv-test/bridge.sock`, and
-  afterwards `sudo tailscale serve --https=12445 off`. Expected: the owner's other nodes get 200, linux-box's own
-  address gets 403 "request from this node's own address".
+- **Serve to a unix socket: run later the same day, by the owner (it needs root), and it works.** With the
+  bridge on `$XDG_RUNTIME_DIR/rweb/bridge.sock` (a 0700 directory, a 0600 socket), `rweb-serve on` ran
+  `sudo tailscale serve --bg --https=12443 unix:/run/user/1000/rweb/bridge.sock`. Through Serve from
+  desktop-mac: `/`, `/app.js`, `/api/tree` 200, a wrong `Host` 403, 70 headers 431; from linux-box itself 403
+  ("request from this node's own address"). A process running as the same user connecting to the socket with
+  forged owner headers was refused at accept ("peer not allowed"), so only `tailscaled` (root) gets through.
+  linux-box now runs this way; a reboot check on the socket setup is still to do.
 - **Serve to loopback TCP with the secret prefix, on linux-box (a deployment option that needs no root).**
   Same mechanism as desktop-mac, without `--allow-own-address`:
   from desktop-mac (another node of the owner) through Serve: page, script and `/api/tree` all 200; transfer
@@ -180,7 +181,6 @@ file under `/tmp` or `/run/user/1000`, Serve back to the original three entries,
   headers"** (F2 holds on a real proxy), and a wrong `Host` was refused with **"host not allowed"** (F8 holds).
   A client-supplied `X-Forwarded-For` does not make the request pass or fail by itself; the bridge refuses on
   any listed address that is the node's own, and requires the header.
-- **Choice for the `setup-repo` module on linux-box:** either the unix socket (peer uid 0, needs the root-run
-  Serve command above, which a root-run setup-repo can do) or loopback TCP with the secret prefix (verified end
-  to end above, no special rights). Both are enforced boundaries; the unix socket has the stronger one (a kernel
-  peer check rather than a secret), the TCP one has the same mechanism on both machines.
+- **Choice made for linux-box:** the unix socket (the stronger boundary: a kernel peer check rather than a
+  secret). desktop-mac keeps loopback TCP with the secret prefix because Tailscale.app cannot forward to a socket.
+  Both were verified end to end.
