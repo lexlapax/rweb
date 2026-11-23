@@ -1,6 +1,6 @@
 # Phase 2 result: the bridge server
 
-Status: **built and checked on desktop-mac, a tablet and linux-box; typing from the owner's phone is blocked by the phone's own network path (see Findings 5); owner's sign-off pending**
+Status: **exit condition met** (2026-11-22): built and checked on desktop-mac, linux-box, a tablet and a phone; the owner's sign-off is the last step. Typing from the phone needed a phone-side power setting (Findings 5).
 (see the end). Plan: [PLAN.md](PLAN.md#phase-2-bridge-server). Where this and the code differ,
 the code wins.
 
@@ -92,9 +92,13 @@ asks `tailscale ip`, and refuses to start if that fails.
      bridge and below Serve: the phone's Tailscale or radio is asleep and traffic waits for it.
    - Desktop Chrome and a tablet (Samsung Keyboard and Gboard) work through the same address, and
      typing with the phone connection healthy worked (46 heartbeats in 44 s, words in order).
-   Action for the owner: set the phone's Tailscale app and Chrome to unrestricted battery use,
-   turn off Wi-Fi power saving, and re-run `/lab` on the phone (3 minutes); a healthy phone shows
-   every answer in under 100 ms. What the bridge does about it: the page expects an answer every
+   Fixed on the owner's side: after the owner turned off the Tailscale app's power saving on the
+   phone, the raw Tailscale ping had no timeouts (59 of 59, median 76 ms), the text WebSocket
+   got 38 of 38 and 40 of 40 answers (nothing over 2 s), and typing from the phone into the real
+   page worked: `echo phone test1` and `echo phone test2` arrived intact and ran (confirmed on
+   the shell's own screen). The lab's binary and plain-HTTP variants did not report from the
+   phone (the HTTP requests never reached the bridge); that looks like a quirk of the lab page,
+   not of the real page, and was not chased further. What the bridge does about it: the page expects an answer every
    3 s, abandons a connection quiet for 8 s and opens a new one, and refuses typing while the
    link is not healthy, so keystrokes are not lost silently; the bridge pings browsers every 3 s,
    drops one silent for 20 s, and cuts off a page sending more than 200 messages a second.
@@ -110,8 +114,12 @@ asks `tailscale ip`, and refuses to start if that fails.
 
 - linux-box: unix socket under tailscaled (peer uid 0) behind real Serve. The tests cover the
   checks; the deployment is Phase 4.
-- Typing from the owner's phone is not verified, because of Findings 5. The exit condition says
-  "including typing from a real phone": it is met on a tablet and not yet on the phone.
+- The phone depends on its power settings: with the Tailscale app power-saving on, its tailnet
+  path stalls for tens of seconds. The page now copes (reconnect within 8 s, no typing into a
+  dead link) but cannot make a sleeping phone fast.
+- On desktop-mac a leftover, harmless entry for the old temporary Serve port 11443 remains in
+  Tailscale (it answers 502); it goes away when the Tailscale backend restarts. After a
+  `tailscale down`, bring desktop-mac back with `tailscale up --accept-routes` (plain `up` refuses).
 - A fuzz campaign beyond the 90-second smoke runs; the browser protocol and access decision are
   fuzz targets (`zig build fuzz --fuzz`).
 - Own pings from the bridge to Rex; the bridge pings browsers every ~20 s.

@@ -110,12 +110,12 @@ Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-after-the-design-research
       `mkdir -p .zig-cache/tmp`); 90 s smoke run clean. Not a campaign.
    9. DONE: live tests pass on desktop-mac (preview.21, rev 18) and linux-box (preview.22, rev 19),
       59/59 each; see docs/phase1-result.md.
-2. **Next: Phase 2 (bridge server)**, then 3 and 4. `Control` now asks for revisions 18 to 19 (desktop-mac gets 18, linux-box 19) and surfaces
+2. **Next: Phase 3 (frontend)**, then 4 (security review comes first). `Control` now asks for revisions 18 to 19 (desktop-mac gets 18, linux-box 19) and surfaces
    `event_dropped` as `Event.dropped`: the bridge must re-read state on it (Phase 2). Large
    requests should be sent fragmented at 19; ours are small. `focus_history.reverse` unused. The real restart test is done on both machines.
    Phases 2–4 follow [docs/PLAN.md](docs/PLAN.md#phases).
 
-## Phase 2 (bridge, `src/bridge/`): built; owner's sign-off pending
+## Phase 2 (bridge, `src/bridge/`): exit met; owner's sign-off pending
 
 Owner's answers (2026-11-22): history on open = last ~1,000 lines; a wide terminal shrinks to fit
 and Rex's size changes only on request; a read-only ("view only") switch on the page, off by
@@ -124,16 +124,18 @@ default, plus a bridge-wide locked `--observe-only`. Built: `access.zig`, `proto
 (`zig build run -- --listen-tcp 0 --random-token`). Evidence, findings, limits:
 [docs/phase2-result.md](docs/phase2-result.md). Checked on desktop-mac in Chrome, through Serve
 port 11443 (each refusal shown), and on the owner's Android tablet (Samsung Keyboard and Gboard
-both work); linux-box ran the full suite including live tests. Open: typing from the owner's phone: the phone's tailnet connection stalls (raw `tailscale ping`
-times out for ~18 s when idle), see docs/phase2-result.md Findings 5; owner to change the phone's
-battery settings and re-run `/lab`. Test infrastructure still up on desktop-mac for that: Serve port
-12443 (persistent, `tailscale serve --https=12443 off` to remove), a stuck leftover 11443
-listener, session `rweb-test-phone` (destroy when done), bridge on 7695 (`rweb --listen-tcp 7695
---owner-from-tailscale --allow-own-address`). Phone layout was reworked (slide-over menu). Tip: run tests with output to a file;
-piping `zig build test` into `head` can hang. `mkdir -p .zig-cache/tmp` before `--fuzz`.
+both work); linux-box ran the full suite including live tests. Phone typing works since the owner turned off the phone Tailscale app's power saving (it had
+stalled the tailnet path; evidence in Findings 5). Test infrastructure is removed (bridge stopped,
+Serve 12443 off, `rweb-test-phone` destroyed); one harmless orphaned Serve entry for 11443 remains
+on desktop-mac until Tailscale's backend restarts. `tailscale up` there needs `--accept-routes`.
+Phone layout reworked (slide-over menu). Tip: run tests with output to a file; piping
+`zig build test` into `head` can hang. `mkdir -p .zig-cache/tmp` before `--fuzz`.
 
 ## Checks run for this update
 
+- 2026-11-22, final Phase 2 runs: desktop-mac `zig build test` with `REX_SOCKET`: 102 pass + 1 skip;
+  linux-box (scratch copy, removed) 140 pass + 1 skip; `rex ls` shows only `calm-isle` and
+  `drifting-tundra`. Phone typing confirmed by the shell's own screen.
 - 2026-11-22, linux-box: scratch copy, `zig build test` with `REX_SOCKET`: 97 pass + 1 skip incl.
   Linux peer-uid and a live bridge test on Rex rev 19; copy removed; `rex ls` only
   `drifting-tundra`.
