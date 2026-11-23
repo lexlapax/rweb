@@ -27,7 +27,7 @@ term.parser.registerDcsHandler({intermediates:'$', final:'q'}, () => true);
 for (const n of [4, 10, 11, 12]) term.parser.registerOscHandler(n, data => data.includes('?'));
 
 function send(obj) { if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(obj)); }
-function canType() { return state.current && !state.observe && state.rexUp; }
+function canType() { return state.current && !state.observe && state.rexUp && link.healthy; }
 
 // Composed text, soft-keyboard text, pastes and mouse reports come from xterm.js.
 term.onData(d => { if (canType()) send({t: 'in', d: state.ctrl ? ctrlOf(d) : d}); });
@@ -62,13 +62,36 @@ term.attachCustomKeyEventHandler(e => {
 });
 
 // Keyboard diagnostics for testing a phone keyboard: open the page with ?dbg=1.
-if (new URLSearchParams(location.search).get('dbg') === '1' && term.textarea) {
-  const dbg = o => send({t: 'dbg', ms: Math.round(performance.now()), ...o});
+const dbgOn = new URLSearchParams(location.search).get('dbg') === '1';
+if (dbgOn && term.textarea) {
+  const dbg = o => send({ms: Math.round(performance.now()), ...o, t: 'dbg'});
   const ta = term.textarea;
   for (const ev of ['keydown', 'keyup']) ta.addEventListener(ev, e => dbg({ev, key: e.key, code: e.code, kc: e.keyCode, comp: e.isComposing}), true);
   for (const ev of ['beforeinput', 'input']) ta.addEventListener(ev, e => dbg({ev, it: e.inputType, data: e.data, comp: e.isComposing, val: ta.value}), true);
   for (const ev of ['compositionstart', 'compositionupdate', 'compositionend']) ta.addEventListener(ev, e => dbg({ev, data: e.data}), true);
-  term.onData(d => dbg({ev: 'onData', d}));
+  // How long the page load took, phase by phase, as this browser saw it.
+  const timing = () => {
+    const n = performance.getEntriesByType('navigation')[0];
+    if (!n) return;
+    const r = x => Math.round(x);
+    dbg({ev: 'timing', dns: r(n.domainLookupEnd - n.domainLookupStart), connect: r(n.connectEnd - n.connectStart),
+      tls: n.secureConnectionStart ? r(n.connectEnd - n.secureConnectionStart) : 0, wait: r(n.responseStart - n.requestStart),
+      download: r(n.responseEnd - n.responseStart), dom: r(n.domContentLoadedEventEnd), load: r(n.loadEventEnd), proto: n.nextHopProtocol,
+      resources: performance.getEntriesByType('resource').map(e => [e.name.replace(location.origin, '').split('?')[0], r(e.duration), e.transferSize, e.nextHopProtocol])});
+  };
+  if (document.readyState === 'complete') setTimeout(timing, 500); else addEventListener('load', () => setTimeout(timing, 500));
+  term.onData(d => {
+    dbg({ev: 'onData', d});
+    // What the page shows a moment later: did the shell's echo arrive, and where is it drawn?
+    setTimeout(() => {
+      const b = term.buffer.active, line = b.getLine(b.baseY + b.cursorY);
+      const st = $('stage'), sc = term.element.querySelector('.xterm-screen');
+      dbg({ev: 'shows', line: line ? line.translateToString(true) : null, cx: b.cursorX, cy: b.cursorY,
+        stage: [st.clientWidth, st.clientHeight, st.scrollLeft, st.scrollTop], screen: [sc.offsetWidth, sc.offsetHeight],
+        scale: $('term').style.transform, vv: visualViewport ? [Math.round(visualViewport.width), Math.round(visualViewport.height)] : null});
+    }, 400);
+  });
+  window.addEventListener('rweb-bytes', e => dbg({ev: 'bytes', n: e.detail.n, head: e.detail.head}));
 }
 
 // ---- layout: draw at Rex's size and shrink to fit; never change Rex's size unasked ----
@@ -100,26 +123,66 @@ function notice(text) {
   clearTimeout(notice.t); notice.t = setTimeout(() => { n.hidden = true; }, 5000);
 }
 
+// A phone's connection through Tailscale Serve can go silently dead (nothing is delivered either
+// way until the browser notices, often half a minute later). So: ask for a reply every 3 s, and
+// if nothing has come back for 8 s, give the socket up and open a new one at once. Until
+// something arrives typing is refused, so no keystroke is sent into a dead connection.
+const link = {lastRx: performance.now(), healthy: false};
 function connect() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws${location.search}`);
   state.ws = ws; ws.binaryType = 'arraybuffer';
+  const mine = () => state.ws === ws;       // a socket we abandoned must not act
+  link.lastRx = performance.now(); link.healthy = false;
   ws.onopen = () => {
-    state.retry = 500; setStatus('connected');
+    if (!mine()) return;
+    state.retry = 500; link.lastRx = performance.now(); setStatus('connected');
     if (state.current) send({t: 'open', session: state.current.session, block: state.current.block});
   };
   ws.onclose = () => {
-    setStatus('disconnected, retrying', true);
-    setTimeout(connect, state.retry); state.retry = Math.min(state.retry * 2, 8000);
+    if (!mine()) return;
+    link.healthy = false; setStatus('disconnected, retrying', true);
+    setTimeout(() => { if (mine()) connect(); }, state.retry); state.retry = Math.min(state.retry * 2, 4000);
   };
   ws.onmessage = ev => {
-    if (typeof ev.data !== 'string') { term.write(new Uint8Array(ev.data)); return; }
+    if (!mine()) return;
+    link.lastRx = performance.now();
+    if (!link.healthy) { link.healthy = true; setStatus('connected'); }
+    if (typeof ev.data !== 'string') {
+      const u = new Uint8Array(ev.data);
+      if (dbgOn) window.dispatchEvent(new CustomEvent('rweb-bytes', {detail: {n: u.length, head: JSON.stringify(new TextDecoder().decode(u.subarray(0, 60)))}}));
+      term.write(u); return;
+    }
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     onMessage(m);
   };
 }
-setInterval(() => send({t: 'ping'}), 20000);
+setInterval(() => send({t: 'ping'}), 3000);
+setInterval(() => {
+  const ws = state.ws;
+  if (!ws || ws.readyState !== 1) return;
+  const quiet = performance.now() - link.lastRx;
+  if (quiet > 5000 && link.healthy) { link.healthy = false; setStatus('connection stalled', true); }
+  if (quiet > 8000) {
+    // Dead for 8 s: drop it without waiting for a close handshake that may never come.
+    state.ws = null; try { ws.close(); } catch {}
+    setStatus('reconnecting', true); state.retry = 500; connect();
+  }
+}, 1000);
+
+// The type goes last so no diagnostic field can ever override it.
+// With ?dbg=1 the page sends a heartbeat every second: the bridge log then shows how long the
+// phone's messages take to arrive, with or without the keyboard in use.
+setInterval(() => { if (dbgOn) dbgSend({ev: 'hb', vis: document.visibilityState}); }, 1000);
+function dbgSend(o) { if (dbgOn) send({ms: Math.round(performance.now()), ...o, t: 'dbg'}); }
+addEventListener('error', e => dbgSend({ev: 'jserror', msg: String(e.message), line: e.lineno, col: e.colno}));
+addEventListener('unhandledrejection', e => dbgSend({ev: 'jsreject', msg: String(e.reason)}));
 
 function onMessage(m) {
+  dbgSend({ev: 'msg', mt: m.t});
+  try { handleMessage(m); } catch (e) { dbgSend({ev: 'handler-threw', mt: m.t, msg: String(e && e.stack || e).slice(0, 300)}); }
+}
+
+function handleMessage(m) {
   switch (m.t) {
     case 'mode': state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateButtons(); break;
     case 'rex': state.rexUp = m.up; setStatus(m.up ? 'connected' : 'Rex is not reachable', !m.up); break;

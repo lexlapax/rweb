@@ -1,6 +1,6 @@
 # Phase 2 result: the bridge server
 
-Status: **built and checked on desktop-mac; the linux-box run and the owner's sign-off are pending**
+Status: **built and checked on desktop-mac, a tablet and linux-box; typing from the owner's phone is blocked by the phone's own network path (see Findings 5); owner's sign-off pending**
 (see the end). Plan: [PLAN.md](PLAN.md#phase-2-bridge-server). Where this and the code differ,
 the code wins.
 
@@ -73,10 +73,45 @@ asks `tailscale ip`, and refuses to start if that fails.
    header and no token.
 4. The CSP (`frame-ancestors 'none'`) refuses framing, which also refused my own test iframes.
 
+5. **The phone's connection to the Mac stalls, whatever the transport** (2026-11-22, Samsung
+   phone on Android, over the tailnet, direct LAN path). Symptoms: text typed vanished or arrived
+   in a burst 20 to 60 s later; the page reloaded slowly. Measurements, in the order they were taken:
+   - The bridge handled every request it received in 0 to 3 ms (request log), had no unread data
+     in its sockets, no deadlocked task (thread sample) and answered other clients instantly.
+   - A once-a-second heartbeat from the page showed gaps of 9 to 60 s with nothing arriving, then
+     a burst; connections the bridge saw as silent for 21 s were dropped.
+   - A transport lab (`/lab`, four variants of 40 s each: text WebSocket, binary WebSocket, plain
+     HTTP requests, text WebSocket again) ran on desktop Chrome through the same Serve address:
+     every answer in 2 to 19 ms. On the phone: the text WebSocket got 1 answer of 40 sent, the
+     binary variant's own result report never arrived, 15 of 20 plain HTTP requests reached the
+     bridge in a single instant, and the last WebSocket could not open. So WebSocket versus HTTP is
+     not the difference, and herdr-webui's choices (binary input frames, a socket per terminal, no
+     application pings) would not help.
+   - `tailscale ping` from the Mac to the phone, right after the lab: six pings in a row timed out
+     (about 18 s), then replies at 5 to 6 ms with bursts of 100 to 125 ms. That is below the
+     bridge and below Serve: the phone's Tailscale or radio is asleep and traffic waits for it.
+   - Desktop Chrome and a tablet (Samsung Keyboard and Gboard) work through the same address, and
+     typing with the phone connection healthy worked (46 heartbeats in 44 s, words in order).
+   Action for the owner: set the phone's Tailscale app and Chrome to unrestricted battery use,
+   turn off Wi-Fi power saving, and re-run `/lab` on the phone (3 minutes); a healthy phone shows
+   every answer in under 100 ms. What the bridge does about it: the page expects an answer every
+   3 s, abandons a connection quiet for 8 s and opens a new one, and refuses typing while the
+   link is not healthy, so keystrokes are not lost silently; the bridge pings browsers every 3 s,
+   drops one silent for 20 s, and cuts off a page sending more than 200 messages a second.
+6. **Phone keyboards compose words.** Samsung Keyboard on the phone and Gboard send a word as a
+   composition and commit it, with the space, as one message (`echo `), so a word shows in the
+   shell only once it is committed. The tablet's keyboards send characters one at a time. No loss
+   or misordering was seen with a healthy connection.
+7. A diagnostic page-and-log mode exists for keyboard and network trouble: open the page with
+   `?dbg=1` and start the bridge with `--debug-input` (it logs typed text; never for deployment).
+   The bridge logs every HTTP request (method, path without query, time).
+
 ## Not done in Phase 2
 
 - linux-box: unix socket under tailscaled (peer uid 0) behind real Serve. The tests cover the
   checks; the deployment is Phase 4.
+- Typing from the owner's phone is not verified, because of Findings 5. The exit condition says
+  "including typing from a real phone": it is met on a tablet and not yet on the phone.
 - A fuzz campaign beyond the 90-second smoke runs; the browser protocol and access decision are
   fuzz targets (`zig build fuzz --fuzz`).
 - Own pings from the bridge to Rex; the bridge pings browsers every ~20 s.

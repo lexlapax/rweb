@@ -15,6 +15,7 @@ pub const usage =
     \\
     \\Who may connect:
     \\  --owner LOGIN             required Tailscale-User-Login (Tailscale Serve sets it)
+    \\  --owner-from-tailscale    take the owner from this node's own Tailscale login (`tailscale status`)
     \\  --token TOKEN             shared secret in the `token` query or `rweb-token` header
     \\  --random-token            make a token and print the URL (loopback tests)
     \\  --own-address IP          this node's Tailscale address (repeatable); requests from
@@ -37,6 +38,7 @@ pub const Parsed = struct {
     rex_socket: ?[]const u8 = null,
     listen: Listen,
     owner: ?[]const u8 = null,
+    owner_from_tailscale: bool = false,
     token: ?[]const u8 = null,
     random_token: bool = false,
     own_addresses: []const []const u8 = &.{},
@@ -81,6 +83,8 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
             listen = .{ .tcp = std.fmt.parseInt(u16, try value(args, &i), 10) catch return error.BadNumber };
         } else if (eql(u8, a, "--owner")) {
             p.owner = try value(args, &i);
+        } else if (eql(u8, a, "--owner-from-tailscale")) {
+            p.owner_from_tailscale = true;
         } else if (eql(u8, a, "--token")) {
             p.token = try value(args, &i);
         } else if (eql(u8, a, "--random-token")) {
@@ -109,16 +113,17 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
         .unix => {
             // Tailscaled dials as root; anything else must be asked for.
             p.peer_uids = if (uids.items.len > 0) uids.items else &[_]PeerUid{.{ .uid = 0 }};
-            if (p.owner == null and p.token == null and !p.random_token) return error.NoAccessRule;
+            if (p.owner == null and !p.owner_from_tailscale and p.token == null and !p.random_token) return error.NoAccessRule;
         },
         .tcp => {
             if (uids.items.len > 0) return error.Usage; // no peer check on TCP
-            if (p.owner == null and p.token == null) p.random_token = true;
+            if (p.owner == null and !p.owner_from_tailscale and p.token == null) p.random_token = true;
         },
     }
+    if (p.owner != null and p.owner_from_tailscale) return error.Usage;
     if (p.token != null) p.random_token = false;
     // With an owner rule the own-address rule must be enforceable: fail closed.
-    if (p.owner != null and !p.allow_own_address and p.own_addresses.len == 0) p.detect_own_addresses = true;
+    if ((p.owner != null or p.owner_from_tailscale) and !p.allow_own_address and p.own_addresses.len == 0) p.detect_own_addresses = true;
     return p;
 }
 
@@ -180,4 +185,10 @@ test "numbers and options are checked" {
     try testing.expectError(error.Usage, parseT(&.{"--help"}));
     const p = try parseT(&.{ "--listen-tcp", "0", "--observe-only", "--history-lines", "50" });
     try testing.expect(p.observe_only and p.history_lines == 50);
+}
+
+test "owner from Tailscale counts as an owner rule" {
+    const p = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner-from-tailscale" });
+    try testing.expect(p.detect_own_addresses);
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "a@b", "--owner-from-tailscale" }));
 }

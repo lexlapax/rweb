@@ -46,6 +46,15 @@ pub fn main(init: std.process.Init) !void {
         try own.appendSlice(arena, found);
     }
 
+    // The owner: given, or this node's own Tailscale login.
+    var owner = parsed.owner;
+    if (parsed.owner_from_tailscale) {
+        owner = tailscaleOwner(arena, io) catch |e| {
+            std.debug.print("rweb: cannot read this node's Tailscale login ({t}); pass --owner\n", .{e});
+            std.process.exit(2);
+        };
+    }
+
     // A token, if asked for.
     var token = parsed.token;
     if (parsed.random_token) {
@@ -76,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
         .listen = listen,
         .debug_input = parsed.debug_input,
         .access = .{
-            .owner = parsed.owner,
+            .owner = owner,
             .token = token,
             .own_addresses = own.items,
             .allow_own_address = parsed.allow_own_address,
@@ -119,6 +128,22 @@ fn findRexSocket(arena: std.mem.Allocator, io: Io, env: *std.process.Environ.Map
 fn exists(io: Io, path: []const u8) bool {
     _ = Io.Dir.cwd().statFile(io, path, .{}) catch return false;
     return true;
+}
+
+/// The login of the user this node belongs to, from `tailscale status --json`.
+fn tailscaleOwner(arena: std.mem.Allocator, io: Io) ![]const u8 {
+    const res = try std.process.run(arena, io, .{ .argv = &.{ "tailscale", "status", "--json" } });
+    if (res.term != .exited or res.term.exited != 0) return error.TailscaleFailed;
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, res.stdout, .{});
+    const self = (v.object.get("Self") orelse return error.NoSelf).object;
+    const uid = self.get("UserID") orelse return error.NoSelf;
+    var key_buf: [24]u8 = undefined;
+    const key = try std.fmt.bufPrint(&key_buf, "{d}", .{uid.integer});
+    const users = (v.object.get("User") orelse return error.NoSelf).object;
+    const user = (users.get(key) orelse return error.NoSelf).object;
+    const login = user.get("LoginName") orelse return error.NoSelf;
+    if (login != .string or login.string.len == 0) return error.NoSelf;
+    return login.string;
 }
 
 /// `tailscale ip` prints this node's addresses, one per line.

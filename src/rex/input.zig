@@ -213,7 +213,10 @@ pub const Input = struct {
                 q.mu.unlock(q.io);
                 defer item.deinit(q.gpa);
 
+                const started = std.Io.Clock.awake.now(q.io).toMilliseconds();
                 const ok = q.send(&item);
+                const took = std.Io.Clock.awake.now(q.io).toMilliseconds() - started;
+                if (took > 500) log.warn("a Rex input call took {d} ms", .{took});
                 q.mu.lockUncancelable(q.io);
                 switch (item) {
                     .text => q.stats.writes += 1,

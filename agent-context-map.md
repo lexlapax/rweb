@@ -124,8 +124,12 @@ default, plus a bridge-wide locked `--observe-only`. Built: `access.zig`, `proto
 (`zig build run -- --listen-tcp 0 --random-token`). Evidence, findings, limits:
 [docs/phase2-result.md](docs/phase2-result.md). Checked on desktop-mac in Chrome, through Serve
 port 11443 (each refusal shown), and on the owner's Android tablet (Samsung Keyboard and Gboard
-both work); linux-box ran the full suite including live tests. Open: owner confirms the phone
-layout; phone-size layout was reworked (slide-over menu). Tip: run tests with output to a file;
+both work); linux-box ran the full suite including live tests. Open: typing from the owner's phone: the phone's tailnet connection stalls (raw `tailscale ping`
+times out for ~18 s when idle), see docs/phase2-result.md Findings 5; owner to change the phone's
+battery settings and re-run `/lab`. Test infrastructure still up on desktop-mac for that: Serve port
+12443 (persistent, `tailscale serve --https=12443 off` to remove), a stuck leftover 11443
+listener, session `rweb-test-phone` (destroy when done), bridge on 7695 (`rweb --listen-tcp 7695
+--owner-from-tailscale --allow-own-address`). Phone layout was reworked (slide-over menu). Tip: run tests with output to a file;
 piping `zig build test` into `head` can hang. `mkdir -p .zig-cache/tmp` before `--fuzz`.
 
 ## Checks run for this update
