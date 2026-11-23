@@ -15,6 +15,8 @@ pub const all = [_]Asset{
     .{ .path = "/", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/index.html") },
     .{ .path = "/lab", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/lab.html") },
     .{ .path = "/lab.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/lab.js") },
+    .{ .path = "/labsel", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/labsel.html") },
+    .{ .path = "/labsel.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/labsel.js") },
     .{ .path = "/app.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/app.js") },
     .{ .path = "/keys.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/keys.js") },
     .{ .path = "/app.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/app.css") },

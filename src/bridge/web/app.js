@@ -421,7 +421,7 @@ async function confirmAction({title, message, ok}) {
 }
 
 // ---- copy and paste ----
-function requestCopy() { send({t: 'text'}); }
+function requestCopy() { try { term.blur(); } catch {} send({t: 'text'}); }
 let copyFull = '', copyLines = [], copySel = null, copyNative = false;
 function copyToClipboard(text) {
   // The clipboard API needs a secure page and a user action; the old way is the fallback.
@@ -484,7 +484,11 @@ function openCopy(text, truncated) {
   share.onclick = () => navigator.share({text: copySel ? K.selectedText(copyLines, copySel) : copyFull}).catch(() => {});
   $('copy-close').onclick = () => dlg.close();
   renderCopySelection();
+  // The terminal's hidden input box must not keep the focus (and the soft keyboard connection): on
+  // Android that stops Chrome from offering selection handles on the text below. Give the text the focus.
+  try { term.blur(); if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); } catch {}
   if (!dlg.open) dlg.showModal();
+  box.focus({preventScroll: true});
   box.scrollTop = box.scrollHeight;
 }
 async function doPaste() {

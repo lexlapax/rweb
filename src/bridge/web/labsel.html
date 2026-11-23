@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>rweb selection lab</title>
+<style>
+body{font:15px/1.4 system-ui,sans-serif;background:#111418;color:#d7dae0;margin:10px}
+h1{font-size:17px;margin:4px 0}
+.t{border:1px solid #3a414d;border-radius:8px;padding:8px;margin:8px 0}
+.t b{display:block;color:#8b93a1;font-size:12px;margin-bottom:4px}
+button{font:inherit;padding:10px 14px;background:#1c2128;color:#d7dae0;border:1px solid #2a2f38;border-radius:7px}
+#b3{touch-action:pan-x pan-y}
+#b4{cursor:pointer}
+#b5{white-space:pre;overflow:auto;font:13px/1.35 ui-monospace,Menlo,monospace;background:#111418}
+#b6{overscroll-behavior:none}
+dialog{background:#171b21;color:#d7dae0;border:1px solid #2a2f38;border-radius:12px;padding:12px;width:min(440px,92vw)}
+#fs{width:100vw;height:100%;max-width:none;max-height:none;margin:0;border-radius:0;padding:8px;flex-direction:column;border:0}
+#fs[open]{display:flex}
+#fs .rows{flex:1;overflow:auto;background:#111418;border:1px solid #2a2f38;border-radius:7px;font:13px/1.35 ui-monospace,Menlo,monospace;touch-action:pan-x pan-y;-webkit-user-select:text;user-select:text}
+#fs .ln{white-space:pre;padding:1px 8px;cursor:pointer}
+</style></head><body>
+<h1>Selection lab</h1>
+<p>Long-press a word in each box. Do selection <b style="display:inline;color:#e5a50a">handles</b> (the two small drops) appear? Note the numbers where they do <i>not</i>, and tell Claude.</p>
+<div class="t"><b>1. plain text, no styling</b><div id="b1">The quick brown fox jumps over the lazy dog. Long press this sentence.</div></div>
+<div class="t"><b>2. with user-select: text set</b><div id="b2" style="-webkit-user-select:text;user-select:text">The quick brown fox jumps over the lazy dog. Long press this sentence.</div></div>
+<div class="t"><b>3. with touch-action: pan-x pan-y</b><div id="b3">The quick brown fox jumps over the lazy dog. Long press this sentence.</div></div>
+<div class="t"><b>4. with a click handler and a pointer cursor (like the tap-select rows)</b><div id="b4">The quick brown fox jumps over the lazy dog. Long press this sentence.</div></div>
+<div class="t"><b>5. monospace, white-space: pre, scrolls (like the Copy text)</b><div id="b5">$ echo the quick brown fox jumps over the lazy dog   long press here</div></div>
+<div class="t"><b>6. overscroll-behavior: none (the page has this on html and body)</b><div id="b6">The quick brown fox jumps over the lazy dog. Long press this sentence.</div></div>
+<div class="t"><b>7. inside a small dialog</b><button id="o7">Open dialog 7</button></div>
+<div class="t"><b>8. a copy of the Copy screen (full-screen dialog, rows with click handler)</b><button id="o8">Open dialog 8</button></div>
+<dialog id="d7"><p id="p7">The quick brown fox jumps over the lazy dog. Long press this sentence.</p><button id="c7">Close</button></dialog>
+<dialog id="fs"><div><button id="c8">Close</button> long-press a word in a row</div><div class="rows" id="rows"></div></dialog>
+<script src="/labsel.js"></script>
+</body></html>

@@ -90,7 +90,14 @@ Behaviour:
   locked (no keyboard, `inputmode=none`; paste, cut, drop and typing are blocked, and any change
   that gets through is undone), because Chrome on Android shows selection handles on editable
   text more reliably than on plain text. Checked in Chrome that the lock holds against scripted
-  inserts and deletes; whether handles then appear on the owner's phone is not yet known.
+  inserts and deletes. On the owner's phone **Use handles worked** (handles appeared), and Paste
+  worked. A selection lab page (`/labsel`) then showed handles on all eight differently built
+  boxes, including a copy of the Copy screen's structure: the page's styles, click handlers and
+  dialog are not what stopped them. The remaining difference is that in the real page the
+  terminal's hidden input box still had the focus (and the soft keyboard connection) when the
+  Copy screen opened, which is also what "Use handles" changes. The Copy screen now blurs the
+  terminal and focuses its own text. Whether a plain long press now shows handles is to be
+  confirmed on the phone.
 - Paste was not tried yet.
 
 ## Not verified, and limits
