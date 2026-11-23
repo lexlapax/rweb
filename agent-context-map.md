@@ -135,12 +135,10 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 
 - 2026-11-22, wterm trial: bundled and vendored wterm 0.6.0 + libghostty core (details and hashes in
   docs/phase3-result.md); Chrome checks of `?term=wterm` (draw, type, colour, wide/combining,
-  query replies suppressed); `zig build test` green. Test setup still up for the owner: bridge on
-  7695, Serve 12443 (`tailscale serve --https=12443 off` to remove), session `rweb-test-try`
-  (`rex session kill rweb-test-try`).
+  query replies suppressed); `zig build test` green. (Test setup since removed; see the last entry.)
 - 2026-11-22, Phase 3 fixes (soft keyboard live forwarding, Copy view): `zig build test` and `zig
   build web-test` (10 pass) green; Samsung-style key sequence replayed in desktop Chrome, result
-  confirmed through Rex's own capture. **Test setup still up on desktop-mac for the owner's devices:**
+  confirmed through Rex's own capture. **(Test setup since removed; see the last entry.)**
   bridge on 127.0.0.1:7695 (`rweb --listen-tcp 7695 --owner-from-tailscale --allow-own-address`),
   Serve port 12443 (remove: `tailscale serve --https=12443 off`), session `rweb-test-try`
   (destroy: `rex session kill rweb-test-try`).
@@ -265,3 +263,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Expanded key bar is three rows: a full-width extras strip that scrolls sideways, then the modifiers beside an inverted-T arrow pad with the collapse button in its corner. Collapse returns to the single scrolling line. Checked in Chrome at phone width.
 
 - Expanded key bar filled edge to edge: extras row (PgUp PgDn | ~ / \ - `) shares the full width; modifiers plus Home, End, Paste form an even 5x2 grid beside the arrow pad. Home/End/Paste move back to the extras row on collapse. Checked in Chrome at phone width.
+
+- **2026-11-23: wterm is now the default terminal** (xterm.js stays as the fallback in the ⋯ menu, remembered per browser in `rweb.term`). Test setup removed on desktop-mac: bridge stopped, Serve 12443 off, session `rweb-test-try` killed, temp files deleted; the owner's other Serve entries and `calm-isle` untouched. Nothing of rweb runs on desktop-mac now. State: Phases 1-3 built and owner-tested on phone and tablet; Phase 3's exit (a week of daily use) is the owner's. Next: Phase 4 (security review first, covering `'wasm-unsafe-eval'` in the CSP, the loopback-forgeable identity on desktop-mac and the held-back file transfer; then release builds and a `setup-repo` module), only on the owner's go-ahead.

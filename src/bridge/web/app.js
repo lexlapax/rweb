@@ -31,7 +31,7 @@ async function main() {
 const kind = (() => {
   const q = new URLSearchParams(location.search).get('term');
   if (q === 'wterm' || q === 'xterm') { LS.set('term', q); return q; }
-  return LS.get('term', 'xterm');
+  return LS.get('term', 'wterm');
 })();
 const loadScript = src => new Promise((ok, no) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => no(new Error('could not load ' + src)); document.head.append(s); });
 let term = null, fitAddon = null, termKind = 'xterm', startupNote = null;
@@ -495,7 +495,7 @@ $('more').onclick = () => openPop($('more'), pop => {
     if (d && await confirmAction({title: 'Resize the terminal?', message: `Resize it to ${d.cols} × ${d.rows}. It changes for everyone viewing it, including the desktop.`, ok: 'Resize'})) send({t: 'fit', cols: d.cols, rows: d.rows});
   }, 'pop-fit');
   item(pop, 'Load all scrollback', () => { closePop(); send({t: 'more_history'}); }, 'pop-hist');
-  item(pop, termKind === 'wterm' ? 'Terminal: wterm (switch to the standard one)' : 'Terminal: standard (try wterm)', () => { LS.set('term', termKind === 'wterm' ? 'xterm' : 'wterm'); location.reload(); });
+  item(pop, termKind === 'wterm' ? 'Terminal: wterm (switch to the older xterm.js)' : 'Terminal: xterm.js (switch back to wterm)', () => { LS.set('term', termKind === 'wterm' ? 'xterm' : 'wterm'); location.reload(); });
   item(pop, 'Reconnect', () => { closePop(); if (state.ws) { const w = state.ws; state.ws = null; try { w.close(); } catch {} } connect(); });
   updateControls();
 });
