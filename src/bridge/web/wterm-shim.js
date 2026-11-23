@@ -13,7 +13,7 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
   const core = await GhosttyCore.load({wasmPath: '/vendor/ghostty-vt.wasm'});
   // No auto-sizing: the grid is Rex's, and changes only when Rex says so.
   const handlers = {data: () => {}};
-  const wt = new WTerm(host, {core, cols: 80, rows: 24, autoResize: false, cursorBlink: true, onData: d => handlers.data(d), onBinary: () => {}});
+  const wt = new WTerm(host, {core, cols: 80, rows: 24, autoResize: false, cursorBlink: true, scrollbackLines: 10000, onData: d => handlers.data(d), onBinary: () => {}});
   await wt.init();
   // Drop wterm's replies to terminal queries (see above), draining them so they cannot pile up.
   if (wt.bridge && typeof wt.bridge.getResponse === 'function') {
@@ -22,10 +22,16 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
   }
   host.classList.add('rweb-wterm');
 
-  const setFont = px => { host.style.setProperty('--term-font-size', px + 'px'); try { wt._measureCharSize && wt._measureCharSize(); } catch {} };
+  // The font size the grid is drawn at now. The page asks for a preferred size; when the grid would
+  // be wider than the screen the size is reduced to fit. wterm measures cells and places its typing
+  // overlay from on-screen coordinates, so shrinking with a CSS scale would put text in the wrong
+  // place: the font itself is made smaller instead.
+  let applied = fontSize;
+  const setFont = px => { applied = px; host.style.setProperty('--term-font-size', px + 'px'); try { wt._measureCharSize && wt._measureCharSize(); } catch {} };
   setFont(fontSize);
   const cell = () => { try { return wt._measureCharSize(); } catch { return null; } };
 
+  const theme = {base: null, cur: null};
   const term = {
     kind: 'wterm', wt,
     element: host,
@@ -46,12 +52,27 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
     },
     options: {
       set fontSize(px) { setFont(px); },
+      get fontSize() { return applied; },
+      // Rex sends colours as "RRGGBB" or "#RRGGBB" and a palette as "index=RRGGBB" for the entries it
+      // changed. wterm wants 24-bit numbers and all 16 palette entries, so fill in what Rex left out.
       set theme(t) {
-        const c = {};
-        if (t.foreground) c.foreground = t.foreground;
-        if (t.background) c.background = t.background;
-        if (t.cursor) c.cursor = t.cursor;
-        try { wt.setThemeColors(Object.keys(c).length ? c : null); } catch (e) { console.warn('theme', e); }
+        const num = v => { const m = /^#?([0-9a-fA-F]{6})$/.exec(String(v || '')); return m ? parseInt(m[1], 16) : null; };
+        if (!theme.base) {
+          const css = name => num(getComputedStyle(host).getPropertyValue(name).trim());
+          theme.base = {foreground: css('--term-fg') ?? 0xd4d4d4, background: css('--term-bg') ?? 0x1e1e1e, cursor: css('--term-cursor') ?? 0xaeafad,
+            palette: Array.from({length: 16}, (_, i) => css('--term-color-' + i) ?? 0)};
+          theme.cur = {...theme.base, palette: theme.base.palette.slice()};
+        }
+        const c = theme.cur;
+        if (num(t.foreground) !== null) c.foreground = num(t.foreground);
+        if (num(t.background) !== null) c.background = num(t.background);
+        if (num(t.cursor) !== null) c.cursor = num(t.cursor);
+        for (const entry of t.palette || []) {
+          const m = /^(\d+)=([0-9a-fA-F]{6})$/.exec(entry);
+          if (m && Number(m[1]) < 16) c.palette[Number(m[1])] = parseInt(m[2], 16);
+        }
+        try { wt.setThemeColors({foreground: c.foreground, background: c.background, cursor: c.cursor, palette: c.palette.slice()}); }
+        catch (e) { console.warn('theme', e); }
       },
     },
     parser: {registerCsiHandler() {}, registerDcsHandler() {}, registerOscHandler() {}},
@@ -60,6 +81,16 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
     proposeDimensions(width, height) {
       const m = cell(); if (!m || !m.charWidth || !m.rowHeight) return null;
       return {cols: Math.max(2, Math.floor(width / m.charWidth)), rows: Math.max(1, Math.floor(height / m.rowHeight))};
+    },
+    // Draw at `preferred` px, or smaller so that all columns fit in `stageWidth` pixels (never below
+    // 5 px). Returns the size used.
+    fitFont(preferred, stageWidth) {
+      const m = cell();
+      const ratio = m && m.charWidth && applied ? m.charWidth / applied : 0.6;   // glyph width per px of font
+      const wanted = ratio * wt.cols * preferred;
+      const px = wanted > stageWidth ? Math.max(5, Math.floor((preferred * stageWidth / wanted) * 10) / 10) : preferred;
+      if (Math.abs(px - applied) > 0.05) setFont(px);
+      return px;
     },
     // Width in pixels of the whole grid, for shrink-to-fit.
     screenWidth() { const m = cell(); return m && m.charWidth ? Math.ceil(m.charWidth * wt.cols) : host.scrollWidth; },

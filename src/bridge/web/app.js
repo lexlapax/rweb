@@ -142,9 +142,15 @@ term.attachCustomKeyEventHandler(e => {
 function layout() {
   const stage = $('stage');
   if (stage.hidden) return;
-  const screen = termKind === 'xterm' ? (term.element && term.element.querySelector('.xterm-screen')) : term.element;
+  if (termKind === 'wterm') {
+    // No CSS scaling for wterm (it would break its cell measuring and typing overlay): the font shrinks instead.
+    $('term').style.transform = '';
+    term.fitFont(state.fontSize, stage.clientWidth - 2);
+    return;
+  }
+  const screen = term.element && term.element.querySelector('.xterm-screen');
   if (!screen) return;
-  const scale = K.fitScale(stage.clientWidth, termKind === 'xterm' ? screen.offsetWidth : term.screenWidth());
+  const scale = K.fitScale(stage.clientWidth, screen.offsetWidth);
   $('term').style.transform = scale < 1 ? `scale(${scale})` : '';
 }
 new ResizeObserver(layout).observe($('stage'));
@@ -168,12 +174,13 @@ function applyTheme(t) {
     $('theme-color').setAttribute('content', theme.background);
   }
   if (t.cursor) theme.cursor = hex(t.cursor);
+  if (t.palette) theme.palette = t.palette;      // wterm uses it; xterm.js ignores it
   term.options.theme = theme;
 }
 
 function setFontSize(n) {
   state.fontSize = K.clampFont(n); LS.set('fontSize', state.fontSize);
-  term.options.fontSize = state.fontSize;
+  if (termKind === 'xterm') term.options.fontSize = state.fontSize;
   requestAnimationFrame(layout);
   const el = $('font-now'); if (el) el.textContent = state.fontSize + ' px';
 }

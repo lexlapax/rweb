@@ -137,12 +137,23 @@ What was done:
   physical keys are taken over and sent to Rex as key events.
 - `?term=wterm` (remembered on the device) or the ⋯ menu's terminal item switches; xterm.js stays
   the default for now. If wterm fails to start the page falls back to xterm.js and says so.
+- Found and fixed while checking, each a real bug of mine rather than of wterm: (1) shrinking the
+  terminal to fit a narrow screen with a CSS scale broke wterm, which measures cells and places
+  its typing overlay from on-screen coordinates (this is the owner's "text overwrites appear in
+  the display" on the phone, most likely): for wterm the font size is now reduced until all
+  columns fit, with no scaling; (2) wterm sizes its box for the rows it was created with, so
+  after Rex's terminal grew to 30 rows the top rows were scrolled out of view: the box now
+  fills the stage; (3) wterm's theme call needs 24-bit numbers and exactly 16 palette entries, so
+  Rex's `RRGGBB` strings threw and the theme was silently ignored: the shim converts them and fills
+  the palette from wterm's defaults.
 - Checked in Chrome: the live Rex terminal draws; typed commands run; colour; a wide character
-  and a combining accent are right; terminal queries leave no duplicate replies. **Not yet
-  checked, and needed before it can be the default:** long-press selection on the owner's phone;
-  the Samsung and Gboard keyboards on it; vim and the alternate screen; mouse; paste; resize and
-  theme; reconnect and Rex restart; the key row's latched modifiers (they act on wterm's soft
-  text input through `applyLatched`, which is untested there); scrollback and the history cap.
+  and a combining accent are right; terminal queries leave no duplicate replies. Also checked: `less` (alternate screen) draws and quitting restores the earlier
+  screen; sticky Ctrl plus a soft-keyboard letter (Ctrl+L) clears the screen and releases the latch;
+  Rex resizing to 100×30 gives 30 real rows with the font shrinking to fit; the theme (colours and
+  palette overrides) applies; the page reconnects by itself with the screen intact. On the
+  owner's phone: long-press selection with handles and Copy works on the terminal itself.
+  **Not yet checked:** typing with the Samsung and Gboard keyboards on wterm (including Backspace),
+  mouse reporting, paste, Rex restart, and scrollback with the history cap.
 
 ## Not verified, and limits
 

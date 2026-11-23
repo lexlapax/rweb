@@ -111,4 +111,5 @@ dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px 
 }
 
 /* wterm draws its own grid box; make it fill the stage seamlessly. */
-#term.rweb-wterm { border-radius: 0; box-shadow: none; padding: 0; width: max-content; min-width: 100%; }
+#term.rweb-wterm { border-radius: 0; box-shadow: none; padding: 0; width: 100%; height: 100% !important; max-height: none; }
+#stage:has(#term.rweb-wterm) { overflow: hidden; }
