@@ -201,3 +201,21 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 @media (prefers-reduced-motion: no-preference) { .sdot.working { animation: pulse 1.2s ease-in-out infinite; } @keyframes pulse { 50% { opacity: .35; } } }
 #tabs button.newwin { margin-left: 6px; position: relative; }
 #tabs button.newwin::before { content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
+
+/* Drawer: flat rows, quiet icon buttons, a clear current terminal. */
+#list { background: var(--panel); border-right: 1px solid var(--line); }
+#list .row { padding: 10px 10px 4px; }
+#list #new-session { width: 100%; height: 36px; background: var(--accent); border-color: var(--accent); color: #0b0b0b; font-weight: 600; border-radius: 8px; }
+#list #new-session:disabled { background: var(--btn); border-color: var(--line); color: var(--dim); }
+#list .session { padding: 6px 6px 2px; }
+#list .session > .name { display: flex; align-items: center; gap: 2px; min-height: 36px; padding: 0 4px; }
+#list .session > .name .label { font-weight: 600; font-size: 13px; letter-spacing: .01em; }
+#list .block { display: flex; align-items: center; gap: 2px; border-radius: 8px; min-height: 36px; padding: 0 4px 0 10px; position: relative; }
+#list .block > button.label { flex: 1; text-align: left; border: 0; background: none; height: 36px; padding: 0; color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list .block.current { background: #262626; }
+#list .block.current::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--accent); }
+#list .block.current > button.label { color: var(--fg); font-weight: 600; }
+#list button.small { width: 28px; height: 28px; min-width: 0; min-height: 0; padding: 0; border: 0; background: none; color: var(--dim); border-radius: 6px; font-size: 13px; }
+#list button.small:hover { background: #2c2c2c; color: var(--fg); }
+#list .session > .name button.small:first-of-type { color: var(--fg); }
+#scrim { background: rgba(0,0,0,.45); }
