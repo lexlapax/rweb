@@ -76,6 +76,27 @@
     {label: '`', text: '`', key: 'backquote'},
   ];
 
+  // The soft keyboard edits a hidden text box that holds what has been typed since the last Enter.
+  // Instead of waiting for a word to be committed, the page mirrors every change to the shell:
+  // keep the common start, delete what went, type what came. Backspace is DEL (0x7f), as xterm
+  // sends it. Works on code points, so an emoji is one deletion.
+  function editsBetween(prev, next) {
+    const a = Array.from(prev), b = Array.from(next);
+    let p = 0;
+    while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    return {deletes: a.length - p, inserts: b.slice(p).join('')};
+  }
+  function editBytes(prev, next) {
+    const e = editsBetween(prev, next);
+    return '\x7f'.repeat(e.deletes) + e.inserts;
+  }
+
+  // The last `n` lines of `text`, ignoring blank lines at the end.
+  function lastLines(text, n) {
+    const lines = String(text).replace(/\s+$/, '').split('\n');
+    return lines.slice(Math.max(0, lines.length - n)).join('\n');
+  }
+
   const FONT_MIN = 8, FONT_MAX = 28, FONT_DEFAULT = 14;
   function clampFont(n) {
     n = Math.round(Number(n));
@@ -90,7 +111,7 @@
     return Math.max(floor === undefined ? 0.35 : floor, Math.min(1, stageWidth / screenWidth));
   }
 
-  const api = {snake, modsString, keyObject, ctrlText, applyLatched, ROW_MAIN, ROW_MORE, clampFont, fitScale, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, ROW_MAIN, ROW_MORE, clampFont, fitScale, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

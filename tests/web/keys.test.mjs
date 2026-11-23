@@ -82,3 +82,27 @@ test('a wide terminal shrinks to fit but never below the floor', () => {
   assert.equal(K.fitScale(0, 600), 1);
   assert.equal(K.fitScale(300, 0), 1);
 });
+
+test('soft keyboard edits are mirrored as deletes and inserts', () => {
+  assert.deepEqual(K.editsBetween('', 'e'), {deletes: 0, inserts: 'e'});
+  assert.deepEqual(K.editsBetween('ech', 'echo'), {deletes: 0, inserts: 'o'});
+  assert.deepEqual(K.editsBetween('echo', 'ech'), {deletes: 1, inserts: ''});
+  assert.deepEqual(K.editsBetween('echo ', 'echo'), {deletes: 1, inserts: ''});
+  // Autocorrect replaces the end of what was typed.
+  assert.deepEqual(K.editsBetween('say ehco', 'say echo'), {deletes: 3, inserts: 'cho'});
+  assert.deepEqual(K.editsBetween('abc', 'abc'), {deletes: 0, inserts: ''});
+  assert.deepEqual(K.editsBetween('abc', ''), {deletes: 3, inserts: ''});
+  // Code points, not UTF-16 units: an emoji is one deletion.
+  assert.deepEqual(K.editsBetween('a\u{1F600}', 'a'), {deletes: 1, inserts: ''});
+  assert.equal(K.editBytes('echo', 'ech'), '\x7f');
+  assert.equal(K.editBytes('ehco', 'echo'), '\x7f\x7f\x7fcho');
+  assert.equal(K.editBytes('', 'hello '), 'hello ');
+});
+
+test('the Copy buttons: the last lines of the text, without trailing blanks', () => {
+  const t = 'a\nb\nc\nd\n\n\n';
+  assert.equal(K.lastLines(t, 2), 'c\nd');
+  assert.equal(K.lastLines(t, 100), 'a\nb\nc\nd');
+  assert.equal(K.lastLines('', 5), '');
+  assert.equal(K.lastLines('one', 1), 'one');
+});

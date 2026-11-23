@@ -47,21 +47,61 @@ function clearLatched() {
   for (const b of document.querySelectorAll('#keys [data-latch]')) b.setAttribute('aria-pressed', 'false');
 }
 
-// Composed text, soft-keyboard text, pastes and mouse reports come from xterm.js.
+// Pastes, mouse reports and keys xterm.js encodes come through onData. On a touch device typed
+// text does not (see the soft keyboard below).
 term.onData(d => {
   if (!canType()) { if (state.current && !link.healthy) notice('Not connected: not sent'); return; }
+  if (d === '\r') softReset();                       // a new line starts: forget what was typed
   const r = K.applyLatched(state.latched, d);
   if (r.used) clearLatched();
   send({t: 'in', d: r.text});
 });
 term.onBinary(d => { if (canType()) send({t: 'in', d}); });
 
-// Physical keys go to Rex, which encodes them for the program's keyboard mode. Phone keyboards
-// and input methods report no usable key: those go through xterm.js (onData), and while one is
-// in use Enter and Backspace do too, so they keep their order with the text before them.
+// ---- soft keyboard ----
+// Phone keyboards compose words, hold them back until you press space, and on Backspace re-open
+// the word they already committed. xterm.js's overlay then shows text the shell no longer has.
+// So on a touch device the page takes over: the hidden text box holds what has been typed since
+// the last Enter, and every change to it is mirrored to the shell at once (delete what went,
+// type what came). The shell's own echo is then the only display, as with a desktop keyboard.
+const soft = {on: matchMedia('(pointer: coarse)').matches, prev: '', composing: false};
+function softReset() { soft.prev = ''; if (term.textarea && term.textarea.value !== '') term.textarea.value = ''; }
+function softSync() {
+  const ta = term.textarea, now = ta.value;
+  const e = K.editsBetween(soft.prev, now);
+  soft.prev = now;
+  if (!e.deletes && !e.inserts) return;
+  if (!canType()) { if (state.current) notice(link.healthy ? 'Typing is off' : 'Not connected: not sent'); return; }
+  let ins = e.inserts;
+  if (!e.deletes) { const r = K.applyLatched(state.latched, ins); if (r.used) clearLatched(); ins = r.text; }
+  send({t: 'in', d: '\x7f'.repeat(e.deletes) + ins});
+  if (!soft.composing && Array.from(now).length > 100) softReset();   // keep the text box short
+}
+(function installSoft() {
+  // Capture phase on the terminal's outer element: it runs before anything on the text box, so
+  // xterm.js's own handlers (registered on the box earlier than we could) never see these events.
+  const root = term.element;
+  const only = (fn) => e => { if (e.target === term.textarea && soft.on) { e.stopPropagation(); fn(e); } };
+  root.addEventListener('compositionstart', only(() => { soft.composing = true; }), true);
+  root.addEventListener('compositionupdate', only(() => {}), true);
+  root.addEventListener('compositionend', only(() => { soft.composing = false; }), true);
+  root.addEventListener('beforeinput', only(() => {}), true);
+  root.addEventListener('input', only(() => softSync()), true);
+})();
+
+// Physical keys go to Rex, which encodes them for the program's keyboard mode. Keys with no usable
+// code (phone keyboards, input methods) are the soft keyboard's business.
 term.attachCustomKeyEventHandler(e => {
   if (e.type !== 'keydown' && e.type !== 'keyup') return false;
-  if (e.isComposing || e.keyCode === 229 || e.key === 'Unidentified' || !e.code) { state.soft = true; return true; }
+  const softKey = e.isComposing || e.keyCode === 229 || e.key === 'Unidentified' || !e.code;
+  if (softKey) { state.soft = true; if (!e.code) soft.on = true; }
+  if (soft.on && e.type === 'keydown') {
+    // Backspace: with text in the box the input event does the deleting; with none, xterm sends DEL.
+    if (e.key === 'Backspace') return term.textarea.value.length === 0;
+    if (e.key === 'Enter') return true;               // xterm sends the line end, and the box is cleared
+    if (softKey) return false;                          // everything else is the input event's job
+  }
+  if (softKey) return true;
   if (state.soft && (e.key === 'Enter' || e.key === 'Backspace')) return true;
   if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'v') return true;      // paste
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection()) return true; // copy
@@ -279,7 +319,7 @@ function updateControls() {
 
 function openBlock(session, block) {
   state.current = {session, block}; state.exited = null; LS.set('last', state.current);
-  term.reset(); clearLatched();
+  term.reset(); clearLatched(); softReset();
   send({t: 'open', session, block});
   closeListIfNarrow(); closePop();
   renderAll(); renderStatus();
@@ -382,17 +422,30 @@ async function confirmAction({title, message, ok}) {
 
 // ---- copy and paste ----
 function requestCopy() { send({t: 'text'}); }
+let copyFull = '';
+function copyToClipboard(text) {
+  // The clipboard API needs a secure page and a user action; the old way is the fallback.
+  const old = () => new Promise((ok, no) => {
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.append(ta); ta.focus(); ta.select();
+    let good = false; try { good = document.execCommand('copy'); } catch {}
+    ta.remove(); good ? ok() : no(new Error('copy refused'));
+  });
+  return (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(text) : Promise.reject()).catch(old);
+}
 function openCopy(text, truncated) {
-  const dlg = $('copydlg'), ta = $('copytext');
-  ta.value = text;
+  const dlg = $('copydlg'), box = $('copytext');
+  copyFull = text; box.textContent = text;
   $('copy-note').textContent = truncated ? 'Showing the end of a long history.' : '';
-  $('copy-all').onclick = async () => {
-    try { await navigator.clipboard.writeText(ta.value); notice('Copied'); }
-    catch { ta.focus(); ta.select(); notice('Select the text and use your device’s copy'); }
-  };
+  const done = (what) => () => notice(what), fail = () => notice('Could not copy: select the text and use your device\u2019s copy');
+  $('copy-all').onclick = () => copyToClipboard(copyFull).then(done('Copied everything'), fail);
+  $('copy-last').onclick = () => copyToClipboard(K.lastLines(copyFull, 100)).then(done('Copied the last 100 lines'), fail);
+  $('copy-select').onclick = () => { const r = document.createRange(); r.selectNodeContents(box); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); box.focus(); };
+  const share = $('copy-share'); share.hidden = !navigator.share;
+  share.onclick = () => navigator.share({text: copyFull}).catch(() => {});
   $('copy-close').onclick = () => dlg.close();
   if (!dlg.open) dlg.showModal();
-  ta.scrollTop = ta.scrollHeight;
+  box.scrollTop = box.scrollHeight;
 }
 async function doPaste() {
   if (!canType()) return;
@@ -467,7 +520,7 @@ if (dbgOn && term.textarea) {
 
 // Test hooks: what the terminal shows, for automated checks.
 window.rweb = {
-  term, state,
+  term, state, soft,
   screen() { const b = term.buffer.active, out = []; for (let i = 0; i < term.rows; i++) out.push(b.getLine(b.viewportY + i).translateToString(true)); return out; },
 };
 setFontSize(state.fontSize);

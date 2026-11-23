@@ -63,6 +63,27 @@ Behaviour:
   a second terminal appeared in the "1/2 ▾" switcher; closing it asked first (Cancel focused, a
   cancel closed nothing, confirming closed it); closing the session asked first and removed it.
 
+## Fixed after the owner's first phone and tablet try (2026-11-22)
+
+- **Backspace deleted a character in the shell but the page still showed it.** Phone keyboards
+  hold a word back until you press space, and on Backspace re-open the word they already
+  committed; xterm.js's composition overlay then kept showing text the shell no longer had. On a
+  touch device (`pointer: coarse`, or the first keyboard event with no key code) the page now
+  takes over: the hidden text box holds what has been typed since the last Enter, and every
+  change to it is mirrored to the shell at once (`editsBetween`: keep the common start, send
+  DELs for what went, type what came). The shell's own echo is the only display. xterm.js never
+  sees these events (intercepted in the capture phase on the terminal's outer element, since its
+  own `input` handler on the text box registers first and sent each space twice).
+  Checked by replaying a Samsung-style sequence in desktop Chrome: compose `echo`, commit with a
+  space, Backspace, the keyboard re-opening the word and retyping it, a word composed then
+  rewritten by autocorrect (`soft` to `sofa`), Enter. The page sent `e c h o ␣ DEL DEL o ␣ s o
+  f t DEL a`-style edits with nothing doubled, and Rex's own capture of the shell showed
+  `echo sofa` and `sofa`. A real phone is still the proof.
+- **No selection handles in the Copy view** (a read-only text box). The Copy view is now plain
+  selectable text, and has buttons that need no selecting: Copy all, Copy last 100 lines, Select
+  all, and Share… (where the browser has it). Copying falls back to the old `execCommand` way.
+- Paste was not tried yet.
+
 ## Not verified, and limits
 
 - **Real devices with this build.** Everything above was Chrome on the Mac. Still to try on the
@@ -70,8 +91,9 @@ Behaviour:
   its selection handles, the paste fallback, and Phase 0 findings 12 and 13 on Gboard and Samsung
   Keyboard. They were not reproduced in Phase 2 with a healthy connection.
 - The phone needs its Tailscale power saving off (Phase 2, Findings 5).
-- The Copy view is a text box: it shows the text as-is (no colour) and copies with the browser's
-  own selection or "Copy all" (which needs the browser to allow clipboard writes; otherwise it
-  selects the text for you to copy).
+- The Copy view shows the text as-is (no colour). "Copy all" and "Copy last 100 lines" need the
+  browser to allow clipboard writes (https is enough); otherwise it says so and you select instead.
+- Live forwarding of soft-keyboard edits means a CJK input method (which composes before it
+  commits) would send its raw letters; not a concern for the owner's use, but a limit.
 - No pinch-to-zoom, no chat view, no split layout (all outside the first version).
 - Paste uses the browser's clipboard read; where that is refused a text box asks for the text.

@@ -76,7 +76,11 @@ dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px 
 #copydlg[open] { display: flex; }
 .copy-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex: none; }
 .copy-head h2 { margin: 0; }
-#copytext { flex: 1; resize: none; font: 13px/1.35 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow: auto; -webkit-user-select: text; user-select: text; }
+#copytext { flex: 1; margin: 0; padding: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; font: 13px/1.35 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow: auto; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto; }
+.copy-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; flex: none; }
+.copy-actions button { flex: 1 1 auto; }
+/* The page forwards soft-keyboard edits itself, so xterm's composition overlay is never wanted. */
+.xterm .composition-view { display: none !important; }
 #notice { position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%); background: #2d3340; border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; max-width: 90vw; z-index: 40; }
 
 /* narrow: the list slides over the terminal and the bar is compact */

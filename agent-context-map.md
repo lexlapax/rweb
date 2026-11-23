@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-22 (desktop-mac). Phase 3 built; phones to try. Read first; load linked context lazily. Keep this file short: current
+Last updated: 2026-11-22 (desktop-mac). Phase 3 built; owner trying it on phone and tablet. Read first; load linked context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
@@ -133,6 +133,12 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 
 ## Checks run for this update
 
+- 2026-11-22, Phase 3 fixes (soft keyboard live forwarding, Copy view): `zig build test` and `zig
+  build web-test` (10 pass) green; Samsung-style key sequence replayed in desktop Chrome, result
+  confirmed through Rex's own capture. **Test setup still up on desktop-mac for the owner's devices:**
+  bridge on 127.0.0.1:7695 (`rweb --listen-tcp 7695 --owner-from-tailscale --allow-own-address`),
+  Serve port 12443 (remove: `tailscale serve --https=12443 off`), session `rweb-test-try`
+  (destroy: `rex session kill rweb-test-try`).
 - 2026-11-22, Phase 3: desktop-mac `zig build test` 107 pass + 1 skip (live), `ReleaseSafe` too; `zig
   build web-test` 8 pass; linux-box 145 pass + 1 skip (scratch copy removed). Chrome checks of the
   page at desktop and 400 px wide (throwaway session, destroyed); `rex ls` shows only `calm-isle`

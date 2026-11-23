@@ -57,10 +57,15 @@
     <h2 id="copy-title">Copy text</h2>
     <span id="copy-note" class="dim"></span>
     <span class="spacer"></span>
-    <button id="copy-all">Copy all</button>
     <button id="copy-close">Close</button>
   </div>
-  <textarea id="copytext" readonly spellcheck="false" aria-label="Terminal text. Select with your device's selection handles."></textarea>
+  <div class="copy-actions">
+    <button id="copy-all">Copy all</button>
+    <button id="copy-last">Copy last 100 lines</button>
+    <button id="copy-select">Select all</button>
+    <button id="copy-share" hidden>Share&hellip;</button>
+  </div>
+  <pre id="copytext" tabindex="0" aria-label="Terminal text. Select with your device's selection handles."></pre>
 </dialog>
 
 <dialog id="pastedlg" aria-labelledby="paste-title">
