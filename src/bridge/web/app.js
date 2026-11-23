@@ -268,7 +268,12 @@ function handleMessage(m) {
   switch (m.t) {
     case 'mode': state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
     case 'rex': state.rexUp = m.up; renderStatus(); break;
-    case 'tree': state.tree = m.sessions; renderAll(); maybeRestore(); break;
+    case 'tree': {
+      state.tree = m.sessions; renderAll(); maybeRestore();
+      const pn = state.pendingNew;                               // a terminal was just added with +: switch to it
+      if (pn) { const s = state.tree.find(x => x.id === pn.session); if (s && s.blocks.length > pn.count) { state.pendingNew = null; openBlock(s.id, s.blocks[s.blocks.length - 1].id); } }
+      break;
+    }
     case 'opened':
       state.cols = m.cols; state.rows = m.rows; state.historyRows = m.history_rows;
       state.exited = (m.exited !== undefined && m.exited !== null) ? m.exited : null;
@@ -309,17 +314,21 @@ function renderCrumb() {
   $('crumb-term').textContent = info ? info.b.label : '';
   $('crumb-sep').hidden = !info;
   const tabs = $('tabs'); tabs.replaceChildren();
-  const sel = $('tabsel');
-  if (info && info.s.blocks.length > 1) {
+  $('tabsel').hidden = true;
+  $('tabrow').hidden = !info;
+  if (info) {
+    const n = info.s.blocks.length, i = info.s.blocks.findIndex(b => b.id === state.current.block) + 1;
+    $('crumb-count').textContent = n > 1 ? ` ${i}/${n}` : '';
     info.s.blocks.forEach(b => {
       const t = el('button', '', b.label);
       if (b.id === state.current.block) t.setAttribute('aria-current', 'true');
       t.onclick = () => openBlock(info.s.id, b.id);
       tabs.append(t);
     });
-    const i = info.s.blocks.findIndex(b => b.id === state.current.block) + 1;
-    sel.hidden = false; sel.textContent = `${i}/${info.s.blocks.length} ▾`;
-  } else { sel.hidden = true; }
+    $('tab-add').disabled = state.observe;
+    $('tab-add').onclick = () => { state.pendingNew = {session: info.s.id, count: info.s.blocks.length}; send({t: 'new_terminal', session: info.s.id}); };
+  }
+  requestAnimationFrame(layout);
 }
 
 function renderTree() {

@@ -171,3 +171,14 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #bar button.icon { font-size: 16px; }
 #list, #list button, #list .name, #list .label { font-size: 13px; }
 .pop .sizer { padding: 0 10px; }
+
+/* Terminal tabs under the top bar, as in Ovis: one tab per terminal in the workspace, and a + to add one. */
+#tabrow { display: flex; align-items: center; gap: 4px; padding: 2px 8px; height: 40px; flex: none; background: var(--panel); border-bottom: 1px solid var(--line); }
+#tabrow:not([hidden]) { display: flex; }
+#tabs { display: flex !important; gap: 2px; flex: 0 1 auto; overflow-x: auto; min-width: 0; scrollbar-width: none; }
+#tabs button, #tab-add { height: 32px; min-height: 0; border: 0; background: none; color: var(--dim); font-size: 13px; padding: 0 12px; border-radius: 6px; white-space: nowrap; }
+#tabs button[aria-current="true"] { background: #2a2a2a; color: var(--fg); border: 0; }
+#tab-add { width: 32px; padding: 0; font-size: 16px; color: var(--fg); }
+#crumb-count { font-weight: 400; font-size: 12px; margin-left: 4px; }
+#crumb-sep, #crumb-term { display: none !important; }
+#crumb { max-width: none; flex: 1 1 auto; }
