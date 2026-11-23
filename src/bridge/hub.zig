@@ -356,6 +356,16 @@ pub const Hub = struct {
             .dbg => {},
             .text => h.sendText(v),
             .info => h.sendInfo(v),
+            .term_action => |act| {
+                if (h.isObserving(v)) return h.refuse(v, "term_action", "read-only");
+                v.mu.lockUncancelable(h.io);
+                const t = v.term;
+                v.mu.unlock(h.io);
+                const term = t orelse return h.refuse(v, "term_action", "no terminal open");
+                h.api_mu.lockUncancelable(h.io);
+                defer h.api_mu.unlock(h.io);
+                h.api.termAction(term.session_id, term.block_id, @tagName(act)) catch |e| h.fail(v, "term_action", e);
+            },
             .tree => {
                 h.mu.lockUncancelable(h.io);
                 defer h.mu.unlock(h.io);
@@ -403,7 +413,7 @@ pub const Hub = struct {
         h.api_mu.unlock(h.io);
         defer res.deinit();
         const i = res.value;
-        const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "info", .title = i.title, .pwd = i.pwd, .program = i.program, .exit_code = i.exit_code, .ports = i.ports }, .{}) catch return;
+        const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "info", .state = i.state, .status_msg = i.status_msg, .progress = i.progress, .title = i.title, .pwd = i.pwd, .program = i.program, .exit_code = i.exit_code, .ports = i.ports }, .{}) catch return;
         defer h.gpa.free(out);
         v.pushText(out);
     }

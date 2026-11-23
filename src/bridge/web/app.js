@@ -326,10 +326,12 @@ function renderInfo() {
   sub.replaceChildren(); ports.replaceChildren();
   if (!i) return;
   const bits = [];
-  const what = i.program || i.title;
+  if (i.state && i.state !== 'idle') { const d = el('span', 'sdot ' + i.state); d.title = i.status_msg || i.state; sub.append(d); }
+  if (i.status_msg) bits.push(i.status_msg + (Number.isInteger(i.progress) ? ` ${i.progress}%` : ''));
+  const what = !i.status_msg && (i.program || i.title);
   if (what) bits.push(what);
   const where = shortPath(i.pwd); if (where) bits.push(where);
-  sub.textContent = bits.join(' · ');
+  sub.append(bits.join(' · '));
   if (i.exit_code) { const x = el('span', 'bad', ` exit ${i.exit_code}`); sub.append(x); }
   for (const p of i.ports || []) { const c = el('span', 'chip', ':' + p); c.title = 'Listening on port ' + p; ports.append(c); }
 }
@@ -469,6 +471,8 @@ function item(pop, text, on, id) { const b = el('button', '', text); b.setAttrib
 $('more').onclick = () => openPop($('more'), pop => {
   item(pop, 'Copy text…', () => { closePop(); requestCopy(); }, 'pop-copy').disabled = !state.current;
   item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !state.current || state.observe;
+  item(pop, 'Clear screen', () => { closePop(); send({t: 'term_action', action: 'clear'}); }).disabled = !state.current || state.observe;
+  item(pop, 'Reset terminal…', async () => { closePop(); if (await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'})) send({t: 'term_action', action: 'reset'}); }).disabled = !state.current || state.observe;
   const sz = el('div', 'sizer'); sz.append(el('span', '', 'Text size'));
   const minus = el('button', '', '−'); minus.setAttribute('aria-label', 'Smaller text'); minus.onclick = () => setFontSize(state.fontSize - 1);
   const now = el('span', 'dim', state.fontSize + ' px'); now.id = 'font-now'; now.style.flex = '0 0 auto'; now.style.minWidth = '48px'; now.style.textAlign = 'center';

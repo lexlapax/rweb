@@ -301,9 +301,17 @@ pub const Api = struct {
         return .{ .arena = arena, .value = info };
     }
 
+    /// Clear the screen and scrollback (`clear`) or return the terminal to its starting state (`reset`).
+    pub fn termAction(a: *Api, sid: []const u8, bid: []const u8, action: []const u8) Error!void {
+        const body = try a.blockBody(sid, bid, ",\"args\":{}");
+        defer a.gpa.free(body);
+        var res = try a.run(if (std.mem.eql(u8, action, "clear")) "com.superlogical.terminal.clear" else "com.superlogical.terminal.reset", body);
+        res.deinit();
+    }
+
     /// What a terminal is showing the person: its title, working directory, foreground program and
     /// listening ports. Each piece is optional; a piece Rex can't give is left out.
-    pub const TermInfo = struct { title: ?[]const u8 = null, pwd: ?[]const u8 = null, program: ?[]const u8 = null, exit_code: ?i64 = null, ports: []const u16 = &.{} };
+    pub const TermInfo = struct { state: ?[]const u8 = null, status_msg: ?[]const u8 = null, progress: ?i64 = null, title: ?[]const u8 = null, pwd: ?[]const u8 = null, program: ?[]const u8 = null, exit_code: ?i64 = null, ports: []const u16 = &.{} };
 
     pub fn termInfo(a: *Api, sid: []const u8, bid: []const u8) Error!Owned(TermInfo) {
         var arena = std.heap.ArenaAllocator.init(a.gpa);
@@ -336,6 +344,22 @@ pub const Api = struct {
                     if (info.pwd == null) info.pwd = try dupeOpt(al, optStr(fg, "cwd"));
                 };
             }
+        } else |e| if (e == error.OutOfMemory) return e;
+        if (a.run("com.superlogical.terminal.program_status", body)) |r| {
+            var res = r;
+            defer res.deinit();
+            // The most urgent record wins: error, then blocked, then working, then done.
+            var best: u8 = 0;
+            if (res.value == .object) if (res.value.object.get("records")) |recs| if (recs == .array) for (recs.array.items) |rec| {
+                const st = optStr(rec, "state") orelse continue;
+                const rank: u8 = if (std.mem.eql(u8, st, "error")) 4 else if (std.mem.eql(u8, st, "blocked")) 3 else if (std.mem.eql(u8, st, "working")) 2 else if (std.mem.eql(u8, st, "done")) 1 else 0;
+                if (rank >= best and rank > 0) {
+                    best = rank;
+                    info.state = try dupeOpt(al, st);
+                    info.status_msg = try dupeOpt(al, optStr(rec, "msg") orelse optStr(rec, "title"));
+                    info.progress = if (rec.object.get("progress")) |pg| (if (pg == .integer) pg.integer else null) else null;
+                }
+            };
         } else |e| if (e == error.OutOfMemory) return e;
         if (a.run("com.superlogical.terminal.ports", body)) |r| {
             var res = r;

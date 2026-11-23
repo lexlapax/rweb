@@ -196,3 +196,6 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #tab-menu { margin-left: 0; }
 #ports:empty { display: none; }
 #ports:empty + #tab-menu { margin-left: auto; }
+.sdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--dim); }
+.sdot.working { background: var(--accent); } .sdot.blocked { background: var(--warn); } .sdot.error { background: var(--bad); } .sdot.done { background: var(--good); }
+@media (prefers-reduced-motion: no-preference) { .sdot.working { animation: pulse 1.2s ease-in-out infinite; } @keyframes pulse { 50% { opacity: .35; } } }

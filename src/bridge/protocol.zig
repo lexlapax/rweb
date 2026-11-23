@@ -48,6 +48,8 @@ pub const Msg = union(enum) {
     text,
     /// Title, folder, program and listening ports of the open terminal, for the page's header.
     info,
+    /// `clear` or `reset` the open terminal.
+    term_action: enum { clear, reset },
     observe: bool,
     new_session: ?[]const u8,
     new_terminal: []const u8,
@@ -80,6 +82,12 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (eql(u8, t, "more_history")) return .more_history;
     if (eql(u8, t, "text")) return .text;
     if (eql(u8, t, "info")) return .info;
+    if (eql(u8, t, "term_action")) {
+        const a = try str(o, "action", 16);
+        if (eql(u8, a, "clear")) return .{ .term_action = .clear };
+        if (eql(u8, a, "reset")) return .{ .term_action = .reset };
+        return error.BadField;
+    }
     if (eql(u8, t, "ping")) return .ping;
     if (eql(u8, t, "dbg")) return .dbg;
     if (eql(u8, t, "open")) return .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } };
@@ -155,6 +163,8 @@ test "simple messages" {
     try testing.expectEqual(Msg.ping, try parseT("{\"t\":\"ping\"}"));
     try testing.expectEqual(Msg.redraw, try parseT("{\"t\":\"redraw\"}"));
     try testing.expectEqual(Msg.info, try parseT("{\"t\":\"info\"}"));
+    try testing.expectEqual(Msg{ .term_action = .clear }, try parseT("{\"t\":\"term_action\",\"action\":\"clear\"}"));
+    try testing.expectError(error.BadField, parseT("{\"t\":\"term_action\",\"action\":\"rm\"}"));
     try testing.expectEqual(Msg{ .observe = true }, try parseT("{\"t\":\"observe\",\"on\":true}"));
     try testing.expectEqual(Msg{ .fit = .{ .cols = 100, .rows = 30 } }, try parseT("{\"t\":\"fit\",\"cols\":100,\"rows\":30}"));
 }
