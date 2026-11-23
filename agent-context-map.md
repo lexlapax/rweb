@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-22 (desktop-mac). Phase 3 built; owner trying it on phone and tablet. Read first; load linked context lazily. Keep this file short: current
+Last updated: 2026-11-22 (desktop-mac). Phase 3 built; owner trying it on phone and tablet; wterm (Ovis's terminal) added as an alternative for native long-press selection. Read first; load linked context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## Handover (2026-11-22), picked up on desktop-mac
@@ -133,6 +133,11 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 
 ## Checks run for this update
 
+- 2026-11-22, wterm trial: bundled and vendored wterm 0.6.0 + libghostty core (details and hashes in
+  docs/phase3-result.md); Chrome checks of `?term=wterm` (draw, type, colour, wide/combining,
+  query replies suppressed); `zig build test` green. Test setup still up for the owner: bridge on
+  7695, Serve 12443 (`tailscale serve --https=12443 off` to remove), session `rweb-test-try`
+  (`rex session kill rweb-test-try`).
 - 2026-11-22, Phase 3 fixes (soft keyboard live forwarding, Copy view): `zig build test` and `zig
   build web-test` (10 pass) green; Samsung-style key sequence replayed in desktop Chrome, result
   confirmed through Rex's own capture. **Test setup still up on desktop-mac for the owner's devices:**

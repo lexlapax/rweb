@@ -23,6 +23,11 @@ pub const all = [_]Asset{
     .{ .path = "/vendor/xterm.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/xterm.js") },
     .{ .path = "/vendor/xterm.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/vendor/xterm.css") },
     .{ .path = "/vendor/addon-fit.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/addon-fit.js") },
+    .{ .path = "/wterm-shim.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/wterm-shim.js") },
+    .{ .path = "/vendor/wterm.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/wterm.js") },
+    .{ .path = "/vendor/wterm.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/vendor/wterm.css") },
+    .{ .path = "/vendor/ghostty-vt.wasm", .content_type = "application/wasm", .body = @embedFile("web/vendor/ghostty-vt.wasm") },
+    .{ .path = "/vendor/LICENSE-wterm.txt", .content_type = "text/plain; charset=utf-8", .body = @embedFile("web/vendor/LICENSE-wterm.txt") },
     .{ .path = "/vendor/LICENSE-xterm.txt", .content_type = "text/plain; charset=utf-8", .body = @embedFile("web/vendor/LICENSE-xterm.txt") },
 };
 

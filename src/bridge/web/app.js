@@ -24,20 +24,44 @@ const state = {
 const link = {lastRx: performance.now(), healthy: false};
 
 // ---- the terminal ----
-const term = new Terminal({
-  cols: 80, rows: 24, scrollback: 10000, allowProposedApi: true,
-  fontFamily: 'ui-monospace, Menlo, Consolas, monospace', fontSize: state.fontSize, cursorBlink: true,
-});
-const fitAddon = new FitAddon.FitAddon();
-term.loadAddon(fitAddon);
-term.open($('term'));
-
-// Rex's own terminal answers programs' queries; this one must not, or the reply would be typed.
-for (const id of [{final:'c'},{prefix:'>',final:'c'},{prefix:'=',final:'c'},{final:'n'},{prefix:'?',final:'n'},
-  {intermediates:'$',final:'p'},{prefix:'?',intermediates:'$',final:'p'},{prefix:'>',final:'q'},{final:'t'},{prefix:'?',final:'u'}])
-  term.parser.registerCsiHandler(id, () => true);
-term.parser.registerDcsHandler({intermediates:'$', final:'q'}, () => true);
-for (const n of [4, 10, 11, 12]) term.parser.registerOscHandler(n, data => data.includes('?'));
+// Two terminals can draw the screen. xterm.js is the default. wterm (the one Ovis uses) draws
+// ordinary text rows, so the phone's own long-press selection, handles and Copy work on it.
+// `?term=wterm` or `?term=xterm` chooses, and the choice is remembered on this device.
+async function main() {
+const kind = (() => {
+  const q = new URLSearchParams(location.search).get('term');
+  if (q === 'wterm' || q === 'xterm') { LS.set('term', q); return q; }
+  return LS.get('term', 'xterm');
+})();
+const loadScript = src => new Promise((ok, no) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => no(new Error('could not load ' + src)); document.head.append(s); });
+let term = null, fitAddon = null, termKind = 'xterm', startupNote = null;
+if (kind === 'wterm') {
+  try {
+    const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '/vendor/wterm.css'; document.head.append(l);
+    await loadScript('/vendor/wterm.js'); await loadScript('/wterm-shim.js');
+    term = await window.makeWtermTerminal($('term'), {fontSize: state.fontSize});
+    fitAddon = {proposeDimensions: () => term.proposeDimensions($('stage').clientWidth, $('stage').clientHeight)};
+    termKind = 'wterm';
+    // The page behind the grid matches wterm's own background until Rex sends a theme.
+    const own = getComputedStyle($('term')).getPropertyValue('--term-bg').trim();
+    if (own) document.documentElement.style.setProperty('--term-bg', own);
+  } catch (e) { console.warn('wterm did not start; using xterm.js', e); startupNote = 'wterm did not start: using the standard terminal'; term = null; }
+}
+if (!term) {
+  term = new Terminal({
+    cols: 80, rows: 24, scrollback: 10000, allowProposedApi: true,
+    fontFamily: 'ui-monospace, Menlo, Consolas, monospace', fontSize: state.fontSize, cursorBlink: true,
+  });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open($('term'));
+  // Rex's own terminal answers programs' queries; this one must not, or the reply would be typed.
+  for (const id of [{final:'c'},{prefix:'>',final:'c'},{prefix:'=',final:'c'},{final:'n'},{prefix:'?',final:'n'},
+    {intermediates:'$',final:'p'},{prefix:'?',intermediates:'$',final:'p'},{prefix:'>',final:'q'},{final:'t'},{prefix:'?',final:'u'}])
+    term.parser.registerCsiHandler(id, () => true);
+  term.parser.registerDcsHandler({intermediates:'$', final:'q'}, () => true);
+  for (const n of [4, 10, 11, 12]) term.parser.registerOscHandler(n, data => data.includes('?'));
+}
 
 function send(obj) { if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(obj)); }
 function canType() { return !!state.current && !state.observe && state.rexUp && link.healthy; }
@@ -64,7 +88,7 @@ term.onBinary(d => { if (canType()) send({t: 'in', d}); });
 // So on a touch device the page takes over: the hidden text box holds what has been typed since
 // the last Enter, and every change to it is mirrored to the shell at once (delete what went,
 // type what came). The shell's own echo is then the only display, as with a desktop keyboard.
-const soft = {on: matchMedia('(pointer: coarse)').matches, prev: '', composing: false};
+const soft = {on: termKind === 'xterm' && matchMedia('(pointer: coarse)').matches, prev: '', composing: false};
 function softReset() { soft.prev = ''; if (term.textarea && term.textarea.value !== '') term.textarea.value = ''; }
 function softSync() {
   const ta = term.textarea, now = ta.value;
@@ -78,6 +102,7 @@ function softSync() {
   if (!soft.composing && Array.from(now).length > 100) softReset();   // keep the text box short
 }
 (function installSoft() {
+  if (termKind !== 'xterm') return;           // wterm does its own soft-keyboard input
   // Capture phase on the terminal's outer element: it runs before anything on the text box, so
   // xterm.js's own handlers (registered on the box earlier than we could) never see these events.
   const root = term.element;
@@ -94,7 +119,7 @@ function softSync() {
 term.attachCustomKeyEventHandler(e => {
   if (e.type !== 'keydown' && e.type !== 'keyup') return false;
   const softKey = e.isComposing || e.keyCode === 229 || e.key === 'Unidentified' || !e.code;
-  if (softKey) { state.soft = true; if (!e.code) soft.on = true; }
+  if (softKey) { state.soft = true; if (!e.code && termKind === 'xterm') soft.on = true; }
   if (soft.on && e.type === 'keydown') {
     // Backspace: with text in the box the input event does the deleting; with none, xterm sends DEL.
     if (e.key === 'Backspace') return term.textarea.value.length === 0;
@@ -117,9 +142,9 @@ term.attachCustomKeyEventHandler(e => {
 function layout() {
   const stage = $('stage');
   if (stage.hidden) return;
-  const screen = term.element && term.element.querySelector('.xterm-screen');
+  const screen = termKind === 'xterm' ? (term.element && term.element.querySelector('.xterm-screen')) : term.element;
   if (!screen) return;
-  const scale = K.fitScale(stage.clientWidth, screen.offsetWidth);
+  const scale = K.fitScale(stage.clientWidth, termKind === 'xterm' ? screen.offsetWidth : term.screenWidth());
   $('term').style.transform = scale < 1 ? `scale(${scale})` : '';
 }
 new ResizeObserver(layout).observe($('stage'));
@@ -378,6 +403,7 @@ $('more').onclick = () => openPop($('more'), pop => {
     if (d && await confirmAction({title: 'Resize the terminal?', message: `Resize it to ${d.cols} × ${d.rows}. It changes for everyone viewing it, including the desktop.`, ok: 'Resize'})) send({t: 'fit', cols: d.cols, rows: d.rows});
   }, 'pop-fit');
   item(pop, 'Load all scrollback', () => { closePop(); send({t: 'more_history'}); }, 'pop-hist');
+  item(pop, termKind === 'wterm' ? 'Terminal: wterm (switch to the standard one)' : 'Terminal: standard (try wterm)', () => { LS.set('term', termKind === 'wterm' ? 'xterm' : 'wterm'); location.reload(); });
   item(pop, 'Reconnect', () => { closePop(); if (state.ws) { const w = state.ws; state.ws = null; try { w.close(); } catch {} } connect(); });
   updateControls();
 });
@@ -565,8 +591,12 @@ if (dbgOn && term.textarea) {
 // Test hooks: what the terminal shows, for automated checks.
 window.rweb = {
   term, state, soft,
-  screen() { const b = term.buffer.active, out = []; for (let i = 0; i < term.rows; i++) out.push(b.getLine(b.viewportY + i).translateToString(true)); return out; },
+  kind: termKind,
+  screen() { if (termKind === 'wterm') return term.screenRows(); const b = term.buffer.active, out = []; for (let i = 0; i < term.rows; i++) out.push(b.getLine(b.viewportY + i).translateToString(true)); return out; },
 };
 setFontSize(state.fontSize);
 renderStatus();
 connect();
+if (startupNote) notice(startupNote);
+}
+main().catch(e => { console.error(e); const el = document.getElementById('empty'); if (el) el.textContent = 'The page failed to start: ' + e.message; });

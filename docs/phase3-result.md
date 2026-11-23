@@ -106,6 +106,44 @@ Behaviour:
   confirmed on the phone.
 - Paste was not tried yet.
 
+## The other terminal: wterm (2026-11-22)
+
+The owner wanted Ovis's behaviour: long-press selection with handles on the terminal itself. That
+is not available in xterm.js, which turns off text selection for the whole terminal and does
+mouse-only selection of its own (and my overrides did not get it working on the owner's phone).
+herdr-webui, which Ovis is built from, draws the screen with **wterm** (Vercel Labs, Apache-2.0):
+terminal rows as ordinary DOM text, with libghostty compiled to WebAssembly as the core
+(`@wterm/ghostty`), the same engine family as the bridge. The owner was right that this should
+have been looked at first; the Phase 0 choice of xterm.js was made on rendering correctness only.
+
+What was done:
+- Vendored `@wterm/dom` 0.6.0, `@wterm/core` 0.6.0 and `@wterm/ghostty` 0.6.0 (tarballs checked
+  with `npm pack`, nothing installed or run) as one bundle:
+  `esbuild entry.mjs --bundle --format=iife --minify --legal-comments=none
+  --define:import.meta.url='"https://rweb.invalid/vendor/"'` with esbuild 0.25.12, from
+  `import {WTerm} from "@wterm/dom"; import {GhosttyCore} from "@wterm/ghostty";
+  globalThis.RwebWterm = {WTerm, GhosttyCore}`. Tarball SHA-256: dom
+  `ab72f96c…c1eb`, core `8c34da7e…374c8`, ghostty `4ce92ce9…fdd02`. Files in
+  `src/bridge/web/vendor/`: `wterm.js` (245 KB, 84 KB compressed, sha256 `fbe16525…bd1b`),
+  `wterm.css` (`01be4dbf…0f66`), `ghostty-vt.wasm` (600 KB, 200 KB compressed, `1fa4e703…e3a2`),
+  `LICENSE-wterm.txt` (Apache-2.0, same text for all three packages).
+- The page's security policy now allows WebAssembly (`'wasm-unsafe-eval'` in `script-src`): a
+  change for the security review.
+- `wterm-shim.js` gives wterm the small xterm-like surface `app.js` uses. wterm hands its own
+  replies to terminal queries to the page as if typed, so the shim drops them (Rex's terminal has
+  already answered the program). Checked: after `printf '\033[c\033[5n\033[6n'` only Rex's one set
+  of answers appears, no duplicates. Soft-keyboard text, composition and Backspace are left to
+  wterm (it keeps a placeholder in its input box so Backspace works on touch screens); only
+  physical keys are taken over and sent to Rex as key events.
+- `?term=wterm` (remembered on the device) or the ⋯ menu's terminal item switches; xterm.js stays
+  the default for now. If wterm fails to start the page falls back to xterm.js and says so.
+- Checked in Chrome: the live Rex terminal draws; typed commands run; colour; a wide character
+  and a combining accent are right; terminal queries leave no duplicate replies. **Not yet
+  checked, and needed before it can be the default:** long-press selection on the owner's phone;
+  the Samsung and Gboard keyboards on it; vim and the alternate screen; mouse; paste; resize and
+  theme; reconnect and Rex restart; the key row's latched modifiers (they act on wterm's soft
+  text input through `applyLatched`, which is untested there); scrollback and the history cap.
+
 ## Not verified, and limits
 
 - **Real devices with this build.** Everything above was Chrome on the Mac. Still to try on the
