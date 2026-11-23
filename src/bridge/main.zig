@@ -207,9 +207,21 @@ fn checkUploadDir(arena: std.mem.Allocator, io: Io, path: []const u8) !void {
     if (st.kind != .directory) return error.NotADirectory;
     if (@intFromEnum(st.permissions) & 0o077 != 0) return error.TooOpen;
     const path_z = try std.fmt.allocPrintSentinel(arena, "{s}", .{path}, 0);
-    var sb: std.c.Stat = undefined;
-    if (std.c.stat(path_z, &sb) != 0) return error.FileNotFound;
-    if (sb.uid != std.c.getuid()) return error.NotOwned;
+    if ((try fileUid(path_z)) != std.c.getuid()) return error.NotOwned;
+}
+
+/// The user id that owns `path`. (`Io.File.Stat` has no owner, and the C `stat` differs by system.)
+fn fileUid(path_z: [:0]const u8) error{FileNotFound}!u32 {
+    if (builtin.os.tag == .linux) {
+        var stx: std.os.linux.Statx = undefined;
+        const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, path_z.ptr, 0, .{ .UID = true }, &stx);
+        if (std.os.linux.errno(rc) != .SUCCESS) return error.FileNotFound;
+        return stx.uid;
+    } else {
+        var sb: std.c.Stat = undefined;
+        if (std.c.stat(path_z, &sb) != 0) return error.FileNotFound;
+        return sb.uid;
+    }
 }
 
 const SecretError = error{ TooOpen, NotOwned, TooShort, BadCharacters, FileNotFound, OutOfMemory } || Io.Dir.ReadFileAllocError || Io.Dir.StatFileError;
@@ -225,9 +237,7 @@ fn readSecretFile(arena: std.mem.Allocator, io: Io, path: []const u8, min_len: u
     const st = try Io.Dir.cwd().statFile(io, path, .{});
     if (@intFromEnum(st.permissions) & 0o077 != 0) return error.TooOpen;
     const path_z = try std.fmt.allocPrintSentinel(arena, "{s}", .{path}, 0);
-    var sb: std.c.Stat = undefined;
-    if (std.c.stat(path_z, &sb) != 0) return error.FileNotFound;
-    if (sb.uid != std.c.getuid()) return error.NotOwned;
+    if ((try fileUid(path_z)) != std.c.getuid()) return error.NotOwned;
     const raw = try Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4096));
     const text = std.mem.trim(u8, raw, " \t\r\n");
     if (text.len < min_len) return error.TooShort;
