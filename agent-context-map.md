@@ -3,6 +3,27 @@
 Last updated: 2026-11-23 (desktop-mac). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
+## Handover (2026-11-23): the week of daily use has started
+
+**Read this first when resuming.** The owner is now using only Rex and rweb for a week (herdr sessions closed;
+see `setup-repo` task `rex-multiplexer-rollout` and `work-rweb-deployment`). This assistant session is expected
+to resume **inside a Rex session**, so:
+
+- **Never** stop or restart the Rex server (`rex server stop`, restarting Rex.app), close or kill the session you
+  are running in, resize it, or touch any session that is not yours. Test sessions: name them `rweb-test-…`,
+  close them when done. Restarting the *bridge* (`launchctl kickstart`, `systemctl --user restart rweb`) does
+  not end Rex sessions and is safe.
+- State: both hosts serve rweb at `https://<host>.example.ts.net:12443/` (linux-box on a unix
+  socket, desktop-mac on loopback plus secret), started by the `rweb` setup-repo module; file transfer is on.
+  Everything is committed and pushed (rweb and setup-repo). Phases 0 to 4 are done
+  ([docs/phase4-result.md](docs/phase4-result.md)); the week is Phase 3's exit and is the owner's to judge.
+- **Pending:** one reboot check of linux-box on the unix-socket setup (`rweb-serve status`, the address,
+  `journalctl --user -u rweb -b`), to be recorded as an action in setup-repo. Skipped by the owner: a link
+  between the two hosts' pages. Paused: a folder allow-list for downloads.
+- If the owner reports a problem: ask for `rweb-serve status` plus `journalctl --user -u rweb -n 30`
+  (linux-box) or `tail -30 ~/Library/Logs/rweb.log` (desktop-mac). Update path: `setup-repo` runbook
+  `docs/runbooks/rweb.md`, "Update". Do not apply the module or change Serve without the owner's go-ahead.
+
 ## Handover (2026-11-22), picked up on desktop-mac
 
 Phase 0 is finished and pushed. Phase 1 is in progress, steps 1 to 9 done: **Phase 1 exit met** (2026-11-22). The owner's grant for
