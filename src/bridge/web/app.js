@@ -289,6 +289,7 @@ function handleMessage(m) {
     case 'notice': notice(m.msg); break;
     case 'error': notice(m.for === 'manage' || m.for === 'input' ? m.msg : `${m.for}: ${m.msg}`); break;
     case 'text': openCopy(m.text, m.truncated); break;
+    case 'clip': if (m.text) openCopy(m.text, false); else notice('Nothing has been copied by a program in this terminal yet.'); break;
     case 'pong': break;
   }
 }
@@ -352,8 +353,11 @@ function renderCrumb() {
   if (info) {
     const n = info.s.blocks.length, i = info.s.blocks.findIndex(b => b.id === state.current.block) + 1;
     $('crumb-count').textContent = n > 1 ? ` ${i}/${n}` : '';
+    let prevWin = null;
     info.s.blocks.forEach(b => {
       const t = el('button', '', b.label);
+      if (prevWin !== null && b.window !== prevWin) t.classList.add('newwin');   // a different Rex window starts here
+      prevWin = b.window;
       if (b.id === state.current.block) t.setAttribute('aria-current', 'true');
       t.onclick = () => openBlock(info.s.id, b.id);
       tabs.append(t);
@@ -470,6 +474,7 @@ function item(pop, text, on, id) { const b = el('button', '', text); b.setAttrib
 
 $('more').onclick = () => openPop($('more'), pop => {
   item(pop, 'Copy text…', () => { closePop(); requestCopy(); }, 'pop-copy').disabled = !state.current;
+  item(pop, 'Copied by a program…', () => { closePop(); try { term.blur(); } catch {} send({t: 'clip'}); }, 'pop-clip').disabled = !state.current;
   item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !state.current || state.observe;
   item(pop, 'Clear screen', () => { closePop(); send({t: 'term_action', action: 'clear'}); }).disabled = !state.current || state.observe;
   item(pop, 'Reset terminal…', async () => { closePop(); if (await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'})) send({t: 'term_action', action: 'reset'}); }).disabled = !state.current || state.observe;

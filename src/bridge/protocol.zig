@@ -48,6 +48,8 @@ pub const Msg = union(enum) {
     text,
     /// Title, folder, program and listening ports of the open terminal, for the page's header.
     info,
+    /// The newest text a program in the terminal copied (OSC 52).
+    clip,
     /// `clear` or `reset` the open terminal.
     term_action: enum { clear, reset },
     observe: bool,
@@ -82,6 +84,7 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (eql(u8, t, "more_history")) return .more_history;
     if (eql(u8, t, "text")) return .text;
     if (eql(u8, t, "info")) return .info;
+    if (eql(u8, t, "clip")) return .clip;
     if (eql(u8, t, "term_action")) {
         const a = try str(o, "action", 16);
         if (eql(u8, a, "clear")) return .{ .term_action = .clear };

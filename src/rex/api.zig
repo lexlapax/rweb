@@ -309,6 +309,22 @@ pub const Api = struct {
         res.deinit();
     }
 
+    /// The newest text a program in the terminal copied (up to 48 KiB), or null if nothing was copied.
+    pub fn clipboard(a: *Api, sid: []const u8, bid: []const u8) Error!?Owned([]const u8) {
+        const body = try a.blockBody(sid, bid, ",\"args\":{}");
+        defer a.gpa.free(body);
+        var res = a.run("com.superlogical.terminal.clipboard_read", body) catch |e| {
+            if (e == error.RexError) return null; // not_found: nothing copied yet
+            return e;
+        };
+        defer res.deinit();
+        var arena = std.heap.ArenaAllocator.init(a.gpa);
+        errdefer arena.deinit();
+        const data = optStr(res.value, "data") orelse return null;
+        const value = try dupe(arena.allocator(), data);
+        return .{ .arena = arena, .value = value };
+    }
+
     /// What a terminal is showing the person: its title, working directory, foreground program and
     /// listening ports. Each piece is optional; a piece Rex can't give is left out.
     pub const TermInfo = struct { state: ?[]const u8 = null, status_msg: ?[]const u8 = null, progress: ?i64 = null, title: ?[]const u8 = null, pwd: ?[]const u8 = null, program: ?[]const u8 = null, exit_code: ?i64 = null, ports: []const u16 = &.{} };

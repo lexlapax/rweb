@@ -199,3 +199,5 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 .sdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--dim); }
 .sdot.working { background: var(--accent); } .sdot.blocked { background: var(--warn); } .sdot.error { background: var(--bad); } .sdot.done { background: var(--good); }
 @media (prefers-reduced-motion: no-preference) { .sdot.working { animation: pulse 1.2s ease-in-out infinite; } @keyframes pulse { 50% { opacity: .35; } } }
+#tabs button.newwin { margin-left: 6px; position: relative; }
+#tabs button.newwin::before { content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 1px; background: var(--line); }

@@ -356,6 +356,20 @@ pub const Hub = struct {
             .dbg => {},
             .text => h.sendText(v),
             .info => h.sendInfo(v),
+            .clip => {
+                v.mu.lockUncancelable(h.io);
+                const t = v.term;
+                v.mu.unlock(h.io);
+                const term = t orelse return h.refuse(v, "clip", "no terminal open");
+                h.api_mu.lockUncancelable(h.io);
+                const got = h.api.clipboard(term.session_id, term.block_id);
+                h.api_mu.unlock(h.io);
+                var res = (got catch |e| return h.fail(v, "clip", e)) orelse return v.pushText("{\"t\":\"clip\",\"text\":null}");
+                defer res.deinit();
+                const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "clip", .text = res.value }, .{}) catch return;
+                defer h.gpa.free(out);
+                v.pushText(out);
+            },
             .term_action => |act| {
                 if (h.isObserving(v)) return h.refuse(v, "term_action", "read-only");
                 v.mu.lockUncancelable(h.io);
