@@ -643,15 +643,15 @@ async function doPaste() {
   K.ROW_MAIN.forEach(k => make(k, main));
   const toggle = el('button', '', '⌃'); toggle.setAttribute('aria-label', 'More keys'); toggle.setAttribute('aria-expanded', 'false');
   toggle.onpointerdown = e => { e.preventDefault(); const open = $('keys-more').hidden; $('keys-more').hidden = !open; toggle.setAttribute('aria-expanded', String(open)); toggle.textContent = open ? '⌄' : '⌃'; $('keys').classList.toggle('expanded', open);
-    // Expanded, Esc and Tab join the symbols row so the modifiers row fits beside the arrow pad.
-    const et = [...$('keys').querySelectorAll('button')].filter(b => b._k && (b._k.key === 'escape' || b._k.key === 'tab'));
-    if (open) more.prepend(...et); else main.prepend(...et);
     requestAnimationFrame(layout); };
   // The arrows and the toggle sit in one pad: in a line when collapsed, an inverted T when expanded.
   const pad = el('div', 'pad'); pad.id = 'keys-pad';
   const pos = {'↑': 'up', '↓': 'down', '←': 'left', '→': 'right'};
   for (const b of [...main.querySelectorAll('button')]) if (pos[b.textContent]) { b.dataset.pos = pos[b.textContent]; pad.append(b); }
-  toggle.dataset.pos = 'toggle'; pad.append(toggle); main.append(pad);
+  toggle.dataset.pos = 'toggle'; pad.append(toggle);
+  // The modifier keys get their own box so the expanded bar can put them beside the arrow pad.
+  const mods = el('div', ''); mods.id = 'keys-mods'; mods.append(...main.querySelectorAll(':scope > button'));
+  main.append(mods, pad);
   K.ROW_MORE.forEach(k => make(k, more));
   const paste = el('button', '', 'Paste'); paste.onpointerdown = e => { e.preventDefault(); doPaste(); }; more.append(paste);
 })();

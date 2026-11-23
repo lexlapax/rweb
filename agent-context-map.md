@@ -261,3 +261,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Drawer restyled to match the header and tab strip (flat rows, borderless 28px icon buttons, accent "New session", current terminal highlighted with an accent bar). Checked in Chrome at phone width only.
 
 - Collapsed key bar is one line that scrolls sideways with the ^ button pinned at the right; the clipboard menu item is now "Text copied in the terminal…" with a one-line explanation. Checked in Chrome at 360px width.
+
+- Expanded key bar is three rows: a full-width extras strip that scrolls sideways, then the modifiers beside an inverted-T arrow pad with the collapse button in its corner. Collapse returns to the single scrolling line. Checked in Chrome at phone width.

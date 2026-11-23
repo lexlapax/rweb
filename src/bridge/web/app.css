@@ -150,15 +150,6 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #keys-pad { display: contents; }
 #keys-pad [data-pos="up"] { order: 1; } #keys-pad [data-pos="down"] { order: 2; } #keys-pad [data-pos="left"] { order: 3; }
 #keys-pad [data-pos="right"] { order: 4; } #keys-pad [data-pos="toggle"] { order: 5; }
-#keys.expanded { position: relative; }
-#keys.expanded #keys-more, #keys.expanded #keys-main { margin-right: 148px; }
-#keys.expanded #keys-pad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: 36px 36px; gap: 4px; position: absolute; right: 8px; bottom: 2px; }
-#keys.expanded #keys-pad button { order: 0; }
-#keys.expanded [data-pos="toggle"] { grid-column: 3; grid-row: 1; }
-#keys.expanded [data-pos="up"] { grid-column: 2; grid-row: 1; }
-#keys.expanded [data-pos="left"] { grid-column: 1; grid-row: 2; }
-#keys.expanded [data-pos="down"] { grid-column: 2; grid-row: 2; }
-#keys.expanded [data-pos="right"] { grid-column: 3; grid-row: 2; }
 
 /* The menus drop down from their button (top right for the ⋯ menu). */
 .pop { max-height: calc(var(--vh) - 64px); overflow-y: auto; min-width: 240px; padding: 4px; }
@@ -228,3 +219,23 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #keys:not(.expanded) #keys-main::-webkit-scrollbar { display: none; }
 #keys:not(.expanded) #keys-main button { flex: none; }
 #keys:not(.expanded) [data-pos="toggle"] { position: sticky; right: 0; background: var(--panel); box-shadow: -8px 0 8px var(--panel); }
+
+
+/* Expanded key bar, three rows in all:
+     extras .......................... (one line, scrolls sideways)
+     Esc Tab ^C Ctrl Alt         [ ]  ↑  [^]
+     Shift Enter                  ←  ↓  →
+   The arrows form an inverted T and the collapse button sits in the corner above →. */
+#keys-mods { display: contents; }
+#keys.expanded #keys-more { display: flex !important; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0; }
+#keys.expanded #keys-more::-webkit-scrollbar { display: none; }
+#keys.expanded #keys-more button { flex: none; }
+#keys.expanded #keys-main { display: grid; grid-template-columns: 1fr 140px; column-gap: 4px; align-items: start; margin: 0; }
+#keys.expanded #keys-mods { display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start; }
+#keys.expanded #keys-pad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: 36px 36px; gap: 4px; justify-self: end; }
+#keys.expanded #keys-pad button { order: 0; }
+#keys.expanded [data-pos="toggle"] { grid-column: 3; grid-row: 1; }
+#keys.expanded [data-pos="up"] { grid-column: 2; grid-row: 1; }
+#keys.expanded [data-pos="left"] { grid-column: 1; grid-row: 2; }
+#keys.expanded [data-pos="down"] { grid-column: 2; grid-row: 2; }
+#keys.expanded [data-pos="right"] { grid-column: 3; grid-row: 2; }
