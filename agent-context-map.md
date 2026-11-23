@@ -125,9 +125,9 @@ default, plus a bridge-wide locked `--observe-only`. Built: `access.zig`, `proto
 [docs/phase2-result.md](docs/phase2-result.md). Checked on desktop-mac in Chrome, through Serve
 port 11443 (each refusal shown), and on the owner's Android tablet (Samsung Keyboard and Gboard
 both work); linux-box ran the full suite including live tests. Phone typing works since the owner turned off the phone Tailscale app's power saving (it had
-stalled the tailnet path; evidence in Findings 5). Test infrastructure is removed (bridge stopped,
-Serve 12443 off, `rweb-test-phone` destroyed); one harmless orphaned Serve entry for 11443 remains
-on desktop-mac until Tailscale's backend restarts. `tailscale up` there needs `--accept-routes`.
+stalled the tailnet path; evidence in Findings 5). Test infrastructure is all removed (bridge stopped,
+Serve 11443 and 12443 gone, `rweb-test-phone` destroyed, temp files deleted). `tailscale up` on
+desktop-mac needs `--accept-routes`; stop a foreground `tailscale serve` with SIGINT on its own process.
 Phone layout reworked (slide-over menu). Tip: run tests with output to a file; piping
 `zig build test` into `head` can hang. `mkdir -p .zig-cache/tmp` before `--fuzz`.
 
