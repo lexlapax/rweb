@@ -79,6 +79,12 @@ Behaviour:
   rewritten by autocorrect (`soft` to `sofa`), Enter. The page sent `e c h o ␣ DEL DEL o ␣ s o
   f t DEL a`-style edits with nothing doubled, and Rex's own capture of the shell showed
   `echo sofa` and `sofa`. A real phone is still the proof.
+- **Long-press in the terminal itself** (Ovis allows it). Cause: xterm.js's stylesheet sets
+  `user-select: none` on the whole terminal and it does mouse-only selection of its own. This page
+  uses xterm.js's DOM renderer (the screen is 24 ordinary text rows, checked), so on touch screens
+  (`pointer: coarse`) the rows are now selectable natively. Checked here that, with the rule, the
+  rows select and read back; whether a long press on the owner's phone then shows handles and
+  survives xterm's own handlers is to be confirmed.
 - **No selection handles in the Copy view** (a read-only text box first, then plain text; the
   long press showed no handles on the owner's phone in either). Backspace and the Copy all and
   Copy last 100 lines buttons were confirmed working on the phone. The Copy view now also has a

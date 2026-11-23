@@ -101,3 +101,11 @@ dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px 
 }
 @media (min-width: 901px) { #tabsel { display: none !important; } }
 @media (prefers-reduced-motion: no-preference) { .dot { transition: background .2s; } }
+
+/* xterm.js turns text selection off for the whole terminal and does its own mouse selection, which
+   has no touch equivalent. Its DOM renderer draws ordinary text rows, so on touch screens the
+   browser's own long-press selection (with handles and a Copy button) can be used on them. */
+@media (pointer: coarse) {
+  .xterm .xterm-rows { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+  .xterm .xterm-rows > div { cursor: text; }
+}
