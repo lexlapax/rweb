@@ -85,7 +85,12 @@ Behaviour:
   selection the page makes itself, which needs no OS handles: tap a line to start, tap another to
   select down or up to it, then "Copy N lines" (and Clear, and Share… where the browser has it).
   Copying falls back to the old `execCommand` way. Checked in Chrome on 40 numbered lines: start,
-  extend down, extend up, clear, and the button label.
+  extend down, extend up, clear, and the button label. The owner's phone showed no handles on
+  long press even so, so there is also a **Use handles** button: it makes the text editable but
+  locked (no keyboard, `inputmode=none`; paste, cut, drop and typing are blocked, and any change
+  that gets through is undone), because Chrome on Android shows selection handles on editable
+  text more reliably than on plain text. Checked in Chrome that the lock holds against scripted
+  inserts and deletes; whether handles then appear on the owner's phone is not yet known.
 - Paste was not tried yet.
 
 ## Not verified, and limits

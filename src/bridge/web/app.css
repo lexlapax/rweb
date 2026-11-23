@@ -78,6 +78,8 @@ dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px 
 .copy-head h2 { margin: 0; }
 #copytext { flex: 1; margin: 0; padding: 4px 0; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; font: 13px/1.35 ui-monospace, Menlo, Consolas, monospace; overflow: auto; -webkit-user-select: text; user-select: text; touch-action: pan-x pan-y; }
 #copytext .ln { white-space: pre; padding: 1px 8px; min-height: 1.35em; cursor: pointer; }
+#copytext.native { -webkit-user-select: text; user-select: text; caret-color: transparent; outline: none; }
+#copytext.native .ln { cursor: text; }
 #copytext .ln.sel { background: #24456e; }
 #copytext .ln.mark { box-shadow: inset 3px 0 0 var(--accent); }
 #copy-help { margin: 0 0 6px; font-size: 13px; flex: none; }

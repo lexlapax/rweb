@@ -422,7 +422,7 @@ async function confirmAction({title, message, ok}) {
 
 // ---- copy and paste ----
 function requestCopy() { send({t: 'text'}); }
-let copyFull = '', copyLines = [], copySel = null;
+let copyFull = '', copyLines = [], copySel = null, copyNative = false;
 function copyToClipboard(text) {
   // The clipboard API needs a secure page and a user action; the old way is the fallback.
   const old = () => new Promise((ok, no) => {
@@ -449,11 +449,31 @@ function renderCopySelection() {
 function openCopy(text, truncated) {
   const dlg = $('copydlg'), box = $('copytext');
   copyFull = text; copyLines = text.split('\n'); copySel = null;
-  box.replaceChildren();
-  const frag = document.createDocumentFragment();
-  copyLines.forEach((l, i) => { const d = document.createElement('div'); d.className = 'ln'; d.dataset.i = i; d.textContent = l === '' ? ' ' : l; frag.append(d); });
-  box.append(frag);
-  box.onclick = e => { const row = e.target.closest('.ln'); if (!row) return; copySel = K.tapLine(copySel, Number(row.dataset.i)); renderCopySelection(); };
+  const build = () => {
+    box.replaceChildren();
+    const frag = document.createDocumentFragment();
+    copyLines.forEach((l, i) => { const d = document.createElement('div'); d.className = 'ln'; d.dataset.i = i; d.textContent = l === '' ? ' ' : l; frag.append(d); });
+    box.append(frag);
+    renderCopySelection();
+  };
+  build();
+  // "Use handles": the text becomes editable but locked (no edits, no keyboard), because Chrome on
+  // Android reliably shows its selection handles and toolbar on editable text and not always on plain text.
+  const setNative = on => {
+    copyNative = on; box.contentEditable = on ? 'true' : 'false'; box.classList.toggle('native', on);
+    box.setAttribute('inputmode', 'none'); box.setAttribute('spellcheck', 'false'); box.setAttribute('autocapitalize', 'off'); box.setAttribute('autocorrect', 'off');
+    $('copy-native').setAttribute('aria-pressed', String(on)); $('copy-native').textContent = on ? 'Tap lines instead' : 'Use handles';
+    if (on) { copySel = null; renderCopySelection(); $('copy-help').textContent = 'Long-press a word, then drag the handles. Your device\u2019s own Copy button appears above the selection.'; }
+  };
+  // Locked: nothing can be typed, pasted, cut or dropped, and if anything gets through anyway the
+  // original text is put back.
+  box.onbeforeinput = e => e.preventDefault();
+  box.onpaste = box.oncut = box.ondrop = e => e.preventDefault();
+  box.oninput = () => { if (box.textContent !== copyLines.map(l => l === '' ? ' ' : l).join('')) { build(); if (copyNative) box.focus(); } };
+  box.onkeydown = e => { if (copyNative && !(e.ctrlKey || e.metaKey) && e.key.length === 1) e.preventDefault(); };
+  $('copy-native').onclick = () => setNative(!copyNative);
+  setNative(false);
+  box.onclick = e => { if (copyNative) return; const row = e.target.closest('.ln'); if (!row) return; copySel = K.tapLine(copySel, Number(row.dataset.i)); renderCopySelection(); };
   $('copy-note').textContent = truncated ? 'Showing the end of a long history.' : '';
   const done = what => () => notice(what), fail = () => notice('Could not copy: your browser refused');
   $('copy-all').onclick = () => copyToClipboard(copyFull).then(done('Copied everything'), fail);
