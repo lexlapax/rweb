@@ -117,9 +117,10 @@ asks `tailscale ip`, and refuses to start if that fails.
 - The phone depends on its power settings: with the Tailscale app power-saving on, its tailnet
   path stalls for tens of seconds. The page now copes (reconnect within 8 s, no typing into a
   dead link) but cannot make a sleeping phone fast.
-- On desktop-mac a leftover, harmless entry for the old temporary Serve port 11443 remains in
-  Tailscale (it answers 502); it goes away when the Tailscale backend restarts. After a
-  `tailscale down`, bring desktop-mac back with `tailscale up --accept-routes` (plain `up` refuses).
+- After a `tailscale down` on desktop-mac, bring it back with `tailscale up --accept-routes` (plain
+  `up` refuses). A temporary `tailscale serve` started in the foreground must be stopped by its
+  own process (SIGINT), not by killing a wrapper: the binary is `Tailscale` (capital T) on macOS,
+  so a lowercase `pkill -f` pattern missed it and left the port-11443 entry alive for hours.
 - A fuzz campaign beyond the 90-second smoke runs; the browser protocol and access decision are
   fuzz targets (`zig build fuzz --fuzz`).
 - Own pings from the bridge to Rex; the bridge pings browsers every ~20 s.
