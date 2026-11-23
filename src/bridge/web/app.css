@@ -127,3 +127,21 @@ dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px 
 
 /* The terminal uses the same neutral dark colours as Ovis; Rex's own theme is used only if turned on in the menu. */
 #term.rweb-wterm { --term-bg: #181818; --term-fg: #ececec; --term-cursor: #ececec; }
+
+/* Ovis's measurements (read from its phone layout): 14px text, 44px borderless icon buttons in the
+   top bar, a 36px-high key bar with 44px-wide transparent keys, 4px gaps, left-aligned. */
+html, body { font-size: 14px; }
+button { min-height: 0; padding: 0 8px; font-size: 14px; }
+#bar { height: 52px; padding: 4px 8px; gap: 8px; }
+#bar button.icon { width: 44px; height: 44px; min-width: 44px; padding: 0; border: 1px solid transparent; background: none; border-radius: 8px; font-size: 18px; }
+#bar button#tabsel { border: 0; background: none; color: #a3a3a3; font-weight: 600; height: 44px; padding: 0 4px; }
+#crumb { font-size: 14px; font-weight: 600; }
+#keys { padding: 2px 8px; gap: 4px; border-top: 1px solid var(--line); }
+#keys-main, #keys-more { gap: 4px; flex-wrap: wrap; justify-content: flex-start; }
+#keys button { flex: none; width: 44px; height: 36px; min-width: 0; padding: 0 4px; background: none; border: 1px solid var(--line); border-radius: 6px; font: 13px ui-monospace, "JetBrains Mono", Menlo, monospace; }
+#keys button[data-w="wide"] { width: 49px; }
+#keys button[aria-pressed="true"] { background: var(--warn); color: #000; }
+#keys-more button { flex: none; }
+.pop.sheet button { min-height: 44px; font-size: 14px; padding: 0 12px; }
+.pop .sheet-title { font-size: 14px; }
+.pop .sheet-title small { font-size: 12px; }

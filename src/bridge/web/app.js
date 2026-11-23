@@ -578,6 +578,7 @@ async function doPaste() {
   const main = $('keys-main'), more = $('keys-more');
   const make = (k, parent) => {
     const b = el('button', '', k.label);
+    if (k.label.length >= 5) b.dataset.w = 'wide';
     if (k.title) { b.title = k.title; b.setAttribute('aria-label', k.title); }
     if (k.latch) { b.dataset.latch = k.latch; b.setAttribute('aria-pressed', 'false'); }
     b._k = k; parent.append(b);

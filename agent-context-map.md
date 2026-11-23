@@ -243,3 +243,5 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - Ovis look (wterm): menus are bottom sheets with a title and Cancel on narrow screens; header shows the session name with the 1/N switcher; colours are Ovis's neutral dark (#181818 page, #ececec text, #1f1f1f bar, #2e2e2e lines, 6px buttons) and Rex's own colours are ignored unless "Use Rex colours" is on in the menu. Checked in Chrome at phone width only.
 
 - Auto-fit loop fix: each device asks Rex for a size only when its own screen/font changes or a terminal is opened, never in reply to a size change by another device (owner saw the phone blink with the tablet also open). Not verified on the phone.
+
+- Layout sizes now taken from Ovis's own phone layout (measured in its page): 14px text, 52px header with 44px borderless icon buttons, key bar #1f1f1f with 44x36 (49 wide for Shift/Enter) transparent keys, 13px monospace, 4px gaps, left-aligned, 6px radius. Checked in Chrome at phone width only.
