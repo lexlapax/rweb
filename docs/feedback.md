@@ -6,7 +6,7 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
 
 | # | Date | Area | Feedback | Status |
 | --- | --- | --- | --- | --- |
-| 1 | 2026-11-23 | Key bar | In the bottom pane's bottom row (the key bar), **Enter should be the first button**. | open |
+| 1 | 2026-11-23 | Key bar | In the bottom pane's bottom row (the key bar), **Enter should be the first button**. | done 2026-11-25 (`web: Enter first in the key bar`) |
 | 2 | 2026-11-23 | Phone, terminal | On the phone, **the terminal cannot be scrolled up** (to see earlier output). | open |
 
 ## Details
@@ -18,6 +18,12 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
   the arrow pad, Shift and Enter 49 px wide) may need to follow the new order.
 - Check at phone width, collapsed (one scrolling line, so Enter must be visible without scrolling) and
   expanded.
+- Done 2026-11-25: Enter is first in `ROW_MAIN` (collapsed bar: Enter, Esc, Tab, ^C, Ctrl, Alt, Shift, arrows).
+  Expanded, Enter starts the bar's bottom row (Enter, Shift, Home, End, Paste; above it Esc, Tab, ^C, Ctrl,
+  Alt) by a grid placement in `app.css`. Checked in Chrome at phone width on laptop-mac (Rex preview.23)
+  against a throwaway `rweb-test-keys` session: both layouts, collapse restores the order, and the Enter
+  button ran a typed `echo`. `zig build test` 139 pass + 9 skip (no live), `web-test` 14 pass. Not yet
+  on the phone; reaches the hosts with the next setup-repo pin bump.
 
 ### 2. No scrolling up on the phone
 

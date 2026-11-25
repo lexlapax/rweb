@@ -5,7 +5,7 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## 2026-11-25: next work agreed
 
-Order: feedback items 1 and 2 ([docs/feedback.md](docs/feedback.md)); the name (external
+Item 1 (Enter first) done and checked in Chrome on laptop-mac, not deployed (needs a setup-repo pin bump). Order: feedback items 1 and 2 ([docs/feedback.md](docs/feedback.md)); the name (external
 research running in a web sandbox, not decided); then Phase 5 (release builds for the owner's
 machines) and Phase 6 (distribution to other people, behind Superlogical's answer, a licence and a
 cleaned public repo). Owner's decision: distribution means both. See [docs/PLAN.md](docs/PLAN.md#phase-5-release-builds-for-the-owners-machines).
@@ -24,7 +24,7 @@ to resume **inside a Rex session**, so:
   socket, desktop-mac on loopback plus secret), started by the `rweb` setup-repo module; file transfer is on.
   Everything is committed and pushed (rweb and setup-repo). Phases 0 to 4 are done
   ([docs/phase4-result.md](docs/phase4-result.md)); the week is Phase 3's exit and is the owner's to judge.
-- **Feedback log (2026-11-23):** the owner's notes from daily use go in [docs/feedback.md](docs/feedback.md). Open, not built: 1 Enter first in the key bar; 2 no scrolling up on the phone. Add new items there; do not act on them until asked.
+- **Feedback log (2026-11-23):** the owner's notes from daily use go in [docs/feedback.md](docs/feedback.md). 1 Enter first: done 2026-11-25, not deployed. 2 no scrolling up on the phone: open. Add new items there; do not act on them until asked.
 - **Pending:** one reboot check of linux-box on the unix-socket setup (`rweb-serve status`, the address,
   `journalctl --user -u rweb -b`), to be recorded as an action in setup-repo. Skipped by the owner: a link
   between the two hosts' pages. Paused: a folder allow-list for downloads.

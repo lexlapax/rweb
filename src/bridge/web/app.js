@@ -654,6 +654,7 @@ async function doPaste() {
     if (k.label.length >= 5) b.dataset.w = 'wide';
     if (k.title) { b.title = k.title; b.setAttribute('aria-label', k.title); }
     if (k.latch) { b.dataset.latch = k.latch; b.setAttribute('aria-pressed', 'false'); }
+    if (k.key === 'enter') b.dataset.enter = '';
     b._k = k; parent.append(b);
   };
   K.ROW_MAIN.forEach(k => make(k, main));

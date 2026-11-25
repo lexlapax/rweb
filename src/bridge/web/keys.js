@@ -50,14 +50,15 @@
 
   // The bottom key row. `latch` keys toggle a modifier; `key` keys send a physical key; `text` keys
   // send text; `repeat` keys repeat while held.
+  // Enter comes first so it shows without scrolling the one-line bar (feedback 1).
   const ROW_MAIN = [
+    {label: 'Enter', key: 'enter'},
     {label: 'Esc', key: 'escape'},
     {label: 'Tab', key: 'tab'},
     {label: '^C', key: 'key_c', mods: {ctrl: true}, title: 'Ctrl+C'},
     {label: 'Ctrl', latch: 'ctrl'},
     {label: 'Alt', latch: 'alt'},
     {label: 'Shift', latch: 'shift'},
-    {label: 'Enter', key: 'enter'},
     {label: '↑', key: 'arrow_up', repeat: true, title: 'Up'},
     {label: '↓', key: 'arrow_down', repeat: true, title: 'Down'},
     {label: '←', key: 'arrow_left', repeat: true, title: 'Left'},
