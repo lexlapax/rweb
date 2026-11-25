@@ -243,11 +243,14 @@ Before either: the owner's open feedback items ([feedback.md](feedback.md)) and 
    commit from `-Dcommit` or git, `unknown` in an export without either; the bridge reports the
    version to Rex). Semantic version from 0.1.0 in `build.zig.zon`, a `CHANGELOG.md`, and a
    `--version` flag printing version, commit, Ghostty pin and the Rex API revisions supported.
-2. **`zig build dist`.** Cross-builds `ReleaseSafe` binaries on one machine for macOS ARM64 and
+2. **`zig build dist`** (done 2026-11-25; Linux is static musl instead of glibc; results and the
+   reproducibility measurements in [phase5-result.md](phase5-result.md); `tools/release.sh` builds a
+   commit reproducibly). Cross-builds `ReleaseSafe` binaries on one machine for macOS ARM64 and
    Linux x86-64 (glibc, pinned version), each in `<name>-<version>-<target>.tar.gz` with the
    binary, LICENSE, third-party notices (xterm.js MIT, wterm Apache-2.0, Ghostty MIT,
    libghostty-vt's C++ libraries) and a README, plus `SHA256SUMS`.
-3. **Prove it.** The Linux artifact runs on linux-box with the full test suite, live tests
+3. **Prove it** (done 2026-11-25, see phase5-result.md; byte equality holds on one machine at one path,
+   not across machines with different Zig builds). The Linux artifact runs on linux-box with the full test suite, live tests
    included; two builds of the same commit are compared for byte equality.
 4. **Publish.** A GitHub Release on the private repository (the owner approves each release);
    hosts fetch with `gh release download`.
