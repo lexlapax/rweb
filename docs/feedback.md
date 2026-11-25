@@ -35,3 +35,17 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
 - Owner's detail (2026-11-23): on **wterm** (the default engine), at a **shell prompt**, wanting to look
   at previous output. So it is the shell's scrollback, not the alternate screen. Not yet reproduced here;
   the xterm.js fallback is untested for this.
+- Investigated 2026-11-25 on laptop-mac (Rex preview.23), throwaway `rweb-test-keys` with 300 lines of
+  output; **not reproduced**:
+  - wterm scrolls its own element (`#term`, `overflow-y: auto`, `touch-action: auto` up the chain); it has
+    no touch handlers that block scrolling, and on touch screens its input box is one cell.
+  - History survives the phone's resize path: with "Fit Rex to this screen" on and the window shrunk as a
+    keyboard would, Rex went to 59x12 and the browser kept its scrollback (redraws carry up to 1,000 lines).
+  - Desktop wheel scrolling works, and the position holds while the cursor blinks and `info` polls.
+  - A separate headless Chrome (loopback debugging port) emulating a phone (touch, `pointer: coarse`):
+    a real touch drag scrolled the terminal back, both with the keyboard closed and after a tap that
+    focused wterm's input box with the viewport shrunk to keyboard height.
+  - Related finding: when the screen shrinks and the page does not get Rex's size (another client owns
+    it), the view stays where it was, so the prompt can end up below the visible area until output arrives.
+  - Not covered by emulation: real Android Chrome and Gboard, the deployed build, a terminal whose size
+    the desktop Rex app owns. Next step needs the owner's phone.
