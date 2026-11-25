@@ -10,6 +10,8 @@ the Rex API revisions it speaks.
   to start there and says to pass `--owner LOGIN --allow-host NAME` (before, rweb started and refused
   everyone).
 - User guide: tagged machines.
+- Licence: MIT, the same as Ghostty and libghostty-vt; `LICENSE` is in the repository and the release
+  archives.
 
 ## 0.1.0 (not yet released)
 

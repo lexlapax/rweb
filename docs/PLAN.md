@@ -271,7 +271,8 @@ pending reboot check), recorded in setup-repo.
 Gates, all before any public step:
 
 - Superlogical's answer on third-party clients and on the name (the owner asks).
-- A licence for the project, compatible with the vendored code.
+- A licence for the project, compatible with the vendored code: **decided 2026-11-25, MIT**, the same as
+  Ghostty and libghostty-vt (owner's choice).
 - A new public repository built from a cleaned tree, not this one made public: this repository's
   history names the owner's tailnet, hosts and setup, and stays private.
 

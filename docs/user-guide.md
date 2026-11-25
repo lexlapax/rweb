@@ -35,8 +35,8 @@ mkdir -p ~/.local/bin && install -m 0755 rweb-<version>-<platform>/rweb ~/.local
 rweb --version
 ```
 
-The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README, the changelog and
-the third-party notices. `rweb --version` shows the version, the commit it was built from, and the Rex
+The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README, the changelog, the
+licence (MIT) and the third-party notices. `rweb --version` shows the version, the commit it was built from, and the Rex
 API revisions it speaks. To build from source instead: `zig build -Doptimize=ReleaseSafe` with Zig 0.17.1 (see the README).
 
 ## 3. Choose how to reach it

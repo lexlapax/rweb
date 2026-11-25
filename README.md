@@ -109,8 +109,15 @@ tools/release.sh [COMMIT]             # the same, reproducibly, from a clean exp
 | [User guide](docs/user-guide.md) | Tailscale or SSH setup, run at boot, several machines, using the page, upgrade, troubleshooting |
 | [Architecture](docs/architecture.md) | Components, diagrams, data and input paths, access checks, source layout |
 | [Changelog](CHANGELOG.md) | What changed in each version |
+| [Licence](LICENSE) | MIT |
 | [Third-party notices](THIRD-PARTY-NOTICES.md) | Software rweb contains or serves, with licences |
 | [All documents](docs/README.md) | Plan, design research, security review and test records (in the source repository) |
+
+## Licence
+
+rweb is released under the [MIT licence](LICENSE), the same licence as Ghostty and libghostty-vt, on
+which it is built. The software it contains or serves keeps its own licences:
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Status
 

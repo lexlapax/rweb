@@ -63,6 +63,11 @@ Ghostty fetched). `spike/`'s Python probes remain Linux-only (`XDG_RUNTIME_DIR`,
     (findings 12 and 13).
 - The spike is in `spike/` (throwaway; Phase 1 starts fresh). No bridge code yet.
 
+## Owner decisions (2026-11-25)
+
+- Licence: **MIT**, the same as Ghostty and libghostty-vt (`LICENSE`, in the archives from 0.1.1).
+- Release builds wait until there is more for a release; no GitHub Release before the owner says so.
+
 ## Owner decisions (2026-11-21)
 
 Recorded in [docs/PLAN.md](docs/PLAN.md#decisions-made-by-the-owner-2026-11-21):

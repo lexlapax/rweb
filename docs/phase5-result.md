@@ -21,7 +21,8 @@ version to Rex as its client version.
   licence files the uucode package omits: stored in `tools/licenses/`, fetched from uucode at the commit
   Ghostty pins, `1fb73433`), Zig's standard library, musl (Linux), xterm.js, wterm. LLVM's libc++,
   libunwind and compiler-rt are named (Apache-2.0 WITH LLVM-exception). Rerun on any pin change.
-- No rweb `LICENSE` in the archive: the project's licence is a Phase 6 gate.
+- rweb's own licence: MIT since 2026-11-25 (the owner chose Ghostty's licence); `LICENSE` is in the
+  archive from 0.1.1 on. The 0.1.0 archives on the hosts predate it.
 - The macOS binary is ad-hoc signed by the linker (`codesign -dv`: `adhoc,linker-signed`) and runs.
 
 ## Reproducibility (measured 2026-11-25)
