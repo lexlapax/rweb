@@ -69,7 +69,9 @@ Decided and done (owner, 2026-11-25): release builds are made on macOS (Apple si
 installed on laptop-mac). `tools/release.sh` builds with `zig-<minimum_zig_version>` when it is on `PATH`
 (else `zig`, with a warning), with the Zig cache at `/tmp/rweb-release/zig-cache`, and names the compiler
 in its output. Two runs for `f9aea63` (0.1.1) gave identical archives (Linux `7aff505a…`, macOS
-`00770ab8…`).
+`00770ab8…`). **Across machines:** after the fleet pull, `zig-release` was applied on desktop-mac too, and
+`tools/release.sh 5ad9b59` on laptop-mac and on desktop-mac gave byte-identical archives (Linux `3d645aea…`,
+macOS `ca1ad53b…`). A release can now be rebuilt and checked on any Apple-silicon Mac with `zig-0.17.1`.
 
 ## Step 3: prove it (done 2026-11-25)
 
