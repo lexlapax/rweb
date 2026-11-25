@@ -252,9 +252,11 @@ Before either: the owner's open feedback items ([feedback.md](feedback.md)) and 
 3. **Prove it** (done 2026-11-25, see phase5-result.md; byte equality holds on one machine at one path,
    not across machines with different Zig builds). The Linux artifact runs on linux-box with the full test suite, live tests
    included; two builds of the same commit are compared for byte equality.
-4. **Publish.** A GitHub Release on the private repository (the owner approves each release);
+4. **Publish** (not yet: on the owner's word the release binaries run on the machines first; see
+   phase5-result.md). A GitHub Release on the private repository (the owner approves each release);
    hosts fetch with `gh release download`.
-5. **setup-repo.** The pin becomes version plus SHA-256 per platform; the hook downloads,
+5. **setup-repo** (done 2026-11-25: installs the pinned archive, build fallback kept; live on laptop-mac,
+   desktop-mac and linux-box). The pin becomes version plus SHA-256 per platform; the hook downloads,
    verifies and installs, keeps the previous build for rollback, and keeps building from source
    as a fallback. The runbook's update path becomes: tag, `zig build dist`, release, bump the
    pin, apply.

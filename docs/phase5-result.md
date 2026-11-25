@@ -50,7 +50,25 @@ verified.
   with `--random-token` connected to linux-box's Rex, served `/` (200 with the token, 403 without), and was
   stopped. Temporary folders removed on both machines.
 
+## Step 5 before step 4: the release binaries run live (2026-11-25)
+
+The owner chose to run the release binaries on the machines before publishing any release.
+
+- `tools/release.sh a744ead` on laptop-mac: `rweb-0.1.0-macos-arm64.tar.gz` sha256 `97fff228…`,
+  `rweb-0.1.0-linux-x86_64.tar.gz` `3e89e9e6…`.
+- setup-repo's `rweb` module now installs a pinned release archive (version, commit and per-platform SHA-256
+  in its `release` file) from `~/.cache/rweb/releases/`, refusing an archive that does not match or a
+  binary whose `--version` is not the pinned commit; building from source remains the fallback. Tested in
+  throwaway homes on macOS and Linux (missing, tampered, real archive, rerun).
+- Applied on laptop-mac, desktop-mac and linux-box: each runs `rweb-0.1.0-a744ead64c7c` (the same binary on
+  both Macs), the previous build kept for rollback. Through Serve from laptop-mac, linux-box and desktop-mac
+  answer 200; laptop-mac's own address 403. The archives were copied to the hosts by hand (no GitHub
+  Release yet).
+
 ## Next
 
-Step 4 (a GitHub Release on the private repository, owner's approval) and step 5 (setup-repo downloads and
-verifies the archive instead of building on each host).
+- The owner tries 0.1.0 on the phone against each host.
+- Step 4: a GitHub Release `v0.1.0` from `a744ead` with the same archives, when the owner says so; then
+  the hosts can download instead of being copied to.
+- gateway-box: add the module there (it can install the Linux archive).
+- Open decision: one pinned Zig build for cross-machine reproducibility.
