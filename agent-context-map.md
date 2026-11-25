@@ -1,7 +1,14 @@
 # Agent context map
 
-Last updated: 2026-11-23 (desktop-mac). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
+Last updated: 2026-11-25 (desktop-mac). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-25: next work agreed
+
+Order: feedback items 1 and 2 ([docs/feedback.md](docs/feedback.md)); the name (external
+research running in a web sandbox, not decided); then Phase 5 (release builds for the owner's
+machines) and Phase 6 (distribution to other people, behind Superlogical's answer, a licence and a
+cleaned public repo). Owner's decision: distribution means both. See [docs/PLAN.md](docs/PLAN.md#phase-5-release-builds-for-the-owners-machines).
 
 ## Handover (2026-11-23): the week of daily use has started
 

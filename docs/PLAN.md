@@ -221,6 +221,61 @@ Status 2026-11-23: exit met for linux-box and desktop-mac; what changed from thi
 
 Exit: each machine in scope serves rweb after a reboot, recorded in setup-repo.
 
+### Owner's decision (2026-11-25): distribution means both
+
+Release builds go first to the owner's own machines (Phase 5), then to other people (Phase 6).
+Before either: the owner's open feedback items ([feedback.md](feedback.md)) and the name.
+
+### Phase 5: release builds for the owner's machines
+
+0. **Name.** Settle the name before the first versioned release, from external research
+   (collisions in Homebrew, Arch/AUR, Debian, crates.io, npm, PyPI and GitHub; Rex trademark;
+   short, easy to type and remember). A rename touches the repo, binary, setup-repo module, unit and
+   LaunchAgent names, config paths, browser storage keys, the `rweb-test-` rule and atlas; plan
+   it as one change with a migration of both live hosts.
+1. **Version.** Semantic version from 0.1.0 in `build.zig.zon`, a `CHANGELOG.md`, and a
+   `--version` flag printing version, commit, Ghostty pin and the Rex API revisions supported.
+2. **`zig build dist`.** Cross-builds `ReleaseSafe` binaries on one machine for macOS ARM64 and
+   Linux x86-64 (glibc, pinned version), each in `<name>-<version>-<target>.tar.gz` with the
+   binary, LICENSE, third-party notices (xterm.js MIT, wterm Apache-2.0, Ghostty MIT,
+   libghostty-vt's C++ libraries) and a README, plus `SHA256SUMS`.
+3. **Prove it.** The Linux artifact runs on linux-box with the full test suite, live tests
+   included; two builds of the same commit are compared for byte equality.
+4. **Publish.** A GitHub Release on the private repository (the owner approves each release);
+   hosts fetch with `gh release download`.
+5. **setup-repo.** The pin becomes version plus SHA-256 per platform; the hook downloads,
+   verifies and installs, keeps the previous build for rollback, and keeps building from source
+   as a fallback. The runbook's update path becomes: tag, `zig build dist`, release, bump the
+   pin, apply.
+
+Exit: both hosts run the released artifact and serve it after a reboot (this includes linux-box's
+pending reboot check), recorded in setup-repo.
+
+### Phase 6: distribution to other people
+
+Gates, all before any public step:
+
+- Superlogical's answer on third-party clients and on the name (the owner asks).
+- A licence for the project, compatible with the vendored code.
+- A new public repository built from a cleaned tree, not this one made public: this repository's
+  history names the owner's tailnet, hosts and setup, and stays private.
+
+Then:
+
+1. **Generalise.** A config file instead of owner-specific flags (owner login, tailnet,
+   listen mode); a `doctor` command that checks Rex's socket, Tailscale, Serve and permissions;
+   docs for setting up Tailscale Serve on Linux and macOS. Single user per install and
+   tailnet-only stay as they are.
+2. **Security review again** for other people's setups (no owner-specific assumptions left).
+3. **Channels.** A Homebrew formula (a tap; building from source avoids notarization, prebuilt
+   macOS binaries would need signing and notarization), a Linux tarball with a systemd user unit,
+   and an AUR package.
+4. **Release process.** Tagged releases with checksums and notes; a stated Rex
+   version/revision support range.
+
+Exit: someone else installs it from a published channel on Linux and macOS and reaches their own
+Rex from a phone, following only the docs.
+
 ### Later, not planned in detail
 
 - Draw a Rex window's split layout.
