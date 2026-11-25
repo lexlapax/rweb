@@ -49,3 +49,8 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
     it), the view stays where it was, so the prompt can end up below the visible area until output arrives.
   - Not covered by emulation: real Android Chrome and Gboard, the deployed build, a terminal whose size
     the desktop Rex app owns. Next step needs the owner's phone.
+- 2026-11-25: touch diagnostics added for the live test (`web/diag.js`, ⋯ menu "Touch diagnostics", off by
+  default, `rweb.diag`): passive listeners only, a panel that ignores the pointer, showing the touched
+  element and its parents, whether touchstart/touchmove were cancelled, `pointercancel` (the browser took
+  the gesture), scroll events on the terminal and the page, and the terminal's scroll numbers. Checked in
+  the emulated phone: a working drag shows `pointercancel 1` and terminal scroll events.

@@ -24,7 +24,7 @@ to resume **inside a Rex session**, so:
   socket, desktop-mac on loopback plus secret), started by the `rweb` setup-repo module; file transfer is on.
   Everything is committed and pushed (rweb and setup-repo). Phases 0 to 4 are done
   ([docs/phase4-result.md](docs/phase4-result.md)); the week is Phase 3's exit and is the owner's to judge.
-- **Feedback log (2026-11-23):** the owner's notes from daily use go in [docs/feedback.md](docs/feedback.md). 1 Enter first: done 2026-11-25, not deployed. 2 no scrolling up on the phone: open, not reproduced in desktop or emulated-phone Chrome (details in feedback.md); needs the owner's phone. Add new items there; do not act on them until asked.
+- **Feedback log (2026-11-23):** the owner's notes from daily use go in [docs/feedback.md](docs/feedback.md). 1 Enter first: done 2026-11-25, not deployed. 2 no scrolling up on the phone: open, not reproduced in desktop or emulated-phone Chrome (details in feedback.md); needs the owner's phone; touch diagnostics in the ⋯ menu are built for that live test. Add new items there; do not act on them until asked.
 - **Pending:** one reboot check of linux-box on the unix-socket setup (`rweb-serve status`, the address,
   `journalctl --user -u rweb -b`), to be recorded as an action in setup-repo. Skipped by the owner: a link
   between the two hosts' pages. Paused: a folder allow-list for downloads.

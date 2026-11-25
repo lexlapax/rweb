@@ -511,6 +511,7 @@ $('more').onclick = () => openPop($('more'), pop => {
     if (d && await confirmAction({title: 'Resize the terminal?', message: `Resize it to ${d.cols} × ${d.rows}. It changes for everyone viewing it, including the desktop.`, ok: 'Resize'})) send({t: 'fit', cols: d.cols, rows: d.rows});
   }, 'pop-fit');
   item(pop, 'Load all scrollback', () => { closePop(); send({t: 'more_history'}); }, 'pop-hist');
+  { const dg = LS.get('diag', false); const it = item(pop, dg ? 'Touch diagnostics: on' : 'Touch diagnostics: off', () => { LS.set('diag', !dg); location.reload(); }); it.setAttribute('role', 'menuitemcheckbox'); it.setAttribute('aria-pressed', String(dg)); }
   item(pop, termKind === 'wterm' ? 'Terminal: wterm (switch to the older xterm.js)' : 'Terminal: xterm.js (switch back to wterm)', () => { LS.set('term', termKind === 'wterm' ? 'xterm' : 'wterm'); location.reload(); });
   item(pop, 'Reconnect', () => { closePop(); if (state.ws) { const w = state.ws; state.ws = null; try { w.close(); } catch {} } connect(); });
   updateControls();

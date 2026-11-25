@@ -19,6 +19,7 @@ pub const all = [_]Asset{
     .{ .path = "/labsel.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/labsel.js") },
     .{ .path = "/app.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/app.js") },
     .{ .path = "/keys.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/keys.js") },
+    .{ .path = "/diag.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/diag.js") },
     .{ .path = "/app.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/app.css") },
     .{ .path = "/vendor/xterm.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/xterm.js") },
     .{ .path = "/vendor/xterm.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/vendor/xterm.css") },
