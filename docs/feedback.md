@@ -7,7 +7,7 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
 | # | Date | Area | Feedback | Status |
 | --- | --- | --- | --- | --- |
 | 1 | 2026-11-23 | Key bar | In the bottom pane's bottom row (the key bar), **Enter should be the first button**. | done 2026-11-25 (`web: Enter first in the key bar`) |
-| 2 | 2026-11-23 | Phone, terminal | On the phone, **the terminal cannot be scrolled up** (to see earlier output). | fixed 2026-11-25 (`web: touch drags scroll full-screen programs`), owner's phone check pending |
+| 2 | 2026-11-23 | Phone, terminal | On the phone, **the terminal cannot be scrolled up** (to see earlier output). | done 2026-11-25 (`web: touch drags scroll full-screen programs`), confirmed on the owner's phone |
 
 ## Details
 
@@ -68,3 +68,6 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
   recording program: `less` 470 → 446 by Up keys; a program with SGR mouse reporting received 24
   `ESC[<64;…M` wheel-up reports and no keys; shell history still scrolls natively. `zig build test` 139
   pass + 9 skip, `web-test` 17 pass. The xterm.js fallback is unchanged.
+- **Confirmed 2026-11-25 on the owner's phone** (same Serve test port, fixed build): dragging over the
+  terminal running Claude Code scrolls its view. Test setup removed: Serve 11443 off, test bridge stopped,
+  its secret deleted, `rweb-test-touch` killed. Not yet deployed (setup-repo pin bump).
