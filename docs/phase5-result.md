@@ -65,10 +65,13 @@ The owner chose to run the release binaries on the machines before publishing an
   answer 200; laptop-mac's own address 403. The archives were copied to the hosts by hand (no GitHub
   Release yet).
 
+- 2026-11-25: the owner confirmed all three on the phone. gateway-box then got the module (setup-repo
+  `e901ca9`, fanned out from linux-box) and installed the same Linux archive; `rweb.service` runs on its
+  unix socket. Its Serve entry (`rweb-serve on`, sudo) is the owner's step.
+
 ## Next
 
-- The owner tries 0.1.0 on the phone against each host.
+- The owner runs `rweb-serve on` on gateway-box and checks it on the phone.
 - Step 4: a GitHub Release `v0.1.0` from `a744ead` with the same archives, when the owner says so; then
   the hosts can download instead of being copied to.
-- gateway-box: add the module there (it can install the Linux archive).
 - Open decision: one pinned Zig build for cross-machine reproducibility.
