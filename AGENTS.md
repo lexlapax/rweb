@@ -56,6 +56,19 @@ socket.
   copyright and licence notices (for example a vendored browser terminal) and technical
   provenance; these are not agent attribution.
 
+## Worktrees (owner, 2026-11-25)
+
+Make changes in a git worktree, never in the main checkout `~/projects/lexlapax/rweb`: every host's
+deployment pulls that checkout (setup-repo's `rweb` module), and several sessions may work here on one
+machine. Pull the main checkout, then
+`git -C ~/projects/lexlapax/rweb worktree add ~/projects/lexlapax/.worktrees/rweb/<topic> -b wt/<topic>`;
+edit, build, test and commit there (a new worktree builds Ghostty once, about 2 minutes). To finish:
+pull the main checkout, `git rebase main` in the worktree, `git -C ~/projects/lexlapax/rweb merge
+--ff-only wt/<topic>`, then remove the worktree and delete the branch. Work left unfinished stays in its
+worktree; say where. Uncommitted edits found in the main checkout belong to another session: leave
+them, and if a pull is refused because of them, tell the owner. The global rule is in the owner's
+global agent instructions ("Worktrees in the core repos").
+
 ## Work and validation
 
 Read the task's phase in the plan through the map, make focused changes, add tests, and run the
