@@ -4,6 +4,13 @@ Versions follow [semantic versioning](https://semver.org). Newest first. `rweb -
 version, the commit it was built from, the build mode and target, the Ghostty (libghostty-vt) tag and
 the Rex API revisions it speaks.
 
+## 0.1.1 (not yet released)
+
+- A machine that is a tagged Tailscale device has no owner login: `--owner-from-tailscale` now refuses
+  to start there and says to pass `--owner LOGIN --allow-host NAME` (before, rweb started and refused
+  everyone).
+- User guide: tagged machines.
+
 ## 0.1.0 (not yet released)
 
 The first numbered version: the bridge and page as used daily on Linux and macOS, plus the fixes from

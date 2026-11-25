@@ -22,6 +22,26 @@ pub fn versionText() []const u8 {
     );
 }
 
+test "the owner comes from the node's user, and a tagged node has none" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const user_node =
+        \\{"Self":{"UserID":42,"DNSName":"box.example.ts.net."},"User":{"42":{"LoginName":"you@example.com"}}}
+    ;
+    try std.testing.expectEqualStrings("you@example.com", try ownerFromStatus(a, user_node));
+    const tagged =
+        \\{"Self":{"UserID":7,"Tags":["tag:gateway"]},"User":{"7":{"LoginName":"box.example.ts.net"}}}
+    ;
+    try std.testing.expectError(error.TaggedNode, ownerFromStatus(a, tagged));
+    const empty_tags =
+        \\{"Self":{"UserID":42,"Tags":[]},"User":{"42":{"LoginName":"you@example.com"}}}
+    ;
+    try std.testing.expectEqualStrings("you@example.com", try ownerFromStatus(a, empty_tags));
+    try std.testing.expectError(error.NoSelf, ownerFromStatus(a, "{}"));
+    try std.testing.expectError(error.NoSelf, ownerFromStatus(a, "[]"));
+}
+
 test "version text names the version, commit and Rex revisions" {
     const t = versionText();
     try std.testing.expect(std.mem.startsWith(u8, t, "rweb " ++ build_options.version ++ "\n"));
@@ -71,6 +91,10 @@ pub fn main(init: std.process.Init) !void {
     var owner = parsed.owner;
     if (parsed.owner_from_tailscale) {
         owner = tailscaleOwner(arena, io) catch |e| {
+            if (e == error.TaggedNode) {
+                std.debug.print("rweb: this node is a tagged Tailscale device, so it has no owner login; pass --owner LOGIN (your Tailscale login) and --allow-host <this node's DNS name> instead of --owner-from-tailscale\n", .{});
+                std.process.exit(2);
+            }
             std.debug.print("rweb: cannot read this node's Tailscale login ({t}); pass --owner\n", .{e});
             std.process.exit(2);
         };
@@ -194,8 +218,18 @@ fn exists(io: Io, path: []const u8) bool {
 fn tailscaleOwner(arena: std.mem.Allocator, io: Io) ![]const u8 {
     const res = try std.process.run(arena, io, .{ .argv = &.{ "tailscale", "status", "--json" } });
     if (res.term != .exited or res.term.exited != 0) return error.TailscaleFailed;
-    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, res.stdout, .{});
-    const self = (v.object.get("Self") orelse return error.NoSelf).object;
+    return ownerFromStatus(arena, res.stdout);
+}
+
+/// The owner's login from `tailscale status --json`. A tagged node has no user login (its "user" is a
+/// placeholder for the tag that no person signs in as), so it is refused: the owner must be named.
+fn ownerFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u8 {
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, status_json, .{});
+    if (v != .object) return error.NoSelf;
+    const self_v = v.object.get("Self") orelse return error.NoSelf;
+    if (self_v != .object) return error.NoSelf;
+    const self = self_v.object;
+    if (self.get("Tags")) |tags| if (tags == .array and tags.array.items.len > 0) return error.TaggedNode;
     const uid = self.get("UserID") orelse return error.NoSelf;
     var key_buf: [24]u8 = undefined;
     const key = try std.fmt.bufPrint(&key_buf, "{d}", .{uid.integer});

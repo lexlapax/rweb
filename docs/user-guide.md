@@ -70,6 +70,12 @@ Do this once per tailnet, then once per machine.
 5. **Check:** `tailscale status` on the Rex machine lists your phone or laptop, and both show the same
    user.
 
+**Tagged machines.** If the Rex machine is a tagged device (a server or gateway added with a tag, shown
+under its tags in the admin console), it has no owner login, so `--owner-from-tailscale` cannot work and
+rweb refuses to start with it. Name yourself instead: replace `--owner-from-tailscale` with
+`--owner you@example.com --allow-host <machine>.<tailnet>.ts.net` (your Tailscale login and the machine's
+own name) in sections 5 and 6.
+
 Keep **Funnel off** for rweb's port: Funnel would publish it on the internet, and rweb refuses every
 request that comes through Funnel anyway. Devices that are tagged, or shared into your tailnet by someone
 else, do not carry your login and are refused. If your tailnet restricts access with ACLs, allow your
@@ -249,6 +255,7 @@ Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.lo
 | You see | Why, and what to do |
 | --- | --- |
 | `cannot find Rex's socket` | Rex is not running, or its socket is elsewhere: start Rex, or pass `--rex-socket`. |
+| `this node is a tagged Tailscale device` | Use `--owner` and `--allow-host` instead of `--owner-from-tailscale` (section 4, tagged machines). |
 | `cannot tell this node's Tailscale addresses` | The `tailscale` command is missing from `PATH` or Tailscale is down. |
 | 403 "request from this node's own address" | You opened the page on the Rex machine itself. Use another device. |
 | 403 from your phone through Tailscale | The phone is signed in to a different Tailscale account, or is a tagged or shared device. |
