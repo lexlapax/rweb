@@ -153,3 +153,32 @@ test('what a person types, pastes or does with the mouse is not a reply', () => 
   assert.equal(K.stripReplies('ab\x1b[1;1Rcd'), 'abcd');
   assert.equal(K.stripReplies('\x1b[?62;4c\x1b[A'), '\x1b[A');
 });
+
+test('a touch drag scrolls history natively and a full-screen program like a wheel (feedback 2)', () => {
+  // The shell's own history: the browser scrolls it.
+  assert.equal(K.dragMode({altScreen: false, mouseTracking: false, scrollable: true}), 'native');
+  assert.equal(K.dragMode({altScreen: false, mouseTracking: true, scrollable: true}), 'native');
+  assert.equal(K.dragMode({altScreen: false, mouseTracking: false, scrollable: false}), 'native');
+  // A full-screen program: wheel reports if it asked for the mouse, else Up/Down keys.
+  assert.equal(K.dragMode({altScreen: true, mouseTracking: true, scrollable: false}), 'wheel');
+  assert.equal(K.dragMode({altScreen: true, mouseTracking: false, scrollable: false}), 'keys');
+  // Mouse on the main screen with nothing to scroll: the program gets the wheel.
+  assert.equal(K.dragMode({altScreen: false, mouseTracking: true, scrollable: false}), 'wheel');
+});
+
+test('drag distance becomes whole rows, keeping the remainder', () => {
+  assert.deepEqual(K.dragRows(40, 17), {rows: 2, rest: 6});
+  assert.deepEqual(K.dragRows(-40, 17), {rows: -2, rest: -6});
+  assert.deepEqual(K.dragRows(10, 17), {rows: 0, rest: 10});
+  assert.equal(K.dragRows(34, 0).rows, 2);           // no row height yet: 17 px rows
+});
+
+test('scroll keys: finger down is Up (older), in the cursor-key mode the program asked for', () => {
+  assert.equal(K.scrollKeys(2, false), '\x1b[A\x1b[A');
+  assert.equal(K.scrollKeys(-1, false), '\x1b[B');
+  assert.equal(K.scrollKeys(1, true), '\x1bOA');
+  assert.equal(K.scrollKeys(-3, true), '\x1bOB'.repeat(3));
+  assert.equal(K.scrollKeys(1000, false).length, 3 * 100);   // capped
+  // Not mistaken for a reply and dropped.
+  assert.equal(K.stripReplies(K.scrollKeys(2, true)), K.scrollKeys(2, true));
+});

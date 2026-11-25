@@ -135,6 +135,30 @@
     return out;
   }
 
+  // A vertical touch drag over the terminal (feedback 2). The browser scrolls the terminal's own
+  // history by itself. A full-screen program (alternate screen) has no history in the browser and
+  // scrolls its own, so a drag there is turned into what a desktop mouse wheel would send: wheel
+  // reports if the program asked for the mouse, otherwise Up/Down keys (the "alternate scroll"
+  // most terminals do). Returns 'native', 'wheel' or 'keys'.
+  function dragMode({altScreen, mouseTracking, scrollable}) {
+    if (altScreen) return mouseTracking ? 'wheel' : 'keys';
+    if (!scrollable && mouseTracking) return 'wheel';
+    return 'native';
+  }
+  // Whole rows a drag of `dy` pixels has moved (positive: the finger went down, towards older
+  // output), and the pixels left over for the next move.
+  function dragRows(dy, rowHeight) {
+    const h = rowHeight > 0 ? rowHeight : 17;
+    const rows = Math.trunc(dy / h);
+    return {rows, rest: dy - rows * h};
+  }
+  // The keys for `rows` rows of scrolling: Up for older output, Down for newer, in the cursor-key
+  // form the program asked for (application mode sends ESC O A).
+  function scrollKeys(rows, appCursor) {
+    const one = (appCursor ? '\x1bO' : '\x1b[') + (rows > 0 ? 'A' : 'B');
+    return one.repeat(Math.min(Math.abs(rows), 100));
+  }
+
   const FONT_MIN = 8, FONT_MAX = 28, FONT_DEFAULT = 14;
   function clampFont(n) {
     n = Math.round(Number(n));
@@ -149,7 +173,7 @@
     return Math.max(floor === undefined ? 0.35 : floor, Math.min(1, stageWidth / screenWidth));
   }
 
-  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

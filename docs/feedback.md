@@ -7,7 +7,7 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
 | # | Date | Area | Feedback | Status |
 | --- | --- | --- | --- | --- |
 | 1 | 2026-11-23 | Key bar | In the bottom pane's bottom row (the key bar), **Enter should be the first button**. | done 2026-11-25 (`web: Enter first in the key bar`) |
-| 2 | 2026-11-23 | Phone, terminal | On the phone, **the terminal cannot be scrolled up** (to see earlier output). | open |
+| 2 | 2026-11-23 | Phone, terminal | On the phone, **the terminal cannot be scrolled up** (to see earlier output). | fixed 2026-11-25 (`web: touch drags scroll full-screen programs`), owner's phone check pending |
 
 ## Details
 
@@ -54,3 +54,17 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
   element and its parents, whether touchstart/touchmove were cancelled, `pointercancel` (the browser took
   the gesture), scroll events on the terminal and the page, and the terminal's scroll numbers. Checked in
   the emulated phone: a working drag shows `pointercancel 1` and terminal scroll events.
+- **Cause found 2026-11-25 in the live phone test** (owner's Android Chrome 158 through a temporary Serve
+  port 11443 on laptop-mac): scrolling works over a shell's history (panel: `pointercancel 1`, terminal
+  scroll events). It fails over a **full-screen program on the alternate screen** (the owner's terminal
+  running Claude Code): `sh 555 ch 555 max 0`, `oy hidden`, 88 touch moves, none cancelled, nothing to
+  scroll. A full-screen program keeps its own history; a desktop terminal sends it the mouse wheel, a
+  touch drag sent nothing.
+- **Fix:** `wterm-shim.js` turns a vertical drag (after 8 px, so taps still work) into what a wheel would
+  send when the terminal has nothing of its own to scroll: wheel reports through wterm's own mouse
+  encoding if the program asked for the mouse, otherwise Up/Down keys in the program's cursor-key mode
+  (`dragMode`, `dragRows`, `scrollKeys` in `keys.js`, with tests). Over the shell's history nothing
+  changes. Verified in an emulated phone (headless Chrome, touch) against Rex's own capture and a
+  recording program: `less` 470 → 446 by Up keys; a program with SGR mouse reporting received 24
+  `ESC[<64;…M` wheel-up reports and no keys; shell history still scrolls natively. `zig build test` 139
+  pass + 9 skip, `web-test` 17 pass. The xterm.js fallback is unchanged.

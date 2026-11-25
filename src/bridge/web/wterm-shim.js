@@ -27,6 +27,35 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
   wt.bridge.getResponse = () => { while (orig() !== null) {} return null; };
   host.classList.add('rweb-wterm');
 
+  // Touch drags over a full-screen program (feedback 2; the rules are in keys.js `dragMode`). Over the
+  // terminal's own history nothing is done here and the browser scrolls natively. A drag is decided
+  // once it has moved 8 px, so a tap still focuses the terminal and opens the keyboard.
+  const K = window.RwebKeys;
+  let drag = null;
+  host.addEventListener('touchstart', e => {
+    drag = e.touches.length === 1 ? {y: e.touches[0].clientY, startY: e.touches[0].clientY, acc: 0, mode: null} : null;
+  }, {passive: true});
+  host.addEventListener('touchmove', e => {
+    if (!drag || e.touches.length !== 1) { drag = null; return; }
+    const t = e.touches[0], b = wt.bridge;
+    if (drag.mode === null) {
+      if (Math.abs(t.clientY - drag.startY) < 8 || !b) return;
+      drag.mode = K.dragMode({altScreen: b.usingAltScreen(), mouseTracking: b.mouseTracking() !== 0, scrollable: host.scrollHeight - host.clientHeight > 1});
+    }
+    if (drag.mode === 'native') return;
+    e.preventDefault();
+    const m = cell(), rh = (m && m.rowHeight) || 17;
+    const {rows, rest} = K.dragRows(drag.acc + t.clientY - drag.y, rh);
+    drag.acc = rest; drag.y = t.clientY;
+    if (!rows) return;
+    if (drag.mode === 'wheel') {
+      // wterm turns a wheel event into the report the program asked for (its own mouse encoding).
+      for (let i = 0; i < Math.min(Math.abs(rows), 100); i++)
+        host.dispatchEvent(new WheelEvent('wheel', {deltaY: rows > 0 ? -rh : rh, deltaMode: 0, clientX: t.clientX, clientY: t.clientY, bubbles: true, cancelable: true}));
+    } else handlers.data(K.scrollKeys(rows, b.cursorKeysApp()));
+  }, {passive: false});
+  for (const type of ['touchend', 'touchcancel']) host.addEventListener(type, () => { drag = null; }, {passive: true});
+
   // The font size the grid is drawn at now. The page asks for a preferred size; when the grid would
   // be wider than the screen the size is reduced to fit. wterm measures cells and places its typing
   // overlay from on-screen coordinates, so shrinking with a CSS scale would put text in the wrong
