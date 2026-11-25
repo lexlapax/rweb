@@ -9,6 +9,18 @@ fn gitCommit(b: *std.Build) []const u8 {
     return if (t.len == 40) t else "unknown";
 }
 
+/// The bridge for one target, with its own Rex library and Ghostty built for that target.
+fn bridgeExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: anytype, opts: *std.Build.Step.Options, strip: ?bool) ?*std.Build.Step.Compile {
+    const ghostty = b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize }) orelse return null;
+    const rex = b.createModule(.{ .root_source_file = b.path("src/rex/root.zig"), .target = target, .optimize = optimize });
+    rex.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
+    const m = b.createModule(.{ .root_source_file = b.path("src/bridge/main.zig"), .target = target, .optimize = optimize, .strip = strip });
+    m.addImport("rex", rex);
+    m.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
+    m.addOptions("build_options", opts);
+    return b.addExecutable(.{ .name = "rweb", .root_module = m });
+}
+
 /// "vt-1.0.1" from Ghostty's tag URL in build.zig.zon.
 fn ghosttyTag(url: []const u8) []const u8 {
     const start = (std.mem.indexOf(u8, url, "/tags/") orelse return url) + "/tags/".len;
@@ -54,6 +66,23 @@ pub fn build(b: *std.Build) void {
     const run_exe = b.addRunArtifact(exe);
     run_exe.addPassthruArgs();
     b.step("run", "Run the bridge").dependOn(&run_exe.step);
+
+    // Release archives (Phase 5): ReleaseSafe and stripped (debug info would carry the build
+    // folder's path, so the same commit built elsewhere would differ), one per platform the owner
+    // runs. Linux is static musl, so it runs on any distribution. tools/dist.sh packs them.
+    const dist_targets = [_]struct { name: []const u8, query: std.Target.Query }{
+        .{ .name = "macos-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
+        .{ .name = "linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl } },
+    };
+    const pack = b.addSystemCommand(&.{ "sh", "tools/dist.sh", zon.version });
+    pack.addDirectoryArg(b.graph.path(.install_prefix, "dist"));
+    pack.has_side_effects = true;
+    for (dist_targets) |t| {
+        const d = bridgeExe(b, b.resolveTargetQuery(t.query), .safe, opts, true) orelse continue;
+        const inst = b.addInstallArtifact(d, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("dist/stage/{s}", .{t.name}) } } });
+        pack.step.dependOn(&inst.step);
+    }
+    b.step("dist", "Release archives for macOS ARM64 and Linux x86-64 in zig-out/dist").dependOn(&pack.step);
 
     const bridge_tests = b.addTest(.{ .root_module = bridge_mod, .filters = filters });
     const run_bridge_tests = b.addRunArtifact(bridge_tests);
