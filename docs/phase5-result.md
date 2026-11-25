@@ -40,6 +40,34 @@ everywhere (an official ziglang.org tarball pinned by checksum) and one tar; not
 The likely cause of the Zig difference (each distribution's Zig linked against its own LLVM) is not
 verified.
 
+### Pinning Zig (measured 2026-11-25)
+
+Rex publishes no Zig version (`rex version` and its API give only Rex's version, commit and build time),
+so the pin follows what rweb and Rex share: Ghostty. Ghostty `vt-1.0.1` needs Zig 0.17.0 or newer; rweb
+needs 0.17.1. Test: official Zig 0.17.1 from ziglang.org (checksums from its download index), commit
+`a744ead`, the same release path and the same Zig cache path on both machines.
+
+| Build | Linux binary | macOS binary |
+| --- | --- | --- |
+| laptop-mac, Homebrew Zig | `cccf5f5a…`, 4,233,216 bytes | `5b579de1…` |
+| laptop-mac, official Zig | `e8d63b9f…`, 4,233,200 bytes | `5b579de1…` (identical to Homebrew's) |
+| linux-box, official Zig | `4b2a03a0…`, 4,233,200 bytes | `2ab79ff2…` |
+
+With official Zig the two machines' binaries have the same size and differ in one place only: 31 bytes,
+the `.zig-cache/o/<hash>` in the path Highway's C++ embeds with `__FILE__`. The hash depends on the
+compiler's own host platform (Apple silicon Zig versus x86-64 Linux Zig); moving Zig to the same path and
+using the same cache path on both did not change it. It cannot be removed from rweb's side (it is
+Ghostty's build of Highway). So:
+
+- **Reproducible:** the same commit, built by official Zig 0.17.1 on the same kind of host at the fixed
+  release path, gives the same binaries; archives also need the same `tar` (BSD on macOS, GNU on Linux).
+- **Not reproducible across host platforms** while Ghostty's Highway embeds that path.
+- Homebrew's and Arch's Zig 0.17.1 build the Linux target differently from official Zig.
+
+Recommendation (owner's decision): make release builds on one kind of host (macOS on Apple silicon)
+with official Zig 0.17.1, installed by setup-repo from its checksummed tarball, so a later Homebrew update
+cannot change the compiler under a release. Anyone can then check a release on a Mac with the same Zig.
+
 ## Step 3: prove it (done 2026-11-25)
 
 - linux-box (Rex 0.1.0-preview.22, API revision 19), in an export of `9b4df80` at
