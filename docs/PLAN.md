@@ -239,7 +239,9 @@ Before either: the owner's open feedback items ([feedback.md](feedback.md)) and 
    short, easy to type and remember). A rename touches the repo, binary, setup-repo module, unit and
    LaunchAgent names, config paths, browser storage keys, the `rweb-test-` rule and atlas; plan
    it as one change with a migration of both live hosts.
-1. **Version.** Semantic version from 0.1.0 in `build.zig.zon`, a `CHANGELOG.md`, and a
+1. **Version** (done 2026-11-25: `build.zig.zon` 0.1.0, `CHANGELOG.md`, `rweb --version` on stdout with
+   commit from `-Dcommit` or git, `unknown` in an export without either; the bridge reports the
+   version to Rex). Semantic version from 0.1.0 in `build.zig.zon`, a `CHANGELOG.md`, and a
    `--version` flag printing version, commit, Ghostty pin and the Rex API revisions supported.
 2. **`zig build dist`.** Cross-builds `ReleaseSafe` binaries on one machine for macOS ARM64 and
    Linux x86-64 (glibc, pinned version), each in `<name>-<version>-<target>.tar.gz` with the

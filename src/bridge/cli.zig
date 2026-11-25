@@ -8,6 +8,7 @@ pub const usage =
     \\rweb: shows Rex terminal sessions in a web browser
     \\
     \\  rweb (--listen-unix PATH | --listen-tcp PORT) [options]
+    \\  rweb --version
     \\
     \\Where to listen (exactly one):
     \\  --listen-unix PATH        unix socket, created 0600 in a 0700 directory
@@ -80,6 +81,8 @@ pub const PeerUid = union(enum) { uid: u32, self };
 
 pub const Error = error{
     Usage,
+    /// `--version`: print the version and exit.
+    Version,
     NoListener,
     TwoListeners,
     NoAccessRule,
@@ -103,6 +106,7 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
         const a = args[i];
         const eql = std.mem.eql;
         if (eql(u8, a, "--help") or eql(u8, a, "-h")) return error.Usage;
+        if (eql(u8, a, "--version")) return error.Version;
         if (eql(u8, a, "--listen-unix")) {
             if (listen != null) return error.TwoListeners;
             listen = .{ .unix = try value(args, &i) };
@@ -244,6 +248,8 @@ test "numbers and options are checked" {
     try testing.expectError(error.MissingValue, parseT(&.{ "--listen-tcp", "0", "--owner" }));
     try testing.expectError(error.UnknownOption, parseT(&.{ "--listen-tcp", "0", "--nope" }));
     try testing.expectError(error.Usage, parseT(&.{"--help"}));
+    try testing.expectError(error.Version, parseT(&.{"--version"}));
+    try testing.expectError(error.Version, parseT(&.{ "--listen-tcp", "0", "--version" }));
     const p = try parseT(&.{ "--listen-tcp", "0", "--observe-only", "--history-lines", "50" });
     try testing.expect(p.observe_only and p.history_lines == 50);
 }

@@ -26,7 +26,7 @@ to resume **inside a Rex session**, so:
   socket, desktop-mac on loopback plus secret), started by the `rweb` setup-repo module; file transfer is on.
   Everything is committed and pushed (rweb and setup-repo). Phases 0 to 4 are done
   ([docs/phase4-result.md](docs/phase4-result.md)); the week is Phase 3's exit and is the owner's to judge.
-- **Feedback log (2026-11-23):** the owner's notes from daily use go in [docs/feedback.md](docs/feedback.md). 1 Enter first: done 2026-11-25, not deployed. 2 no scrolling up on the phone: done (full-screen programs now get wheel reports or Up/Down keys from a drag), confirmed on the owner's phone; live test setup removed. Both deployed 2026-11-25: setup-repo pin `4b8dc92` (commit `329142c`, record `2026-11-25-rweb-pin-4b8dc92`) applied on laptop-mac, desktop-mac and linux-box. gateway-box waits for Phase 5's release binaries. Next: Phase 5. Add new items there; do not act on them until asked.
+- **Feedback log (2026-11-23):** the owner's notes from daily use go in [docs/feedback.md](docs/feedback.md). 1 Enter first: done 2026-11-25, not deployed. 2 no scrolling up on the phone: done (full-screen programs now get wheel reports or Up/Down keys from a drag), confirmed on the owner's phone; live test setup removed. Both deployed 2026-11-25: setup-repo pin `4b8dc92` (commit `329142c`, record `2026-11-25-rweb-pin-4b8dc92`) applied on laptop-mac, desktop-mac and linux-box. gateway-box waits for Phase 5's release binaries. Next: Phase 5. **Phase 5 in progress** in worktree `~/projects/lexlapax/.worktrees/rweb/phase5-release` (branch `wt/phase5-release`): step 1 (version 0.1.0, `CHANGELOG.md`, `rweb --version`) done; next step 2, `zig build dist`. Add new items there; do not act on them until asked.
 - **Pending:** one reboot check of linux-box on the unix-socket setup (`rweb-serve status`, the address,
   `journalctl --user -u rweb -b`), to be recorded as an action in setup-repo. Skipped by the owner: a link
   between the two hosts' pages. Paused: a folder allow-list for downloads.
@@ -165,6 +165,11 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 `zig build test` into `head` can hang. `mkdir -p .zig-cache/tmp` before `--fuzz`.
 
 ## Checks run for this update
+
+- 2026-11-25, laptop-mac (Rex 0.1.0-preview.23), Phase 5 step 1: `zig build test` 186 pass + 10 skip
+  (no live); with `REX_SOCKET` 148 pass + 1 skip (restart test), `rex ls` afterwards only the owner's
+  sessions; `web-test` pass; `ReleaseSafe` build; `rweb --version` checked in the checkout, and in an
+  export without `.git` (`commit unknown`, and with `-Dcommit=`).
 
 - 2026-11-22, wterm trial: bundled and vendored wterm 0.6.0 + libghostty core (details and hashes in
   docs/phase3-result.md); Chrome checks of `?term=wterm` (draw, type, colour, wide/combining,

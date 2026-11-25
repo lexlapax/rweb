@@ -12,6 +12,22 @@ pub const assets = @import("assets.zig");
 pub const xfer = @import("xfer.zig");
 pub const server = @import("server.zig");
 pub const cli = @import("cli.zig");
+const build_options = @import("build_options");
+
+/// What `rweb --version` prints: the version, the commit, how it was built, and what it works with.
+pub fn versionText() []const u8 {
+    return std.fmt.comptimePrint(
+        "rweb {s}\ncommit {s}\nbuild {t} {t}-{t}\nghostty {s}\nrex api revisions {d}-{d}\n",
+        .{ build_options.version, build_options.commit, builtin.mode, builtin.cpu.arch, builtin.os.tag, build_options.ghostty, rex.control.api_min_supported, rex.control.api_max_supported },
+    );
+}
+
+test "version text names the version, commit and Rex revisions" {
+    const t = versionText();
+    try std.testing.expect(std.mem.startsWith(u8, t, "rweb " ++ build_options.version ++ "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, t, "commit ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "rex api revisions 18-19") != null);
+}
 
 const log = std.log.scoped(.rweb);
 
@@ -28,6 +44,10 @@ pub fn main(init: std.process.Init) !void {
     _ = it.next();
     while (it.next()) |a| try argv.append(arena, a);
     const parsed = cli.parse(arena, argv.items) catch |e| {
+        if (e == error.Version) {
+            std.Io.File.stdout().writeStreamingAll(io, versionText()) catch {};
+            std.process.exit(0);
+        }
         std.debug.print("{s}\n", .{cli.usage});
         if (e != error.Usage) std.debug.print("rweb: {t}\n", .{e});
         std.process.exit(if (e == error.Usage) 0 else 2);
@@ -86,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
         .self => @intCast(std.c.getuid()),
     });
 
-    const ctl = rex.control.Control.open(gpa, io, .{ .socket_path = rex_socket, .client_name = "rweb" }) catch |e| {
+    const ctl = rex.control.Control.open(gpa, io, .{ .socket_path = rex_socket, .client_name = "rweb", .client_version = build_options.version }) catch |e| {
         std.debug.print("rweb: cannot reach Rex at {s}: {t}\n", .{ rex_socket, e });
         std.process.exit(1);
     };

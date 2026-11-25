@@ -1,4 +1,20 @@
 const std = @import("std");
+const zon = @import("build.zig.zon");
+
+/// The checkout's commit, or "unknown" outside a git checkout (an export has no .git).
+fn gitCommit(b: *std.Build) []const u8 {
+    var code: u8 = 0;
+    const out = b.runAllowFail(&.{ "git", "rev-parse", "HEAD" }, &code, .ignore) catch return "unknown";
+    const t = std.mem.trim(u8, out, " \n\r");
+    return if (t.len == 40) t else "unknown";
+}
+
+/// "vt-1.0.1" from Ghostty's tag URL in build.zig.zon.
+fn ghosttyTag(url: []const u8) []const u8 {
+    const start = (std.mem.indexOf(u8, url, "/tags/") orelse return url) + "/tags/".len;
+    const end = std.mem.indexOfPos(u8, url, start, ".tar.gz") orelse url.len;
+    return url[start..end];
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -26,6 +42,13 @@ pub fn build(b: *std.Build) void {
     });
     bridge_mod.addImport("rex", rex);
     if (ghostty) |dep| bridge_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    // What `rweb --version` reports. The commit comes from -Dcommit (setup-repo and release builds
+    // pass it: they build from a `git archive` export, which has no .git) or else from git.
+    const opts = b.addOptions();
+    opts.addOption([]const u8, "version", zon.version);
+    opts.addOption([]const u8, "commit", b.option([]const u8, "commit", "Commit this build is from (default: git rev-parse HEAD)") orelse gitCommit(b));
+    opts.addOption([]const u8, "ghostty", ghosttyTag(zon.dependencies.ghostty.url));
+    bridge_mod.addOptions("build_options", opts);
     const exe = b.addExecutable(.{ .name = "rweb", .root_module = bridge_mod });
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);

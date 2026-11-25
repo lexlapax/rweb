@@ -18,13 +18,17 @@ const log = std.log.scoped(.rex_control);
 pub const subprotocol = "rex.control.v1";
 
 
+/// The Rex API revisions this client speaks (newest and oldest); `rweb --version` reports them.
+pub const api_max_supported: u32 = 19;
+pub const api_min_supported: u32 = 18;
+
 pub const Options = struct {
     socket_path: []const u8,
     /// Newest and oldest API revision the client can use.
     /// 19 adds `event_dropped` (an oversize event no longer closes the connection) and is
     /// otherwise the same as 18 for every call this library makes.
-    api_max: u32 = 19,
-    api_min: u32 = 18,
+    api_max: u32 = api_max_supported,
+    api_min: u32 = api_min_supported,
     client_name: []const u8 = "rweb",
     client_version: []const u8 = "0.0.0",
     /// Reconnect after a drop. Off for one-shot tools and tests that want to see the drop.
