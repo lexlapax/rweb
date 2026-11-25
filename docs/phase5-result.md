@@ -64,9 +64,12 @@ Ghostty's build of Highway). So:
 - **Not reproducible across host platforms** while Ghostty's Highway embeds that path.
 - Homebrew's and Arch's Zig 0.17.1 build the Linux target differently from official Zig.
 
-Recommendation (owner's decision): make release builds on one kind of host (macOS on Apple silicon)
-with official Zig 0.17.1, installed by setup-repo from its checksummed tarball, so a later Homebrew update
-cannot change the compiler under a release. Anyone can then check a release on a Mac with the same Zig.
+Decided and done (owner, 2026-11-25): release builds are made on macOS (Apple silicon) with official Zig
+0.17.1, which setup-repo's `zig-release` module installs beside Homebrew's as `zig-0.17.1` (SHA-256 pinned;
+installed on laptop-mac). `tools/release.sh` builds with `zig-<minimum_zig_version>` when it is on `PATH`
+(else `zig`, with a warning), with the Zig cache at `/tmp/rweb-release/zig-cache`, and names the compiler
+in its output. Two runs for `f9aea63` (0.1.1) gave identical archives (Linux `7aff505a…`, macOS
+`00770ab8…`).
 
 ## Step 3: prove it (done 2026-11-25)
 
