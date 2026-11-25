@@ -22,8 +22,8 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
   Expanded, Enter starts the bar's bottom row (Enter, Shift, Home, End, Paste; above it Esc, Tab, ^C, Ctrl,
   Alt) by a grid placement in `app.css`. Checked in Chrome at phone width on laptop-mac (Rex preview.23)
   against a throwaway `rweb-test-keys` session: both layouts, collapse restores the order, and the Enter
-  button ran a typed `echo`. `zig build test` 139 pass + 9 skip (no live), `web-test` 14 pass. Not yet
-  on the phone; reaches the hosts with the next setup-repo pin bump.
+  button ran a typed `echo`. `zig build test` 139 pass + 9 skip (no live), `web-test` 14 pass. Deployed
+  2026-11-25 (setup-repo pin `4b8dc92`) on laptop-mac, desktop-mac and linux-box.
 
 ### 2. No scrolling up on the phone
 
@@ -70,4 +70,4 @@ week of use). Newest last. Each item gets a number, a date, a status (`open`, `d
   pass + 9 skip, `web-test` 17 pass. The xterm.js fallback is unchanged.
 - **Confirmed 2026-11-25 on the owner's phone** (same Serve test port, fixed build): dragging over the
   terminal running Claude Code scrolls its view. Test setup removed: Serve 11443 off, test bridge stopped,
-  its secret deleted, `rweb-test-touch` killed. Not yet deployed (setup-repo pin bump).
+  its secret deleted, `rweb-test-touch` killed. Deployed 2026-11-25 with items 1 and 2 (setup-repo pin `4b8dc92`) on laptop-mac, desktop-mac and linux-box.

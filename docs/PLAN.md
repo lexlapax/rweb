@@ -254,7 +254,9 @@ Before either: the owner's open feedback items ([feedback.md](feedback.md)) and 
    as a fallback. The runbook's update path becomes: tag, `zig build dist`, release, bump the
    pin, apply.
 
-Exit: both hosts run the released artifact and serve it after a reboot (this includes linux-box's
+gateway-box (owner, 2026-11-25) gets rweb only once this phase's release binaries exist; it has no module yet.
+
+Exit: every host in scope (linux-box, desktop-mac, laptop-mac, then gateway-box) runs the released artifact and serves it after a reboot (this includes linux-box's
 pending reboot check), recorded in setup-repo.
 
 ### Phase 6: distribution to other people
