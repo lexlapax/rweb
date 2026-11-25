@@ -5,8 +5,7 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## 2026-11-25: next work agreed
 
-Item 1 (Enter first) done and checked in Chrome on laptop-mac, not deployed (needs a setup-repo pin bump). Order: feedback items 1 and 2 ([docs/feedback.md](docs/feedback.md)); the name (external
-research running in a web sandbox, not decided); then Phase 5 (release builds for the owner's
+Item 1 (Enter first) done and checked in Chrome on laptop-mac, not deployed (needs a setup-repo pin bump). Order: feedback items 1 and 2 ([docs/feedback.md](docs/feedback.md)); the name (decided: keep `rweb`, see PLAN Phase 5 step 0); then Phase 5 (release builds for the owner's
 machines) and Phase 6 (distribution to other people, behind Superlogical's answer, a licence and a
 cleaned public repo). Owner's decision: distribution means both. See [docs/PLAN.md](docs/PLAN.md#phase-5-release-builds-for-the-owners-machines).
 

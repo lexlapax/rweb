@@ -228,7 +228,13 @@ Before either: the owner's open feedback items ([feedback.md](feedback.md)) and 
 
 ### Phase 5: release builds for the owner's machines
 
-0. **Name.** Settle the name before the first versioned release, from external research
+0. **Name: decided 2026-11-25, the owner keeps `rweb`**, described as "a web client for Rex (not
+   affiliated with Superlogical)". Evidence: trademark policies (Docker, Linux Foundation, Rust,
+   Mozilla, PSF) allow "name for X" and restrict X-prefixed names, so `rex…` names would risk a
+   forced rename in Phase 6; `rweb` is free on Homebrew, Arch/AUR, Debian, npm and PyPI (only a Rust
+   library crate shares it); it follows the `tmate` pattern. Research drafts are proposals for the
+   research repo (`tools/rex-client-name-collisions`, `tools/cli-tool-naming-trademark`).
+   Original brief: settle the name before the first versioned release, from external research
    (collisions in Homebrew, Arch/AUR, Debian, crates.io, npm, PyPI and GitHub; Rex trademark;
    short, easy to type and remember). A rename touches the repo, binary, setup-repo module, unit and
    LaunchAgent names, config paths, browser storage keys, the `rweb-test-` rule and atlas; plan
