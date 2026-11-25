@@ -77,6 +77,22 @@ performance only in `ReleaseSafe` or faster. Tests that need no real Rex use the
 live tests use throwaway `rweb-test-` sessions and close them. A test against the fake server
 does not prove behaviour against a real Rex, and a desktop browser does not prove phone use.
 Record exact commands, results, the Rex version and API revision, and limitations in `docs/`.
+
+**Mobile checks: use the simulators yourself (owner, 2026-11-25).** Do not ask the owner to test phone
+or tablet behaviour that a simulator can show. setup-repo installs them (modules `ios-development`,
+`android-development`; their READMEs are the manual):
+
+- iOS (Mobile Safari): desktop-mac for repeatable runs, laptop-mac for quick checks:
+  `ios-dev safari 'https://<host>:<port>/'` on the **Setup-repo iPhone** simulator; inspect with Safari's
+  Develop menu.
+- Android (Chrome): linux-box: `android-dev start --headless`, `android-dev devices`, then
+  `android-dev chrome <serial> 'https://<host>:<port>/'`; Chrome DevTools or ChromeDriver over ADB.
+
+Point them at a test bridge with a throwaway `rweb-test-` session, reached through Serve from a
+different tailnet node than the one running the bridge (rweb refuses a node's own address). A simulator
+is not the owner's phone: it does not show a real soft keyboard's quirks (Gboard, Samsung Keyboard),
+the phone's Tailscale app or real touch hardware. Say which simulator was used, and ask the owner only
+for what a simulator cannot show.
 Do not claim a phase exit that was not observed.
 
 ## Before EVERY commit (including amend/fixup)

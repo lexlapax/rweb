@@ -65,6 +65,7 @@ Ghostty fetched). `spike/`'s Python probes remain Linux-only (`XDG_RUNTIME_DIR`,
 
 ## Owner decisions (2026-11-25)
 
+- Mobile checks: use the iOS Simulator (desktop-mac, laptop-mac) and the Android emulator (linux-box) yourself; ask the owner only for what they cannot show (AGENTS.md, "Mobile checks").
 - Licence: **MIT**, the same as Ghostty and libghostty-vt (`LICENSE`, in the archives from 0.1.1).
 - Release builds wait until there is more for a release; no GitHub Release before the owner says so.
 
