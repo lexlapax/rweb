@@ -263,3 +263,30 @@ gaps, all fixed in the follow-up commit on `main`:
 **Still not verified:** the owner's physical phone (real soft keyboard, touch hardware, Tailscale app);
 `rweb tailscale` through Serve from another tailnet node with this build; real host sleep/wake with live
 Tailscale; two concurrent bridges uploading to the same folder; a real power cut.
+
+## A second look at the follow-up commit (`c8fc37d`)
+
+Read in full against `449812a`, and run on both machines. One defect, fixed:
+
+- **A lock taken twice in the upload request.** The check that the page still shows the pinned terminal
+  held the viewer's lock and, when the terminal had closed in between (another task clears it), sent the
+  refusal while still holding it; sending takes the same lock. The viewer's task would have stopped
+  there for good, and the hub with it at the next terminal that closed, since closing takes every
+  viewer's lock under the hub's. The window is the moment between two lines, reached only when a
+  terminal closes exactly as an upload is asked for. Now `Viewer.viewGenOf` answers with the lock
+  released and the refusal is sent after. The test covers the helper and that the viewer answers
+  afterwards; the race itself is not reproduced by a test.
+- **Changed with it:** on macOS an errno from the full flush that nobody listed fell through to a failed
+  upload; it now falls back to `fsync`, which still reports a real failure.
+
+Confirmed as they are: the boot clock counts sleep on both systems (`BOOTTIME` on Linux,
+`MONOTONIC_RAW` on macOS, read in the pinned standard library); the process group is killed only while
+the child is unreaped; upload tokens are revoked after the hub's lock is released; the sweep does not
+open a non-regular file; `release.sh` checks its marker before changing a folder's mode.
+Noted, not changed: a reconnect raises the page's view count, so uploads still queued then are dropped
+with the "you switched terminals" notice, and an open file picker closes at its next request.
+
+Checks on `c8fc37d`: macOS `zig build test` 401 passed, 11 skipped, 0 failed, the same in `ReleaseSafe`;
+web tests 44/44; release-base test 7 ok, 1 skipped. Linux `ReleaseSafe` with the live Rex (preview.22,
+revision 19) 409 passed, 3 skipped, 0 failed; web tests 44/44; `rex ls` unchanged. With the fix above:
+macOS 402 passed, 11 skipped, 0 failed in Debug and `ReleaseSafe`. Not run on the fix: Linux, a browser.

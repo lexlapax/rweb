@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: round six follow-up review and fixes merged to `main` and pushed; verified on macOS, Linux, Chrome, iOS Simulator and Android Emulator; not yet deployed).
+Last updated: 2026-11-26 (laptop-mac: a second look at `c8fc37d` found and fixed a lock taken twice in the upload request; committed locally, not pushed; not deployed).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## 2026-11-26: round six + follow-up hardening (pushed on `main`; not yet deployed)
@@ -54,6 +54,12 @@ fixes by mechanism, follow-up review of `449812a`, tests, checks, what is not ve
   - Live — iOS Simulator (`Setup-repo iPhone` on `laptop-mac`, Mobile Safari against the same macOS bridge):
     loaded `/s/<id>/`, served page + wterm/WASM assets, connected over WebSocket (green dot), rendered UI.
   - All throwaway sessions, bridges, emulator instance, and temp folders cleaned up afterwards.
+- **A second look at `c8fc37d` (local commit on top, not pushed):** the upload request sent its refusal
+  while holding the viewer's lock when the terminal closed under it (the viewer's task, then the hub,
+  would have stopped); fixed with `Viewer.viewGenOf`. An unlisted errno from macOS's full flush now falls
+  back to `fsync`. Checks: `c8fc37d` re-run on macOS (401/412 both modes) and Linux live (409/412); with
+  the fix, macOS 402/413 in Debug and `ReleaseSafe`. Not run on the fix: Linux, a browser. Record: the
+  round-6 document's last section.
 - **Not verified:** the owner's physical phone, `rweb tailscale` through Serve with this build, real host
   sleep/wake with live Tailscale, two concurrent bridges uploading at once, a real power cut.
 - **Next:** build archives with `tools/release.sh`, deploy through `setup-repo` with Serve testing from

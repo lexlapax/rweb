@@ -313,6 +313,14 @@ pub const Viewer = struct {
         return v.closed;
     }
 
+    /// The view generation if `term` is the terminal this viewer looks at now, else null. Returns
+    /// with the lock released, so the caller may answer the viewer.
+    fn viewGenOf(v: *Viewer, term: *const Terminal) ?u64 {
+        v.mu.lockUncancelable(v.hub.io);
+        defer v.mu.unlock(v.hub.io);
+        return if (v.term == term) v.view_gen else null;
+    }
+
     pub fn viewGen(v: *Viewer) u64 {
         v.mu.lockUncancelable(v.hub.io);
         defer v.mu.unlock(v.hub.io);
@@ -889,12 +897,10 @@ pub const Hub = struct {
                     var buf: [96]u8 = undefined;
                     return h.refuse(v, what, std.fmt.bufPrint(&buf, "too large: the limit is {d} MB", .{h.cfg.transfer.max_bytes / (1024 * 1024)}) catch "too large");
                 }
-                const view_gen = blk: {
-                    v.mu.lockUncancelable(h.io);
-                    defer v.mu.unlock(h.io);
-                    if (v.term != term) return h.refuse(v, what, "the page showed another terminal when this was asked");
-                    break :blk v.view_gen;
-                };
+                // The terminal can close under the page between the pin above and here (another task
+                // clears `v.term`). The refusal is sent after the viewer's lock is released: sending
+                // takes that lock.
+                const view_gen = v.viewGenOf(term) orelse return h.refuse(v, what, "the page showed another terminal when this was asked");
                 const name = h.gpa.dupe(u8, u.name) catch return;
                 const sid = h.gpa.dupe(u8, term.session_id) catch return h.gpa.free(name);
                 const bid = h.gpa.dupe(u8, term.block_id) catch {
@@ -2346,6 +2352,28 @@ test "hub: an upload's path is pasted in the terminal's input order, and only wh
     const gen2 = v.viewGen();
     hs.hub.removeViewer(v);
     try testing.expect(!hs.hub.pasteUpload(id, hs.session_id, hs.block_id, gen2, "x"));
+}
+
+test "hub: an upload asked for as its terminal closes is refused, and the viewer is not left locked" {
+    const hs = try Harness.init(.{ .transfer = .{ .enabled = true, .upload_dir = "/nonexistent" } });
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    // The viewer's terminal, pinned as a message handler pins it; then the view ends, as when the
+    // terminal closes between the pin and the check.
+    const term = hs.hub.pin(v).?;
+    defer hs.hub.unpin(term);
+    try testing.expect(v.viewGenOf(term) != null);
+    hs.hub.handle(v, .{ .close_view = {} });
+    try testing.expect(v.viewGenOf(term) == null);
+    // The lock is free again: the viewer can be answered and asked.
+    v.pushText("{\"t\":\"pong\"}");
+    _ = v.viewGen();
+    hs.hub.handle(v, .{ .ul = .{ .name = "a.txt", .size = 1, .at = hs.at() } });
+    const f = (try waitFrame(v, isError)) orelse return error.TestUnexpectedResult;
+    defer f.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, f.data, "no terminal open") != null);
 }
 
 test "hub: opening, sizing and terminal actions count against the heavy-request limit" {

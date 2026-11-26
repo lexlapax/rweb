@@ -285,7 +285,9 @@ fn syncToDisk(io: Io, f: Io.File) Io.File.SyncError!void {
                 @backingInt(std.c.E.NOSPC) => return error.NoSpaceLeft,
                 @backingInt(std.c.E.DQUOT) => return error.DiskQuota,
                 @backingInt(std.c.E.ACCES), @backingInt(std.c.E.PERM), @backingInt(std.c.E.ROFS) => return error.AccessDenied,
-                else => return error.Unexpected,
+                // Any other answer is taken as "no full flush here": `fsync` below still reports a
+                // real failure, and an errno nobody listed must not make every upload fail.
+                else => break,
             }
         }
     }
