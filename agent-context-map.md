@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: `f43ae8e` on all four hosts, tested through Serve in desktop Chrome, Android emulator Chrome and iOS Simulator Safari; the owner's phone next).
+Last updated: 2026-11-26 (laptop-mac: `f43ae8e` on all four hosts; browsers and the owner's phone checked; the 0.1.1 release commit next, on the owner's word).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## 2026-11-26: `f43ae8e` deployed
@@ -23,10 +23,10 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
   closes after a switch; Copy view; View only blocks a paste; reconnect reopens the same terminal. The
   clipboard delay was made by replacing `navigator.clipboard.readText` in the page; taps were the page's
   own `click()`, not touch. Sessions, uploads, safaridriver and the emulator removed or stopped.
-- **Not verified:** the owner's phone on this build (real soft keyboard, real clipboard, touch); a
-  host's sleep and wake.
-- **Next:** the owner's phone check (a page left open from `1908e25` asks to be reloaded); then, on the
-  owner's word, the 0.1.1 release commit (date the changelog), tag and private release. The archives in
+- **The owner's phone (2026-11-26):** the owner tested this build on their phone and reported "tested all
+  done" (the step list given: paste, typing and key bar, upload, download, Copy, reconnect, on each host).
+- **Not verified:** a host's sleep and wake.
+- **Next:** on the owner's word, the 0.1.1 release commit (date the changelog), tag and private release. The archives in
   `zig-out/release/0.1.1/` are of `f43ae8e`; a release commit changes the commit, so they are rebuilt then.
 
 ## 2026-11-26: round six + follow-up hardening (pushed on `main`; not yet deployed)
