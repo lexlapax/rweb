@@ -178,7 +178,7 @@ test "live: download and list a directory against a real Rex (needs REX_SOCKET)"
     const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/rweb-test-xfer-{x}", .{rnd});
     try std.Io.Dir.cwd().createDirPath(io, dir);
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    const src_path = try std.fmt.allocPrint(a, "{s}/source.bin", .{dir});
+    const src_path = try a.print("{s}/source.bin", .{dir});
     defer a.free(src_path);
     const content = try a.alloc(u8, 150_000);
     defer a.free(content);

@@ -19,7 +19,7 @@ fn commitFile(b: *std.Build, given: ?[]const u8) std.Build.LazyPath {
 
 /// The bridge for one target, with its own Rex library and Ghostty built for that target.
 fn bridgeExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: anytype, opts: *std.Build.Step.Options, commit: std.Build.LazyPath, strip: ?bool) ?*std.Build.Step.Compile {
-    const ghostty = b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize }) orelse return null;
+    const ghostty = b.dependencyLazy("ghostty", .{ .target = target, .optimize = optimize }) catch return null;
     const rex = b.createModule(.{ .root_source_file = b.path("src/rex/root.zig"), .target = target, .optimize = optimize });
     rex.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
     // libc: the bridge calls it directly (getpwuid, umask, ACLs on macOS); said here, not left to the
@@ -48,7 +48,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Ghostty is built in the same mode as the rest: a Debug Ghostty is ~400x slower.
-    const ghostty = b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize });
+    const ghostty: ?*std.Build.Dependency = b.dependencyLazy("ghostty", .{ .target = target, .optimize = optimize }) catch null;
 
     const rex = b.addModule("rex", .{
         .root_source_file = b.path("src/rex/root.zig"),

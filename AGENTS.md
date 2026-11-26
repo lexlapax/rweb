@@ -97,6 +97,29 @@ the phone's Tailscale app or real touch hardware. Say which simulator was used, 
 for what a simulator cannot show.
 Do not claim a phase exit that was not observed.
 
+## Zig practice (owner, 2026-11-26)
+
+The reference is the owner's research note `tools/zig-idioms-audit-checklist` (in the research repository)
+and [docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md), which records how this code
+stands against it and what is still open.
+
+- Code uses the pinned Zig's current names. `zig fmt --check src build.zig` must pass; never revert a
+  rewrite the formatter makes.
+- Before changing the pinned Zig version, run the note's stale-API search and fix the hits in the same
+  change. For an API of the pinned version, trust the installed std source over memory or older posts.
+- Allocators and `Io` are parameters: no global or hidden allocator. Which allocator a release build
+  runs on is a recorded decision, not a default nobody chose.
+- No `catch {}` except commented best-effort cleanup. No `catch unreachable` or `unreachable` that peer
+  input, I/O or a failed allocation can reach.
+- A `switch` over a message type or an error set has no `else`: a new member must fail to compile until
+  someone decides how it is handled.
+- Every type that owns memory has a test that fails each allocation in turn
+  (`std.testing.checkAllAllocationFailures`); every parser of untrusted bytes has a fuzz test.
+- A hand-declared C struct or constant carries a compile-time guard for the targets it is right for.
+- Fixed facts move to compile time only where that stays readable: no metaprogramming where a table or a
+  `switch` does the job.
+- A performance claim comes with a measurement taken in `ReleaseSafe` or faster.
+
 ## Before EVERY commit (including amend/fixup)
 
 1. Update **agent-context-map.md in the same commit** with current state, changed areas, checks

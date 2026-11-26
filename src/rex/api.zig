@@ -117,13 +117,13 @@ pub const Api = struct {
 
     fn setLastError(a: *Api, comptime fmt: []const u8, args: anytype) void {
         if (a.last_error) |old| a.gpa.free(old);
-        a.last_error = std.fmt.allocPrint(a.gpa, fmt, args) catch null;
+        a.last_error = a.gpa.print(fmt, args) catch null;
     }
 
     fn sessionBody(a: *Api, sid: []const u8, rest: []const u8) ![]u8 {
         const s = try a.q(sid);
         defer a.gpa.free(s);
-        return std.fmt.allocPrint(a.gpa, "{{\"session_id\":{s}{s}}}", .{ s, rest });
+        return a.gpa.print("{{\"session_id\":{s}{s}}}", .{ s, rest });
     }
 
     fn blockBody(a: *Api, sid: []const u8, bid: []const u8, rest: []const u8) ![]u8 {
@@ -131,7 +131,7 @@ pub const Api = struct {
         defer a.gpa.free(s);
         const b = try a.q(bid);
         defer a.gpa.free(b);
-        return std.fmt.allocPrint(a.gpa, "{{\"session_id\":{s},\"block_id\":{s}{s}}}", .{ s, b, rest });
+        return a.gpa.print("{{\"session_id\":{s},\"block_id\":{s}{s}}}", .{ s, b, rest });
     }
 
     // ---- sessions ----
@@ -152,9 +152,9 @@ pub const Api = struct {
 
     /// A session with one window holding one shell.
     pub fn createSession(a: *Api, label: ?[]const u8) Error!Owned(Created) {
-        const lab = if (label) |l| try std.fmt.allocPrint(a.gpa, "\"label\":{f},", .{std.json.fmt(l, .{})}) else null;
+        const lab = if (label) |l| try a.gpa.print("\"label\":{f},", .{std.json.fmt(l, .{})}) else null;
         defer if (lab) |x| a.gpa.free(x);
-        const fixed = try std.fmt.allocPrint(a.gpa, "{{{s}\"initial_windows\":[{{\"layout\":{{\"block\":{{\"flavor\":\"{s}\"}}}}}}]}}", .{ lab orelse "", shell_flavor });
+        const fixed = try a.gpa.print("{{{s}\"initial_windows\":[{{\"layout\":{{\"block\":{{\"flavor\":\"{s}\"}}}}}}]}}", .{ lab orelse "", shell_flavor });
         defer a.gpa.free(fixed);
         var res = try a.run("session.create", fixed);
         defer res.deinit();
@@ -175,7 +175,7 @@ pub const Api = struct {
     pub fn renameSession(a: *Api, sid: []const u8, label: []const u8) Error!void {
         const l = try a.q(label);
         defer a.gpa.free(l);
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"label\":{s}", .{l});
+        const rest = try a.gpa.print(",\"label\":{s}", .{l});
         defer a.gpa.free(rest);
         const body = try a.sessionBody(sid, rest);
         defer a.gpa.free(body);
@@ -238,7 +238,7 @@ pub const Api = struct {
 
     /// A new window holding a shell. It becomes the active window only if `focus`.
     pub fn newTerminal(a: *Api, sid: []const u8, focus: bool) Error!Owned(NewTerminal) {
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"focus\":{s},\"layout\":{{\"block\":{{\"flavor\":\"{s}\"}}}}", .{ if (focus) "true" else "false", shell_flavor });
+        const rest = try a.gpa.print(",\"focus\":{s},\"layout\":{{\"block\":{{\"flavor\":\"{s}\"}}}}", .{ if (focus) "true" else "false", shell_flavor });
         defer a.gpa.free(rest);
         const body = try a.sessionBody(sid, rest);
         defer a.gpa.free(body);
@@ -258,7 +258,7 @@ pub const Api = struct {
     pub fn closeBlock(a: *Api, sid: []const u8, bid: []const u8) Error!void {
         const b = try a.q(bid);
         defer a.gpa.free(b);
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"block_id\":{s}", .{b});
+        const rest = try a.gpa.print(",\"block_id\":{s}", .{b});
         defer a.gpa.free(rest);
         const body = try a.sessionBody(sid, rest);
         defer a.gpa.free(body);
@@ -271,7 +271,7 @@ pub const Api = struct {
         defer a.gpa.free(l);
         const b = try a.q(bid);
         defer a.gpa.free(b);
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"block_id\":{s},\"label\":{s}", .{ b, l });
+        const rest = try a.gpa.print(",\"block_id\":{s},\"label\":{s}", .{ b, l });
         defer a.gpa.free(rest);
         const body = try a.sessionBody(sid, rest);
         defer a.gpa.free(body);
@@ -283,7 +283,7 @@ pub const Api = struct {
 
     /// Ask for a size. It applies at once if the caller owns the block or nobody does.
     pub fn resize(a: *Api, sid: []const u8, bid: []const u8, cols: u16, rows: u16) Error!void {
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"args\":{{\"columns\":{d},\"rows\":{d}}}", .{ cols, rows });
+        const rest = try a.gpa.print(",\"args\":{{\"columns\":{d},\"rows\":{d}}}", .{ cols, rows });
         defer a.gpa.free(rest);
         const body = try a.blockBody(sid, bid, rest);
         defer a.gpa.free(body);
@@ -295,7 +295,7 @@ pub const Api = struct {
     pub fn format(a: *Api, sid: []const u8, bid: []const u8, kind: []const u8) Error!Owned([]const u8) {
         const k = try a.q(kind);
         defer a.gpa.free(k);
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"args\":{{\"format\":{s}}}", .{k});
+        const rest = try a.gpa.print(",\"args\":{{\"format\":{s}}}", .{k});
         defer a.gpa.free(rest);
         const body = try a.blockBody(sid, bid, rest);
         defer a.gpa.free(body);
@@ -339,7 +339,7 @@ pub const Api = struct {
     pub fn downloadBegin(a: *Api, sid: []const u8, bid: []const u8, ref: []const u8, path: []const u8) Error!Owned(DownloadTicket) {
         const args = std.json.Stringify.valueAlloc(a.gpa, .{ .ref = ref, .path = path }, .{}) catch return error.OutOfMemory;
         defer a.gpa.free(args);
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"args\":{s}", .{args});
+        const rest = try a.gpa.print(",\"args\":{s}", .{args});
         defer a.gpa.free(rest);
         const body = try a.blockBody(sid, bid, rest);
         defer a.gpa.free(body);
@@ -361,7 +361,7 @@ pub const Api = struct {
     pub fn paste(a: *Api, sid: []const u8, bid: []const u8, text: []const u8) Error!void {
         const payload = std.json.Stringify.valueAlloc(a.gpa, .{ .text = text }, .{}) catch return error.OutOfMemory;
         defer a.gpa.free(payload);
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"event\":{{\"type\":\"paste\",\"payload\":{s}}}", .{payload});
+        const rest = try a.gpa.print(",\"event\":{{\"type\":\"paste\",\"payload\":{s}}}", .{payload});
         defer a.gpa.free(rest);
         const body = try a.blockBody(sid, bid, rest);
         defer a.gpa.free(body);
@@ -376,7 +376,7 @@ pub const Api = struct {
     pub fn listDir(a: *Api, sid: []const u8, bid: []const u8, path: []const u8) Error!Owned(Dir) {
         const args = std.json.Stringify.valueAlloc(a.gpa, .{ .path = path, .files = true, .limit = 1000 }, .{}) catch return error.OutOfMemory;
         defer a.gpa.free(args);
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"args\":{s}", .{args});
+        const rest = try a.gpa.print(",\"args\":{s}", .{args});
         defer a.gpa.free(rest);
         const body = try a.blockBody(sid, bid, rest);
         defer a.gpa.free(body);
@@ -515,7 +515,7 @@ pub const Api = struct {
     fn ownership(a: *Api, method: []const u8, sid: []const u8, bid: []const u8, mode: ?[]const u8) Error!Owned(BlockOwner) {
         const b = try a.q(bid);
         defer a.gpa.free(b);
-        const rest = try std.fmt.allocPrint(a.gpa, ",\"block_ids\":[{s}]{s}{s}{s}", .{
+        const rest = try a.gpa.print(",\"block_ids\":[{s}]{s}{s}{s}", .{
             b,
             if (mode != null) ",\"mode\":\"" else "",
             mode orelse "",
@@ -868,10 +868,10 @@ test "fake: downloads and listings are served only from the fake's own folder" {
     defer r.deinit(a);
     const root = r.f.files_root.?;
     // A file inside, a folder inside, and a file outside.
-    const inside = try std.fmt.allocPrint(a, "{s}/in.txt", .{root});
+    const inside = try a.print("{s}/in.txt", .{root});
     defer a.free(inside);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = inside, .data = "inside" });
-    const sub = try std.fmt.allocPrint(a, "{s}/sub", .{root});
+    const sub = try a.print("{s}/sub", .{root});
     defer a.free(sub);
     try Io.Dir.cwd().createDirPath(io, sub);
     var rnd: [4]u8 = undefined;
@@ -880,14 +880,14 @@ test "fake: downloads and listings are served only from the fake's own folder" {
     const outside_dir = try std.fmt.bufPrint(&ob, "/tmp/rweb-test-outside-{x}", .{rnd});
     try Io.Dir.cwd().createDirPath(io, outside_dir);
     defer Io.Dir.cwd().deleteTree(io, outside_dir) catch {};
-    const outside = try std.fmt.allocPrint(a, "{s}/out.txt", .{outside_dir});
+    const outside = try a.print("{s}/out.txt", .{outside_dir});
     defer a.free(outside);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = outside, .data = "outside" });
     // A link inside that points outside, and a path that climbs out.
-    const link = try std.fmt.allocPrint(a, "{s}/link.txt", .{root});
+    const link = try a.print("{s}/link.txt", .{root});
     defer a.free(link);
     try Io.Dir.cwd().symLink(io, outside, link, .{});
-    const climb = try std.fmt.allocPrint(a, "{s}/sub/../../{s}/out.txt", .{ root, std.fs.path.basename(outside_dir) });
+    const climb = try a.print("{s}/sub/../../{s}/out.txt", .{ root, std.fs.path.basename(outside_dir) });
     defer a.free(climb);
 
     {

@@ -129,7 +129,7 @@ pub const Data = struct {
         defer gpa.free(sid);
         const bid = try std.json.Stringify.valueAlloc(gpa, block_id, .{});
         defer gpa.free(bid);
-        const body = try std.fmt.allocPrint(gpa, "{{\"session_id\":{s},\"block_id\":{s},\"data_ref_id\":\"terminal\",\"subprotocol\":\"{s}\"}}", .{ sid, bid, subprotocol });
+        const body = try gpa.print("{{\"session_id\":{s},\"block_id\":{s},\"data_ref_id\":\"terminal\",\"subprotocol\":\"{s}\"}}", .{ sid, bid, subprotocol });
         defer gpa.free(body);
         var r = try control.call("data.connect", body);
         defer r.deinit();
@@ -401,7 +401,7 @@ const Setup = struct {
         errdefer a.free(sid);
         const bid = try a.dupe(u8, p.get("initial_windows").?.array.items[0].object.get("block_ids").?.array.items[0].string);
         errdefer a.free(bid);
-        const body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{sid});
+        const body = try a.print("{{\"session_id\":\"{s}\"}}", .{sid});
         defer a.free(body);
         var at = try ctl.call("session.attach", body);
         at.deinit();
@@ -481,7 +481,7 @@ test "data: a used ticket is rejected" {
     var cap: Capture = .{ .gpa = a, .io = testing.io };
     defer cap.deinit();
     const sid = s.session_id;
-    const body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\"}}", .{ sid, s.block_id });
+    const body = try a.print("{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\"}}", .{ sid, s.block_id });
     defer a.free(body);
     var r = try s.ctl.call("data.connect", body);
     defer r.deinit();
@@ -516,7 +516,7 @@ test "data: after a server restart the stream needs restarting, and a new one wo
         }
     }
     try testing.expect(gen2 != null);
-    const body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{s.session_id});
+    const body = try a.print("{{\"session_id\":\"{s}\"}}", .{s.session_id});
     defer a.free(body);
     var at = try s.ctl.call("session.attach", body);
     at.deinit();
@@ -541,7 +541,7 @@ test "live: stream a throwaway terminal on a real Rex (needs REX_SOCKET)" {
     defer a.free(sid);
     const bid = try a.dupe(u8, p.get("initial_windows").?.array.items[0].object.get("block_ids").?.array.items[0].string);
     defer a.free(bid);
-    const sid_body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{sid});
+    const sid_body = try a.print("{{\"session_id\":\"{s}\"}}", .{sid});
     defer a.free(sid_body);
     // Always destroy the throwaway session, whatever happens below.
     defer {
@@ -559,7 +559,7 @@ test "live: stream a throwaway terminal on a real Rex (needs REX_SOCKET)" {
     defer d.close();
     try cap.waitFor("\"type\":\"resize\"");
 
-    const wr = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"args\":{{\"data\":\"echo rweb-live-$((6*7))\\n\"}}}}", .{ sid, bid });
+    const wr = try a.print("{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"args\":{{\"data\":\"echo rweb-live-$((6*7))\\n\"}}}}", .{ sid, bid });
     defer a.free(wr);
     var w = try ctl.call("com.superlogical.terminal.write", wr);
     defer w.deinit();
@@ -603,9 +603,9 @@ test "data: close shuts a resume still in its handshake, and that is not an end"
         const ctl = try Control.open(a, testing.io, .{ .socket_path = path, .reconnect = false });
         defer ctl.close();
         const made = try f.createSession("rweb-test-resume");
-        const body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\"}}", .{ made.session_id, made.block_id });
+        const body = try a.print("{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\"}}", .{ made.session_id, made.block_id });
         defer a.free(body);
-        const sb = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{made.session_id});
+        const sb = try a.print("{{\"session_id\":\"{s}\"}}", .{made.session_id});
         defer a.free(sb);
         var at = try ctl.call("session.attach", sb);
         at.deinit();

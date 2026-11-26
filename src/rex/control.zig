@@ -455,7 +455,7 @@ pub const Control = struct {
 
         const method_json = try std.json.Stringify.valueAlloc(gpa, method, .{});
         defer gpa.free(method_json);
-        const req = try std.fmt.allocPrint(gpa, "{{\"type\":\"request\",\"id\":\"{s}\",\"method\":{s}{s}{s}}}", .{
+        const req = try gpa.print("{{\"type\":\"request\",\"id\":\"{s}\",\"method\":{s}{s}{s}}}", .{
             id,
             method_json,
             if (payload_json != null) ",\"payload\":" else "",
@@ -670,7 +670,7 @@ test "control: concurrent calls are matched to their responses" {
     defer c.close();
     const T = struct {
         fn run(ctl: *Control, label: []const u8, ok: *bool) void {
-            const body = std.fmt.allocPrint(testing.allocator, "{{\"label\":\"{s}\"}}", .{label}) catch return;
+            const body = testing.allocator.print("{{\"label\":\"{s}\"}}", .{label}) catch return;
             defer testing.allocator.free(body);
             var r = ctl.call("session.create", body) catch return;
             defer r.deinit();
@@ -1061,7 +1061,7 @@ test "control: a Rex that stops reading cannot hold a call's write past the call
     const filler = try a.alloc(u8, 900 * 1024);
     defer a.free(filler);
     @memset(filler, 'x');
-    const body = try std.fmt.allocPrint(a, "{{\"label\":\"{s}\"}}", .{filler});
+    const body = try a.print("{{\"label\":\"{s}\"}}", .{filler});
     defer a.free(body);
     const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
     try testing.expectError(error.ConnectionLost, c.call("session.create", body));

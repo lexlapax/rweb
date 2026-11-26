@@ -1069,7 +1069,7 @@ test "mirror: follows a stream from the fake server through Control and Data" {
     const ctl = try Control.open(a, testing.io, .{ .socket_path = f.path });
     defer ctl.close();
     const made = try f.createSession("rweb-test-mirror");
-    const body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{made.session_id});
+    const body = try a.print("{{\"session_id\":\"{s}\"}}", .{made.session_id});
     defer a.free(body);
     var at = try ctl.call("session.attach", body);
     at.deinit();
@@ -1125,7 +1125,7 @@ test "live: the mirror agrees with Rex's own capture of a throwaway terminal (ne
     defer a.free(sid);
     const bid = try a.dupe(u8, p.get("initial_windows").?.array.items[0].object.get("block_ids").?.array.items[0].string);
     defer a.free(bid);
-    const sid_body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{sid});
+    const sid_body = try a.print("{{\"session_id\":\"{s}\"}}", .{sid});
     defer a.free(sid_body);
     defer {
         if (ctl.call("session.destroy", sid_body)) |r| {
@@ -1141,12 +1141,12 @@ test "live: the mirror agrees with Rex's own capture of a throwaway terminal (ne
     const d = try data.Data.openTerminal(a, testing.io, ctl, sid, bid, m.sink());
     defer d.close();
 
-    const wr = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"args\":{{\"data\":\"printf 'plain \\\\033[31mred\\\\033[0m wide:\\\\xe4\\\\xb8\\\\xad e\\\\xcc\\\\x81\\\\n'; echo done-$((6*7))\\n\"}}}}", .{ sid, bid });
+    const wr = try a.print("{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"args\":{{\"data\":\"printf 'plain \\\\033[31mred\\\\033[0m wide:\\\\xe4\\\\xb8\\\\xad e\\\\xcc\\\\x81\\\\n'; echo done-$((6*7))\\n\"}}}}", .{ sid, bid });
     defer a.free(wr);
     var w = try ctl.call("com.superlogical.terminal.write", wr);
     w.deinit();
 
-    const fmt_body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"args\":{{\"format\":\"text\",\"trim\":true}}}}", .{ sid, bid });
+    const fmt_body = try a.print("{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"args\":{{\"format\":\"text\",\"trim\":true}}}}", .{ sid, bid });
     defer a.free(fmt_body);
 
     // Poll until the two agree (the shell prompt may still be arriving); fail if they never do.

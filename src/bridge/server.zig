@@ -150,7 +150,8 @@ fn listenLoopback(family: Family, port: u16) !Io.net.Server {
         else => error.SocketFailed,
     };
     errdefer _ = std.c.close(fd);
-    _ = std.c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
+    // Without close-on-exec the `tailscale` child would inherit the listener.
+    if (std.c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC)) != 0) return error.SocketFailed;
     const one: c_int = 1;
     if (std.c.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &one, @sizeOf(c_int)) != 0) return error.SocketFailed;
     var address: Io.net.IpAddress = undefined;
@@ -574,7 +575,7 @@ pub const Server = struct {
                 const uid = rex.ws.peerUid(conn);
                 const ok = if (uid) |u| std.mem.indexOfScalar(u32, uids, u) != null else false;
                 if (!ok) {
-                    s.last_refusal.store(@intFromEnum(access.Refusal.wrong_peer), .release);
+                    s.last_refusal.store(@backingInt(access.Refusal.wrong_peer), .release);
                     _ = s.refusals.fetchAdd(1, .acq_rel);
                     log.info("refused: {s}", .{access.Refusal.wrong_peer.text()});
                     conn.close(s.io);
@@ -640,8 +641,14 @@ pub const Server = struct {
 
     fn handleConn(s: *Server, conn: Io.net.Stream) void {
         s.conns_mu.lockUncancelable(s.io);
-        s.conns.append(s.gpa, conn) catch {};
+        // A connection `stop` could not shut is not served.
+        const tracked = if (s.conns.append(s.gpa, conn)) true else |_| false;
         s.conns_mu.unlock(s.io);
+        if (!tracked) {
+            _ = s.pending.fetchSub(1, .acq_rel);
+            conn.close(s.io);
+            return;
+        }
         var pending = true;
         var head_done: std.atomic.Value(bool) = .init(false);
         var watchdog: ?Io.Future(void) = s.io.concurrent(headWatchdog, .{ s, conn, &head_done }) catch null;
@@ -692,7 +699,7 @@ pub const Server = struct {
         const outer: []const u8 = if (s.opts.backend_secret) |secret|
             (stripSecret(req.head.target, secret) orelse {
                 logged_path = "(wrong prefix)";
-                s.last_refusal.store(@intFromEnum(access.Refusal.wrong_peer), .release);
+                s.last_refusal.store(@backingInt(access.Refusal.wrong_peer), .release);
                 _ = s.refusals.fetchAdd(1, .acq_rel);
                 try req.respond("not found\n", .{ .status = .not_found, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
                 return;
@@ -718,7 +725,7 @@ pub const Server = struct {
         var it = req.iterateHeaders();
         while (it.next()) |h| {
             if (n == hdrs.len) { // never judge a request on part of its headers
-                s.last_refusal.store(@intFromEnum(access.Refusal.ambiguous_header), .release);
+                s.last_refusal.store(@backingInt(access.Refusal.ambiguous_header), .release);
                 _ = s.refusals.fetchAdd(1, .acq_rel);
                 log.info("refused: too many headers", .{});
                 try req.respond("too many headers\n", .{ .status = .request_header_fields_too_large, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
@@ -750,7 +757,7 @@ pub const Server = struct {
             .cross_site => why = .cross_site_token,
             .wrong => {
                 if (!s.limiter.fail(s.io, nowMs(s.io), s.opts.max_token_failures, s.opts.token_window_ms)) {
-                    s.last_refusal.store(@intFromEnum(access.Refusal.bad_token), .release);
+                    s.last_refusal.store(@backingInt(access.Refusal.bad_token), .release);
                     _ = s.refusals.fetchAdd(1, .acq_rel);
                     try req.respond("too many wrong tokens: try again in a minute\n", .{ .status = .too_many_requests, .keep_alive = false, .extra_headers = &(security_headers ++ no_store ++ [_]std.http.Header{.{ .name = "retry-after", .value = "60" }}) });
                     return;
@@ -769,7 +776,7 @@ pub const Server = struct {
                     return s.serveAsset(&req, assets.indexOf(p).?, null, hdrs[0..n]);
                 }
             }
-            s.last_refusal.store(@intFromEnum(refusal), .release);
+            s.last_refusal.store(@backingInt(refusal), .release);
             _ = s.refusals.fetchAdd(1, .acq_rel);
             log.info("refused: {s}", .{refusal.text()});
             try req.respond("forbidden\n", .{ .status = .forbidden, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
@@ -1100,7 +1107,7 @@ pub const Server = struct {
                 const ext = if (dot) |d| (if (d == 0) "" else safe[d..]) else "";
                 final = std.fmt.bufPrint(&name_buf, "{s} ({d}){s}", .{ stem, attempt, ext }) catch return refuseXfer(req, .internal_server_error, "name\n");
             }
-            if (dir.createFile(s.io, final, .{ .exclusive = true, .permissions = @enumFromInt(0o600) })) |f| {
+            if (dir.createFile(s.io, final, .{ .exclusive = true, .permissions = @fromBackingInt(@intCast(0o600)) })) |f| {
                 file = f;
                 break;
             } else |e| switch (e) {
@@ -1141,7 +1148,7 @@ pub const Server = struct {
         const quoted = try xfer.shellQuote(s.gpa, full);
         defer s.gpa.free(quoted);
         // A space after it, so that several uploads paste as separate words, not one glued together.
-        const typed = try std.fmt.allocPrint(s.gpa, "{s} ", .{quoted});
+        const typed = try s.gpa.print("{s} ", .{quoted});
         defer s.gpa.free(typed);
         s.hub.api_mu.lockUncancelable(s.io);
         const pasted = s.hub.api.paste(entry.session_id, entry.block_id, typed);
@@ -1231,7 +1238,7 @@ pub const Server = struct {
                     if (s.opts.debug_input) log.info("browser at {d}: {s}", .{ std.Io.Clock.awake.now(s.io).toMilliseconds(), m.data });
                     _ = arena_state.reset(.retain_capacity);
                     const msg = protocol.parse(arena_state.allocator(), m.data) catch |e| {
-                        const text = std.fmt.allocPrint(gpa, "{{\"t\":\"error\",\"for\":\"message\",\"msg\":\"{t}\"}}", .{e}) catch continue;
+                        const text = gpa.print("{{\"t\":\"error\",\"for\":\"message\",\"msg\":\"{t}\"}}", .{e}) catch continue;
                         defer gpa.free(text);
                         v.pushText(text);
                         continue;
@@ -1508,7 +1515,7 @@ const Rig = struct {
     /// `path` with this rig's token added to its query. The caller frees it.
     fn withToken(r: Rig, path: []const u8) ![]u8 {
         const sep: []const u8 = if (std.mem.indexOfScalar(u8, path, '?') != null) "&" else "?";
-        return std.fmt.allocPrint(testing.allocator, "{s}{s}token={s}", .{ path, sep, r.tok });
+        return testing.allocator.print("{s}{s}token={s}", .{ path, sep, r.tok });
     }
 
     fn tcp(r: Rig) !Io.net.Stream {
@@ -1543,7 +1550,7 @@ fn httpRequest(stream: Io.net.Stream, request: []const u8) !Http {
 }
 
 fn get(r: Rig, path: []const u8, headers: []const u8) !Http {
-    const req = try std.fmt.allocPrint(testing.allocator, "GET {s} HTTP/1.1\r\nHost: localhost\r\n{s}Connection: close\r\n\r\n", .{ path, headers });
+    const req = try testing.allocator.print("GET {s} HTTP/1.1\r\nHost: localhost\r\n{s}Connection: close\r\n\r\n", .{ path, headers });
     defer testing.allocator.free(req);
     return httpRequest(try r.tcp(), req);
 }
@@ -1643,7 +1650,7 @@ test "server: assets are compressed, validated and cached, so a phone loads them
     try testing.expect(tag.len == 34 and tag[0] == '"');
 
     // A browser that has it asks "still this?" and gets no body.
-    const hdr = try std.fmt.allocPrint(testing.allocator, "If-None-Match: {s}\r\n", .{tag});
+    const hdr = try testing.allocator.print("If-None-Match: {s}\r\n", .{tag});
     defer testing.allocator.free(hdr);
     const nm = try get(rig, path, hdr);
     defer freeHttp(nm);
@@ -1661,7 +1668,7 @@ test "server: assets are compressed, validated and cached, so a phone loads them
     try testing.expectEqualStrings("no-store", headerValue(page.head, "cache-control").?);
     try testing.expect(headerValue(page.head, "set-cookie") != null);
     const page_tag = headerValue(page.head, "etag").?;
-    const hdr2 = try std.fmt.allocPrint(testing.allocator, "If-None-Match: {s}\r\n", .{page_tag});
+    const hdr2 = try testing.allocator.print("If-None-Match: {s}\r\n", .{page_tag});
     defer testing.allocator.free(hdr2);
     const page2 = try get(rig, pagePath(rig, &ppb), hdr2);
     defer freeHttp(page2);
@@ -1761,11 +1768,11 @@ test "server: refuses a request with no token or the wrong one" {
     defer freeHttp(a);
     try testing.expectEqual(@as(u16, 403), a.status);
     try testing.expectEqualStrings("forbidden\n", a.body);
-    try testing.expectEqual(@intFromEnum(access.Refusal.no_token), rig.srv.last_refusal.load(.acquire));
+    try testing.expectEqual(@backingInt(access.Refusal.no_token), rig.srv.last_refusal.load(.acquire));
     const b = try get(rig, "/?token=wrong", "");
     defer freeHttp(b);
     try testing.expectEqual(@as(u16, 403), b.status);
-    try testing.expectEqual(@intFromEnum(access.Refusal.bad_token), rig.srv.last_refusal.load(.acquire));
+    try testing.expectEqual(@backingInt(access.Refusal.bad_token), rig.srv.last_refusal.load(.acquire));
     try testing.expect(rig.srv.refusals.load(.acquire) >= 2);
     // A refused request never reaches Rex or the tree.
     const t = try get(rig, "/api/tree", "");
@@ -1780,7 +1787,7 @@ fn expectRefusedWith(rig: Rig, headers: []const u8, why: access.Refusal) !void {
     const h = try get(rig, "/", headers);
     defer freeHttp(h);
     try testing.expectEqual(@as(u16, 403), h.status);
-    try testing.expectEqual(@intFromEnum(why), rig.srv.last_refusal.load(.acquire));
+    try testing.expectEqual(@backingInt(why), rig.srv.last_refusal.load(.acquire));
 }
 
 test "server: Tailscale identity rules, each shown to refuse" {
@@ -1804,10 +1811,10 @@ test "server: a WebSocket needs a matching Origin" {
     defer testing.allocator.free(path);
     // Another site's page: refused at the upgrade.
     try testing.expectError(error.UpgradeRefused, rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), path, null, "Origin: https://evil.example\r\n"));
-    try testing.expectEqual(@intFromEnum(access.Refusal.bad_origin), rig.srv.last_refusal.load(.acquire));
+    try testing.expectEqual(@backingInt(access.Refusal.bad_origin), rig.srv.last_refusal.load(.acquire));
     // No Origin at all: refused.
     try testing.expectError(error.UpgradeRefused, rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), path, null, ""));
-    try testing.expectEqual(@intFromEnum(access.Refusal.no_origin), rig.srv.last_refusal.load(.acquire));
+    try testing.expectEqual(@backingInt(access.Refusal.no_origin), rig.srv.last_refusal.load(.acquire));
     // The page's own origin: accepted.
     const c = try rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), path, null, "Origin: http://localhost\r\n");
     c.deinit(testing.allocator);
@@ -1844,7 +1851,7 @@ fn browser(rig: Rig) !*rex.ws.Conn {
 }
 
 fn sendJson(c: *rex.ws.Conn, comptime fmt: []const u8, args: anytype) !void {
-    const text = try std.fmt.allocPrint(testing.allocator, fmt, args);
+    const text = try testing.allocator.print(fmt, args);
     defer testing.allocator.free(text);
     try c.writeFrame(.text, text);
 }
@@ -1955,7 +1962,7 @@ fn tmpSocketPath(buf: []u8, io: Io) ![]const u8 {
 fn unixGet(rig: Rig, path: []const u8) !Http {
     const addr = try Io.net.UnixAddress.init(rig.srv.opts.listen.unix);
     const stream = try addr.connect(testing.io);
-    const req = try std.fmt.allocPrint(testing.allocator, "GET {s} HTTP/1.1\r\nHost: localhost\r\nTailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.9\r\nConnection: close\r\n\r\n", .{path});
+    const req = try testing.allocator.print("GET {s} HTTP/1.1\r\nHost: localhost\r\nTailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.9\r\nConnection: close\r\n\r\n", .{path});
     defer testing.allocator.free(req);
     return httpRequest(stream, req);
 }
@@ -1975,11 +1982,11 @@ test "server: a unix socket is private, and only the allowed peers get in" {
         const rig = try Rig.init(.{}, cfg, .{ .unix = path });
         defer rig.deinit();
         const st = try Io.Dir.cwd().statFile(testing.io, path, .{});
-        try testing.expectEqual(@as(u32, 0o600), @intFromEnum(st.permissions) & 0o777);
+        try testing.expectEqual(@as(u32, 0o600), @backingInt(st.permissions) & 0o777);
         var d = try Io.Dir.cwd().openDir(testing.io, dir, .{});
         defer d.close(testing.io);
         const ds = try d.stat(testing.io);
-        try testing.expectEqual(@as(u32, 0o700), @intFromEnum(ds.permissions) & 0o777);
+        try testing.expectEqual(@as(u32, 0o700), @backingInt(ds.permissions) & 0o777);
         const ok = try unixGet(rig, "/");
         defer freeHttp(ok);
         try testing.expectEqual(@as(u16, 200), ok.status);
@@ -1996,7 +2003,7 @@ test "server: a unix socket is private, and only the allowed peers get in" {
             freeHttp(no);
             return error.PeerWasServed;
         } else |_| {}
-        try testing.expectEqual(@intFromEnum(access.Refusal.wrong_peer), rig.srv.last_refusal.load(.acquire));
+        try testing.expectEqual(@backingInt(access.Refusal.wrong_peer), rig.srv.last_refusal.load(.acquire));
     }
 }
 
@@ -2205,7 +2212,7 @@ test "server: a unix socket path that is a file, or in use, is never replaced" {
     const path = try tmpSocketPath(&pb, testing.io);
     const dir = std.fs.path.dirname(path).?;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
-    _ = try Io.Dir.cwd().createDirPathStatus(testing.io, dir, @enumFromInt(0o700));
+    _ = try Io.Dir.cwd().createDirPathStatus(testing.io, dir, @fromBackingInt(@intCast(0o700)));
 
     const a = testing.allocator;
     const f = try fake.Fake.start(a, testing.io);
@@ -2282,14 +2289,14 @@ test "server: the unix socket's folders are checked to the root, and only our ow
         try Io.Dir.cwd().createDirPath(testing.io, open);
         var z: [128:0]u8 = undefined;
         try testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}", .{open}, 0), 0o777));
-        _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/priv", .{open}), @enumFromInt(0o700));
+        _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/priv", .{open}), @fromBackingInt(@intCast(0o700)));
         const path = try std.fmt.bufPrint(&pb, "{s}/priv/bridge.sock", .{open});
         try testing.expectError(error.FolderWritableByOthers, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc, .problem = &problem }));
         try testing.expectEqualStrings(open, problem.pathText());
     }
     // Through a link of ours in a checked folder: followed during the checked walk, so it serves.
     {
-        _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/real/sock", .{base}), @enumFromInt(0o700));
+        _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/real/sock", .{base}), @fromBackingInt(@intCast(0o700)));
         var lb: [128]u8 = undefined;
         try Io.Dir.cwd().symLink(testing.io, try std.fmt.bufPrint(&lb, "{s}/real", .{base}), try std.fmt.bufPrint(&pb, "{s}/link", .{base}), .{});
         const path = try std.fmt.bufPrint(&pb, "{s}/link/sock/bridge.sock", .{base});
@@ -2340,7 +2347,7 @@ test "server: at most max_viewers WebSockets, and plain requests still get in" {
     // The third upgrade: 503, before any WebSocket is made.
     const path = try rig.withToken("/ws");
     defer testing.allocator.free(path);
-    const req = try std.fmt.allocPrint(testing.allocator, "GET {s} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", .{path});
+    const req = try testing.allocator.print("GET {s} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", .{path});
     defer testing.allocator.free(req);
     const third = try httpRequest(try rig.tcp(), req);
     defer freeHttp(third);
@@ -2489,7 +2496,7 @@ fn openRigExtra(cfg: hub_mod.Config, extra: Rig.Extra) !Opened {
 }
 
 fn put(rig: Rig, token_path: []const u8, headers: []const u8, body: []const u8) !Http {
-    const req = try std.fmt.allocPrint(testing.allocator, "PUT {s}?token={s} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\n{s}Connection: close\r\n\r\n", .{ token_path, rig.token(), body.len, headers });
+    const req = try testing.allocator.print("PUT {s}?token={s} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\n{s}Connection: close\r\n\r\n", .{ token_path, rig.token(), body.len, headers });
     defer testing.allocator.free(req);
     const all = try testing.allocator.alloc(u8, req.len + body.len);
     defer testing.allocator.free(all);
@@ -2517,7 +2524,7 @@ test "server: a download goes through a one-time token and nothing else" {
     var db: [64]u8 = undefined;
     const dir = try tmpDir(&db);
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/my notes.txt", .{dir});
+    const path = try testing.allocator.print("{s}/my notes.txt", .{dir});
     defer testing.allocator.free(path);
     const content = try testing.allocator.alloc(u8, 200_000);
     defer testing.allocator.free(content);
@@ -2545,7 +2552,7 @@ test "server: a download goes through a one-time token and nothing else" {
     try testing.expect(std.mem.indexOf(u8, msg, "\"kind\":\"download\"") != null);
     try testing.expect(std.mem.indexOf(u8, msg, "\"name\":\"my notes.txt\"") != null);
     const tok = try tokenIn(msg);
-    const url = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}?token={s}", .{ tok, o.rig.token() });
+    const url = try testing.allocator.print("/xfer/{s}?token={s}", .{ tok, o.rig.token() });
     defer testing.allocator.free(url);
 
     const h = try get(o.rig, url, "");
@@ -2585,7 +2592,7 @@ test "server: a download of a missing file, or one over the size limit, is refus
     var db: [64]u8 = undefined;
     const dir = try tmpDir(&db);
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
-    const big = try std.fmt.allocPrint(testing.allocator, "{s}/big.bin", .{dir});
+    const big = try testing.allocator.print("{s}/big.bin", .{dir});
     defer testing.allocator.free(big);
     {
         const f = try Io.Dir.cwd().createFile(testing.io, big, .{});
@@ -2618,10 +2625,10 @@ test "server: a directory listing for the picker" {
     var db: [64]u8 = undefined;
     const dir = try tmpDir(&db);
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
-    const sub = try std.fmt.allocPrint(testing.allocator, "{s}/sub", .{dir});
+    const sub = try testing.allocator.print("{s}/sub", .{dir});
     defer testing.allocator.free(sub);
     try Io.Dir.cwd().createDirPath(testing.io, sub);
-    const fp = try std.fmt.allocPrint(testing.allocator, "{s}/a.txt", .{dir});
+    const fp = try testing.allocator.print("{s}/a.txt", .{dir});
     defer testing.allocator.free(fp);
     (try Io.Dir.cwd().createFile(testing.io, fp, .{})).close(testing.io);
     const o = try openRig(.{ .transfer = .{ .enabled = true } });
@@ -2654,28 +2661,28 @@ test "server: an upload lands only in the upload folder, under a safe new name, 
     try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"../../etc/evil;rm -rf ~.txt\",\"size\":{d}}}", .{content.len});
     const msg = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(msg);
-    const url = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(msg)});
+    const url = try testing.allocator.print("/xfer/{s}", .{try tokenIn(msg)});
     defer testing.allocator.free(url);
     const r = try put(o.rig, url, "Origin: http://localhost\r\n", content);
     defer freeHttp(r);
     try testing.expectEqual(@as(u16, 200), r.status);
 
     // Only the safe name, in the folder, with the content, closed to others.
-    const saved = try std.fmt.allocPrint(testing.allocator, "{s}/evil_rm -rf _.txt", .{dir});
+    const saved = try testing.allocator.print("{s}/evil_rm -rf _.txt", .{dir});
     defer testing.allocator.free(saved);
     const got = try Io.Dir.cwd().readFileAlloc(testing.io, saved, testing.allocator, .limited(1 << 16));
     defer testing.allocator.free(got);
     try testing.expectEqualStrings(content, got);
     const st = try Io.Dir.cwd().statFile(testing.io, saved, .{});
-    try testing.expectEqual(@as(u32, 0o600), @intFromEnum(st.permissions) & 0o777);
-    const saved_real = try std.fmt.allocPrint(testing.allocator, "{s}/evil_rm -rf _.txt", .{real});
+    try testing.expectEqual(@as(u32, 0o600), @backingInt(st.permissions) & 0o777);
+    const saved_real = try testing.allocator.print("{s}/evil_rm -rf _.txt", .{real});
     defer testing.allocator.free(saved_real);
     try testing.expect(std.mem.indexOf(u8, r.body, saved_real) != null);
     // Nothing escaped into the folders above it.
     try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, "/tmp/etc/evil;rm -rf ~.txt", .{}));
 
     // The terminal was given the quoted real path, to type or not.
-    const quoted = try std.fmt.allocPrint(testing.allocator, "'{s}' ", .{saved_real}); // with the space that separates it from the next
+    const quoted = try testing.allocator.print("'{s}' ", .{saved_real}); // with the space that separates it from the next
     defer testing.allocator.free(quoted);
     try waitBinary(o.c, quoted);
 
@@ -2683,12 +2690,12 @@ test "server: an upload lands only in the upload folder, under a safe new name, 
     try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"evil;rm -rf ~.txt\",\"size\":3}}", .{});
     const msg2 = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(msg2);
-    const url2 = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(msg2)});
+    const url2 = try testing.allocator.print("/xfer/{s}", .{try tokenIn(msg2)});
     defer testing.allocator.free(url2);
     const r2 = try put(o.rig, url2, "Origin: http://localhost\r\n", "new");
     defer freeHttp(r2);
     try testing.expectEqual(@as(u16, 200), r2.status);
-    const second = try std.fmt.allocPrint(testing.allocator, "{s}/evil_rm -rf _ (1).txt", .{dir});
+    const second = try testing.allocator.print("{s}/evil_rm -rf _ (1).txt", .{dir});
     defer testing.allocator.free(second);
     const got2 = try Io.Dir.cwd().readFileAlloc(testing.io, second, testing.allocator, .limited(64));
     defer testing.allocator.free(got2);
@@ -2716,7 +2723,7 @@ test "server: an upload is refused without the page's Origin, with the wrong siz
     try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":4}}", .{});
     const m = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(m);
-    const url = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(m)});
+    const url = try testing.allocator.print("/xfer/{s}", .{try tokenIn(m)});
     defer testing.allocator.free(url);
     const evil = try put(o.rig, url, "Origin: https://evil.example\r\n", "data");
     defer freeHttp(evil);
@@ -2732,18 +2739,18 @@ test "server: an upload is refused without the page's Origin, with the wrong siz
     const reuse = try put(o.rig, url, "Origin: http://localhost\r\n", "data");
     defer freeHttp(reuse);
     try testing.expectEqual(@as(u16, 404), reuse.status);
-    const ghost = try std.fmt.allocPrint(testing.allocator, "{s}/a.txt", .{dir});
+    const ghost = try testing.allocator.print("{s}/a.txt", .{dir});
     defer testing.allocator.free(ghost);
     try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, ghost, .{}));
 
     // A download token cannot be used to upload.
-    const served = try std.fmt.allocPrint(testing.allocator, "{s}/served.txt", .{o.rig.f.files_root.?});
+    const served = try testing.allocator.print("{s}/served.txt", .{o.rig.f.files_root.?});
     defer testing.allocator.free(served);
     (try Io.Dir.cwd().createFile(testing.io, served, .{})).close(testing.io);
     try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\"}}", .{served});
     const d = try textWith(o.c, "\"kind\":\"download\"");
     defer testing.allocator.free(d);
-    const durl = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(d)});
+    const durl = try testing.allocator.print("/xfer/{s}", .{try tokenIn(d)});
     defer testing.allocator.free(durl);
     const swap = try put(o.rig, durl, "Origin: http://localhost\r\n", "x");
     defer freeHttp(swap);
@@ -2761,7 +2768,7 @@ test "server: a target with a control byte or a space is refused before routing"
     for ([_][]const u8{ "\x01", "\x7f", "\t", "\r", "\x00" }) |bad| {
         // Bare `/s/<id>` (once a redirect that copied the query) and a plain path.
         for ([_][]const u8{ pfx, "/" }) |base| {
-            const req = try std.fmt.allocPrint(testing.allocator, "GET {s}?a={s}x&token={s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", .{ base, bad, token });
+            const req = try testing.allocator.print("GET {s}?a={s}x&token={s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", .{ base, bad, token });
             defer testing.allocator.free(req);
             if (httpRequest(try rig.tcp(), req)) |h| {
                 defer freeHttp(h);
@@ -2789,7 +2796,7 @@ test "server: an upload token stops working once its page turns read-only or lea
     try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":3}}", .{});
     const m1 = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(m1);
-    const url1 = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(m1)});
+    const url1 = try testing.allocator.print("/xfer/{s}", .{try tokenIn(m1)});
     defer testing.allocator.free(url1);
     try sendJson(o.c, "{{\"t\":\"observe\",\"on\":true}}", .{});
     testing.allocator.free(try textWith(o.c, "\"observe\":true"));
@@ -2803,7 +2810,7 @@ test "server: an upload token stops working once its page turns read-only or lea
     try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"b.txt\",\"size\":3}}", .{});
     const m2 = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(m2);
-    const url2 = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(m2)});
+    const url2 = try testing.allocator.print("/xfer/{s}", .{try tokenIn(m2)});
     defer testing.allocator.free(url2);
     try sendJson(o.c, "{{\"t\":\"close_view\"}}", .{});
     try sendJson(o.c, "{{\"t\":\"ping\"}}", .{});
@@ -2812,7 +2819,7 @@ test "server: an upload token stops working once its page turns read-only or lea
     defer freeHttp(r2);
     try testing.expectEqual(@as(u16, 403), r2.status);
     for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
-        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, name });
+        const path = try testing.allocator.print("{s}/{s}", .{ dir, name });
         defer testing.allocator.free(path);
         try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, path, .{}));
     }
@@ -2823,9 +2830,9 @@ test "server: an upload goes into the folder opened at startup, whatever replace
     const up = try uploadDir(&db);
     defer up.dir.close(testing.io);
     const a = testing.allocator;
-    const moved = try std.fmt.allocPrint(a, "{s}.moved", .{up.path});
+    const moved = try a.print("{s}.moved", .{up.path});
     defer a.free(moved);
-    const elsewhere = try std.fmt.allocPrint(a, "{s}.elsewhere", .{up.path});
+    const elsewhere = try a.print("{s}.elsewhere", .{up.path});
     defer a.free(elsewhere);
     defer for ([_][]const u8{ up.path, moved, elsewhere }) |p| Io.Dir.cwd().deleteTree(testing.io, p) catch {};
     const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
@@ -2844,19 +2851,19 @@ test "server: an upload goes into the folder opened at startup, whatever replace
         try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"{s}\",\"size\":2}}", .{name});
         const msg = try textWith(o.c, "\"kind\":\"upload\"");
         defer a.free(msg);
-        const url = try std.fmt.allocPrint(a, "/xfer/{s}", .{try tokenIn(msg)});
+        const url = try a.print("/xfer/{s}", .{try tokenIn(msg)});
         defer a.free(url);
         const r = try put(o.rig, url, "Origin: http://localhost\r\n", "hi");
         defer freeHttp(r);
         try testing.expectEqual(@as(u16, 200), r.status);
         // In the original folder, under its new name; not in what took its place.
-        const kept = try std.fmt.allocPrint(a, "{s}/{s}", .{ moved, name });
+        const kept = try a.print("{s}/{s}", .{ moved, name });
         defer a.free(kept);
         const got = try Io.Dir.cwd().readFileAlloc(testing.io, kept, a, .limited(64));
         defer a.free(got);
         try testing.expectEqualStrings("hi", got);
         for ([_][]const u8{ up.path, elsewhere }) |d| {
-            const ghost = try std.fmt.allocPrint(a, "{s}/{s}", .{ d, name });
+            const ghost = try a.print("{s}/{s}", .{ d, name });
             defer a.free(ghost);
             try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, ghost, .{}));
         }
@@ -2876,7 +2883,7 @@ test "server: an upload that stops sending is cut, and its partial file removed"
     const msg = try textWith(o.c, "\"kind\":\"upload\"");
     defer a.free(msg);
     // Ten of the hundred bytes announced, then nothing.
-    const req = try std.fmt.allocPrint(a, "PUT /xfer/{s}?token={s} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: 100\r\n\r\n0123456789", .{ try tokenIn(msg), o.rig.token() });
+    const req = try a.print("PUT /xfer/{s}?token={s} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: 100\r\n\r\n0123456789", .{ try tokenIn(msg), o.rig.token() });
     defer a.free(req);
     const stream = try o.rig.tcp();
     defer stream.close(testing.io);
@@ -2890,7 +2897,7 @@ test "server: an upload that stops sending is cut, and its partial file removed"
     while (true) _ = r.interface.takeByte() catch break; // until the bridge cuts it
     try testing.expect(nowMs(testing.io) - t0 < 5_000);
     // The partial file goes as the handler unwinds.
-    const partial = try std.fmt.allocPrint(a, "{s}/stall.bin", .{up.path});
+    const partial = try a.print("{s}/stall.bin", .{up.path});
     defer a.free(partial);
     var gone = false;
     for (0..100) |_| {
@@ -2986,7 +2993,7 @@ test "server: a busy bridge does not use up a transfer token" {
     try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"later.txt\",\"size\":2}}", .{});
     const msg = try textWith(o.c, "\"kind\":\"upload\"");
     defer a.free(msg);
-    const url = try std.fmt.allocPrint(a, "/xfer/{s}", .{try tokenIn(msg)});
+    const url = try a.print("/xfer/{s}", .{try tokenIn(msg)});
     defer a.free(url);
     // Every slot taken: refused, and the token is still good afterwards.
     for (0..xfer.max_running) |_| try testing.expect(o.rig.hub.xfers.acquire());
@@ -3126,7 +3133,7 @@ test "server: guesses from another site, or with another Host, never lock the ow
         try testing.expectEqual(@as(u16, 403), r.status);
     }
     try testing.expectEqual(@as(u32, 0), rig.srv.limiter.used);
-    try testing.expectEqual(@intFromEnum(access.Refusal.cross_site_token), rig.srv.last_refusal.load(.acquire));
+    try testing.expectEqual(@backingInt(access.Refusal.cross_site_token), rig.srv.last_refusal.load(.acquire));
     // The right token from another site is refused too, without being compared.
     var qb: [96]u8 = undefined;
     const cross_right = try get(rig, try std.fmt.bufPrint(&qb, "/app.js?token={s}", .{rig.token()}), "Sec-Fetch-Site: same-site\r\n");
@@ -3223,7 +3230,7 @@ test "server: token mode with the default hosts serves 127.0.0.1 and localhost o
             const r = try httpRequest(try rig.tcp(), try std.fmt.bufPrint(&rb, "GET / HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{host}));
             defer freeHttp(r);
             try testing.expectEqual(@as(u16, 403), r.status);
-            try testing.expectEqual(@intFromEnum(access.Refusal.bad_host), rig.srv.last_refusal.load(.acquire));
+            try testing.expectEqual(@backingInt(access.Refusal.bad_host), rig.srv.last_refusal.load(.acquire));
         }
     }
     // A unix socket behind `ssh -L 127.0.0.1:7700:<socket>`: the loopback names on any port.

@@ -271,7 +271,7 @@ test "rejects what it should" {
     try t.expectError(error.BadField, parseT("{\"t\":\"observe\",\"on\":1}"));
     try t.expectError(error.BadField, parseT("{\"t\":\"rename_session\",\"session\":\"s\",\"label\":\"a\\nb\"}"));
     const long: [max_id_bytes + 1]u8 = @splat('x');
-    const lj = try std.fmt.allocPrint(testing.allocator, "{{\"t\":\"new_terminal\",\"session\":\"{s}\"}}", .{long});
+    const lj = try testing.allocator.print("{{\"t\":\"new_terminal\",\"session\":\"{s}\"}}", .{long});
     defer testing.allocator.free(lj);
     try t.expectError(error.TooLarge, parseT(lj));
     const big = try testing.allocator.alloc(u8, max_message_bytes + 1);
@@ -327,7 +327,7 @@ test "every message type is parsed as itself" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     for (std.meta.tags(std.meta.Tag(Msg))) |tag| {
-        const text = try std.fmt.allocPrint(arena.allocator(), "{{\"t\":\"{s}\"}}", .{@tagName(tag)});
+        const text = try arena.allocator().print("{{\"t\":\"{s}\"}}", .{@tagName(tag)});
         // Without its fields a message may be refused, but never as an unknown type.
         if (parse(arena.allocator(), text)) |m| {
             try testing.expectEqual(tag, std.meta.activeTag(m));

@@ -19,7 +19,7 @@ pub const Opcode = enum(u4) {
     _,
 
     pub fn isControl(op: Opcode) bool {
-        return @intFromEnum(op) >= 8;
+        return @backingInt(op) >= 8;
     }
 };
 
@@ -56,7 +56,7 @@ pub fn parseHeader(bytes: []const u8, max_len: u64) ParseError!Header {
     const b0 = bytes[0];
     const b1 = bytes[1];
     if (b0 & 0x70 != 0) return error.Protocol;
-    const op: Opcode = @enumFromInt(@as(u4, @truncate(b0)));
+    const op: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(b0))));
     switch (op) {
         .continuation, .text, .binary, .close, .ping, .pong => {},
         _ => return error.Protocol,
@@ -88,7 +88,7 @@ pub fn parseHeader(bytes: []const u8, max_len: u64) ParseError!Header {
 
 /// Write a frame header into `out`; returns its length. Client frames are masked.
 pub fn writeHeader(out: *[14]u8, op: Opcode, len: usize, mask: [4]u8, masked: bool) usize {
-    out[0] = 0x80 | @as(u8, @intFromEnum(op));
+    out[0] = 0x80 | @as(u8, @backingInt(op));
     const m: u8 = if (masked) 0x80 else 0;
     var n: usize = 2;
     if (len < 126) {

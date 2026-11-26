@@ -36,6 +36,8 @@ the round's document records those runs.
 - [Round 5](security-review-2026-11-26-round5.md): readiness, rescan and an internal review by variant
   (endpoints, lookups, documented procedures); the command line redesigned around `rweb tailscale` and
   `rweb ssh`; a second pass over that new code and a Zig idiom audit.
+- [Zig idiom audit](zig-idiom-audit-2026-11-26.md): the code against Zig's own practice, a 38-item
+  checklist, what was changed and what is left for after 0.1.1.
 
 ## Why it is built this way
 

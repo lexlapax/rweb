@@ -1,7 +1,29 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: round five merged to main locally; not pushed).
+Last updated: 2026-11-26 (laptop-mac: Zig idiom pass on main locally, after round five; not pushed).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-26: Zig idiom pass (owner: "did you follow the Zig ethos")
+
+- **What:** an idiom audit of the whole source and the owner's research note
+  (`tools/zig-idioms-audit-checklist`, in the research repository) run as a 38-item checklist. Record:
+  docs/zig-idiom-audit-2026-11-26.md (verdict: no rewrite; findings F1 to F24 with status; the checklist
+  item by item: 21 pass, 16 need a fix, 1 not applicable; Phase B). Rules: AGENTS.md "Zig practice".
+- **Changed now (no behaviour change):** the pinned Zig's current names: `@backingInt` /
+  `@fromBackingInt` (the formatter's rewrite is no longer reverted), `Allocator.print` for
+  `std.fmt.allocPrint` (204 sites), `dependencyLazy`; `zig fmt --check src build.zig` passes.
+- **Fixed now (small):** `tailscale` runs with a deadline and an output cap; a failed `Hub.open` frees
+  what it made; an untracked connection is closed; close-on-exec failure fails the listener;
+  `tools/release.sh` tests in `ReleaseSafe`.
+- **Checks run:** macOS `zig build test` after the renames 382/393 (11 skipped) and after the small
+  fixes 315/325 (10 skipped; fuzz from cache), web tests 42/42; Linux after the renames only: with the
+  live Rex 390/393 (3 skipped), without it 381/393 (12 skipped), `zig fmt --check` clean; the Linux
+  release binary read with `readelf` (static PIE, no interpreter, no needed libraries). **Not run:** the
+  small fixes on Linux (they compile for it), `tools/release.sh`, any measurement.
+- **Open (Phase B, after 0.1.1, each with measurements):** typed JSON in the Rex client; the release
+  allocator decision; per-frame and per-keystroke allocations; `checkAllAllocationFailures` tests; event
+  waits, one write-deadline watcher, the mutex around Rex calls; assertions on internal invariants; a
+  partial upload left by a stop signal. The audit document lists each with file and line.
 
 ## 2026-11-26: round five (in progress, not merged, not released)
 

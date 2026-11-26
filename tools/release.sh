@@ -57,7 +57,7 @@ fi
 echo "building with $zig $("$zig" version) ($(command -v "$zig"))"
 # The tests run on exactly what is packed (the exported commit), never against a real Rex: the live
 # tests need REX_SOCKET, which is removed here.
-(cd "$build" && env -u REX_SOCKET ZIG_GLOBAL_CACHE_DIR="$base/zig-cache" "$zig" build test) || die "the tests failed on $commit; nothing was packed"
+(cd "$build" && env -u REX_SOCKET ZIG_GLOBAL_CACHE_DIR="$base/zig-cache" "$zig" build test -Doptimize=ReleaseSafe) || die "the tests failed on $commit; nothing was packed"
 (cd "$build" && ZIG_GLOBAL_CACHE_DIR="$base/zig-cache" "$zig" build dist -Dcommit="$commit")
 mkdir -p "$top/zig-out/release"
 mkdir "$out" || die "$out appeared during the build; nothing was copied into it"

@@ -400,7 +400,7 @@ pub const Terminal = struct {
     fn onEnded(ctx: *anyopaque, why: rex.data.End) void {
         const t: *Terminal = @ptrCast(@alignCast(ctx));
         if (why == .closed_by_us) return;
-        t.ended.store(1 + @as(u8, @intFromEnum(why)), .release);
+        t.ended.store(1 + @as(u8, @backingInt(why)), .release);
         t.hub.supervisor_wake.set(t.hub.io);
     }
 };
@@ -528,6 +528,16 @@ pub const Hub = struct {
         ctl.mu.lockUncancelable(io);
         h.seen_generation = ctl.generation;
         ctl.mu.unlock(io);
+        // A failed open (Rex not ready yet: main tries again) frees what it made so far.
+        errdefer {
+            var ai = h.attached.keyIterator();
+            while (ai.next()) |k| gpa.free(k.*);
+            h.attached.deinit(gpa);
+            if (h.tree) |t| t.release(gpa);
+            if (h.known) |*k| k.arena.deinit();
+            h.api.deinit();
+            h.xfers.deinit();
+        }
         try h.subscribeAndRefresh();
         h.supervisor = try io.concurrent(supervise, .{h});
         return h;
@@ -1376,7 +1386,7 @@ pub const Hub = struct {
                 var blocks = h.api.blocks(s.session_id) catch {
                     // A session that just went away, or one that failed to answer: keep its
                     // terminals until a tree says which blocks it has.
-                    try known.keys.put(ka, try std.fmt.allocPrint(ka, "{s}|*", .{s.session_id}), {});
+                    try known.keys.put(ka, try ka.print("{s}|*", .{s.session_id}), {});
                     continue;
                 };
                 defer blocks.deinit();
@@ -1390,7 +1400,7 @@ pub const Hub = struct {
                         .window = if (b.window_id) |w| try arena.dupe(u8, w) else null,
                         .placement = try arena.dupe(u8, b.placement),
                     };
-                    try known.keys.put(ka, try std.fmt.allocPrint(ka, "{s}|{s}", .{ s.session_id, b.block_id }), {});
+                    try known.keys.put(ka, try ka.print("{s}|{s}", .{ s.session_id, b.block_id }), {});
                 }
                 try out.append(arena, .{ .id = try arena.dupe(u8, s.session_id), .label = try arena.dupe(u8, s.label), .blocks = bl });
             }
@@ -1534,7 +1544,7 @@ pub const Hub = struct {
         for (ids.items) |id| if (!id.ok) if (h.attached.fetchRemove(id.sid)) |kv| h.gpa.free(kv.key);
         var ti = h.terminals.valueIterator();
         while (ti.next()) |t| {
-            t.*.ended.store(1 + @as(u8, @intFromEnum(rex.data.End.restart_needed)), .release);
+            t.*.ended.store(1 + @as(u8, @backingInt(rex.data.End.restart_needed)), .release);
             t.*.restart_after_ms = 0;
         }
         h.supervisor_wake.set(h.io);
@@ -1633,7 +1643,7 @@ pub const Hub = struct {
             while (ended) |t| {
                 ended = t.link;
                 t.link = null;
-                const why: rex.data.End = @enumFromInt(t.ended.load(.acquire) - 1);
+                const why: rex.data.End = @fromBackingInt(@intCast(t.ended.load(.acquire) - 1));
                 if (why == .block_closed) {
                     if (h.closeTerminalLocked(t)) {
                         t.link = dead;
@@ -2519,7 +2529,7 @@ test "hub: a block that closes while no memory can be had is still told to its v
     const t = viewedTerminal(v).?;
     flaky.fail.store(true, .release);
     // What the stream's end does; the supervisor may get to it first, either way with no memory.
-    t.ended.store(1 + @as(u8, @intFromEnum(rex.data.End.block_closed)), .release);
+    t.ended.store(1 + @as(u8, @backingInt(rex.data.End.block_closed)), .release);
     hs.hub.restartEnded();
     flaky.fail.store(false, .release);
     try expectClosedFor(v, hs);

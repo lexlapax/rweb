@@ -351,7 +351,7 @@ pub fn parseEnv(arena: Allocator, args: []const []const u8, env: layout.Env, dia
             // The identity rule is the layout's: kept unless another owner is named.
             if (p.owner == null) p.owner_from_tailscale = true;
             if (listen.? == .tcp and p.backend_secret_file == null and !p.allow_forgeable_loopback_identity) {
-                p.backend_secret_file = try std.fmt.allocPrint(arena, "{s}/backend-secret", .{config});
+                p.backend_secret_file = try arena.print("{s}/backend-secret", .{config});
                 p.make_backend_secret = true;
             }
         },
@@ -362,7 +362,7 @@ pub fn parseEnv(arena: Allocator, args: []const []const u8, env: layout.Env, dia
             if (listen == null) listen = .{ .unix = try layout.sshSocket(arena, env, config) };
             if (listen.? == .unix and uids.items.len == 0) try uids.append(arena, .self);
             if (p.owner == null and !p.owner_from_tailscale and p.token == null and p.token_file == null and !p.random_token) {
-                p.token_file = try std.fmt.allocPrint(arena, "{s}/token", .{config});
+                p.token_file = try arena.print("{s}/token", .{config});
                 p.make_token_file = true;
             }
         },

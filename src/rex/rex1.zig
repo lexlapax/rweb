@@ -40,7 +40,7 @@ pub const Splitter = struct {
     esc_pending: bool = false,
 
     pub fn init(gpa: Allocator, nonce: u64) !Splitter {
-        return .{ .gpa = gpa, .prefix = try std.fmt.allocPrint(gpa, "\x1b_rex1;{d};", .{nonce}) };
+        return .{ .gpa = gpa, .prefix = try gpa.print("\x1b_rex1;{d};", .{nonce}) };
     }
 
     pub fn deinit(s: *Splitter) void {

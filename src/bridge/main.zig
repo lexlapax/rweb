@@ -422,11 +422,11 @@ pub fn main(init: std.process.Init) !void {
 /// Where rweb listens, for its startup line.
 fn describeListener(arena: std.mem.Allocator, b: server.Bound) ![]const u8 {
     return switch (b.listen) {
-        .unix => |p| std.fmt.allocPrint(arena, "unix:{s}", .{p}),
+        .unix => |p| arena.print("unix:{s}", .{p}),
         .tcp_loopback => |port| if (b.listener6 != null)
-            std.fmt.allocPrint(arena, "http://127.0.0.1:{d}/ and http://[::1]:{d}/", .{ port, port })
+            arena.print("http://127.0.0.1:{d}/ and http://[::1]:{d}/", .{ port, port })
         else
-            std.fmt.allocPrint(arena, "http://127.0.0.1:{d}/", .{port}),
+            arena.print("http://127.0.0.1:{d}/", .{port}),
     };
 }
 
@@ -629,10 +629,10 @@ fn rexProblem(buf: []u8, why: anyerror, where: []const u8) []const u8 {
 fn rexSocketPlaces(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     if (builtin.os.tag == .macos) if (env.get("HOME")) |home| {
-        try out.append(arena, try std.fmt.allocPrint(arena, "{s}/Library/Application Support/Rex/server.sock", .{home}));
+        try out.append(arena, try arena.print("{s}/Library/Application Support/Rex/server.sock", .{home}));
     };
-    if (env.get("XDG_RUNTIME_DIR")) |dir| try out.append(arena, try std.fmt.allocPrint(arena, "{s}/rex/server.sock", .{dir}));
-    try out.append(arena, try std.fmt.allocPrint(arena, "/run/user/{d}/rex/server.sock", .{std.c.getuid()}));
+    if (env.get("XDG_RUNTIME_DIR")) |dir| try out.append(arena, try arena.print("{s}/rex/server.sock", .{dir}));
+    try out.append(arena, try arena.print("/run/user/{d}/rex/server.sock", .{std.c.getuid()}));
     return out.items;
 }
 
@@ -718,9 +718,22 @@ fn tailscaleProgram(arena: std.mem.Allocator, io: Io, given: ?[]const u8) []cons
     std.process.exit(2);
 }
 
+/// Runs `tailscale` with a deadline and a cap on what it may print: a hung or babbling `tailscale` must
+/// not stall the own-address refresh or grow memory. A timeout is a failed call like any other.
+fn runTailscale(arena: std.mem.Allocator, io: Io, argv: []const []const u8) !std.process.RunResult {
+    return std.process.run(arena, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(tailscale_output_max),
+        .stderr_limit = .limited(tailscale_output_max),
+        .timeout = .{ .duration = .{ .raw = .fromMilliseconds(tailscale_timeout_ms), .clock = .awake } },
+    });
+}
+const tailscale_output_max = 1 << 20;
+const tailscale_timeout_ms = 10_000;
+
 /// The login of the user this node belongs to, from `tailscale status --json`.
 fn tailscaleOwner(arena: std.mem.Allocator, io: Io, ts: []const u8) ![]const u8 {
-    const res = try std.process.run(arena, io, .{ .argv = &.{ ts, "status", "--json" } });
+    const res = try runTailscale(arena, io, &.{ ts, "status", "--json" });
     if (res.term != .exited or res.term.exited != 0) return error.TailscaleFailed;
     return ownerFromStatus(arena, res.stdout);
 }
@@ -749,7 +762,7 @@ fn ownerFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u
 
 /// This node's MagicDNS name, without the trailing dot, from `tailscale status --json`.
 fn tailscaleDnsName(arena: std.mem.Allocator, io: Io, ts: []const u8) ![]const u8 {
-    const res = try std.process.run(arena, io, .{ .argv = &.{ ts, "status", "--json" } });
+    const res = try runTailscale(arena, io, &.{ ts, "status", "--json" });
     if (res.term != .exited or res.term.exited != 0) return error.TailscaleFailed;
     return dnsNameFromStatus(arena, res.stdout);
 }
@@ -780,7 +793,7 @@ fn readSecretFile(arena: std.mem.Allocator, io: Io, path: []const u8, min_len: u
 
 /// `tailscale ip` prints this node's addresses, one per line.
 fn tailscaleAddresses(arena: std.mem.Allocator, io: Io, ts: []const u8) ![]const []const u8 {
-    const res = try std.process.run(arena, io, .{ .argv = &.{ ts, "ip" } });
+    const res = try runTailscale(arena, io, &.{ ts, "ip" });
     if (res.term != .exited or res.term.exited != 0) return error.TailscaleFailed;
     var out: std.ArrayList([]const u8) = .empty;
     var lines = std.mem.tokenizeAny(u8, res.stdout, "\r\n ");
@@ -790,7 +803,7 @@ fn tailscaleAddresses(arena: std.mem.Allocator, io: Io, ts: []const u8) ![]const
 }
 
 fn writeTmp(io: Io, dir: Io.Dir, name: []const u8, mode: u32, text: []const u8) !void {
-    const f = try dir.createFile(io, name, .{ .permissions = @enumFromInt(mode) });
+    const f = try dir.createFile(io, name, .{ .permissions = @fromBackingInt(@intCast(mode)) });
     defer f.close(io);
     try f.writeStreamingAll(io, text);
 }
@@ -813,17 +826,17 @@ test "a secret file must be private, ours, long enough and made of safe characte
     try tmp.dir.createDirPath(io, "adir");
     const T = std.testing;
     var p: xfer.Problem = .{};
-    try T.expectEqualStrings(good, try readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/ok", .{root}), 32, true, &p));
-    try T.expectError(error.TooOpen, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/open", .{root}), 32, true, &p));
-    try T.expectError(error.TooOpen, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/group", .{root}), 32, true, &p));
-    try T.expectError(error.TooShort, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/short", .{root}), 32, true, &p));
-    try T.expectError(error.BadCharacters, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/slash", .{root}), 32, true, &p));
+    try T.expectEqualStrings(good, try readSecretFile(arena, io, try arena.print("{s}/ok", .{root}), 32, true, &p));
+    try T.expectError(error.TooOpen, readSecretFile(arena, io, try arena.print("{s}/open", .{root}), 32, true, &p));
+    try T.expectError(error.TooOpen, readSecretFile(arena, io, try arena.print("{s}/group", .{root}), 32, true, &p));
+    try T.expectError(error.TooShort, readSecretFile(arena, io, try arena.print("{s}/short", .{root}), 32, true, &p));
+    try T.expectError(error.BadCharacters, readSecretFile(arena, io, try arena.print("{s}/slash", .{root}), 32, true, &p));
     // With path_safe off, other characters are kept.
-    try T.expectEqualStrings("0123456789abcdef0123456789abc/ef0123", try readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/slash", .{root}), 16, false, &p));
-    try T.expectError(error.FileNotFound, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/missing", .{root}), 32, true, &p));
+    try T.expectEqualStrings("0123456789abcdef0123456789abc/ef0123", try readSecretFile(arena, io, try arena.print("{s}/slash", .{root}), 16, false, &p));
+    try T.expectError(error.FileNotFound, readSecretFile(arena, io, try arena.print("{s}/missing", .{root}), 32, true, &p));
     // Never through a link, and never a directory.
-    try T.expectError(error.SymLink, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/link", .{root}), 32, true, &p));
-    try T.expectError(error.NotARegularFile, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/adir", .{root}), 32, true, &p));
+    try T.expectError(error.SymLink, readSecretFile(arena, io, try arena.print("{s}/link", .{root}), 32, true, &p));
+    try T.expectError(error.NotARegularFile, readSecretFile(arena, io, try arena.print("{s}/adir", .{root}), 32, true, &p));
 }
 
 test "a refused tailscale past a link keeps where and what the check found, for the message" {
@@ -841,11 +854,11 @@ test "a refused tailscale past a link keeps where and what the check found, for 
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/open", .{root}, 0), 0o777));
     try writeTmp(io, tmp.dir, "open/tailscale", 0o755, "#!/bin/sh\n");
     try tmp.dir.symLink(io, "open", "bin", .{});
-    const given = try std.fmt.allocPrint(arena, "{s}/bin/tailscale", .{root});
+    const given = try arena.print("{s}/bin/tailscale", .{root});
     const got = systemProbe(.{ .arena = arena, .io = io }, given);
     const r = got.refused;
     try std.testing.expectEqual(error.FolderWritableByOthers, r.why);
-    const open = try std.fmt.allocPrint(arena, "{s}/open", .{root});
+    const open = try arena.print("{s}/open", .{root});
     try std.testing.expectEqualStrings(open, r.problem.pathText());
     // The message has the owner's mode, not only the place.
     var buf: [2048]u8 = undefined;
@@ -886,7 +899,7 @@ test "a socket path too long is refused before its folders are made" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", arena);
     const xs: [110]u8 = @splat('x');
-    const long = try std.fmt.allocPrint(arena, "{s}/made/{s}/s.sock", .{ root, &xs });
+    const long = try arena.print("{s}/made/{s}/s.sock", .{ root, &xs });
     try std.testing.expectError(error.NameTooLong, server.bind(std.testing.allocator, io, .{ .unix = long }, null));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "made", .{}));
 }
@@ -983,10 +996,10 @@ test "the real probe refuses a program others can change and finds a missing one
     var z: [512:0]u8 = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/wide", .{root}, 0), 0o757));
     const p: SystemProbe = .{ .arena = arena, .io = io };
-    const ok = try std.fmt.allocPrint(arena, "{s}/ts", .{root});
+    const ok = try arena.print("{s}/ts", .{root});
     try std.testing.expectEqualStrings(ok, systemProbe(p, ok).ok);
-    try std.testing.expect(systemProbe(p, try std.fmt.allocPrint(arena, "{s}/missing", .{root})) == .missing);
-    try std.testing.expect(systemProbe(p, try std.fmt.allocPrint(arena, "{s}/wide", .{root})).refused.why == error.ProgramWritableByOthers);
+    try std.testing.expect(systemProbe(p, try arena.print("{s}/missing", .{root})) == .missing);
+    try std.testing.expect(systemProbe(p, try arena.print("{s}/wide", .{root})).refused.why == error.ProgramWritableByOthers);
 }
 
 /// A Rex that is away, then at a path nobody answers, then up (`which`: 0, 1, 2).

@@ -59,7 +59,7 @@ pub const Silent = struct {
         const p = if (path) |x| try gpa.dupe(u8, x) else blk: {
             var rnd: [6]u8 = undefined;
             io.random(&rnd);
-            break :blk try std.fmt.allocPrint(gpa, "/tmp/rweb-silent-{x}.sock", .{rnd});
+            break :blk try gpa.print("/tmp/rweb-silent-{x}.sock", .{rnd});
         };
         errdefer gpa.free(p);
         Io.Dir.deleteFileAbsolute(io, p) catch {};
@@ -166,7 +166,7 @@ pub const Fake = struct {
     pub fn start(gpa: Allocator, io: Io) !*Fake {
         var rnd: [6]u8 = undefined;
         io.random(&rnd);
-        const path = try std.fmt.allocPrint(gpa, "/tmp/rweb-fake-{x}.sock", .{rnd});
+        const path = try gpa.print("/tmp/rweb-fake-{x}.sock", .{rnd});
         errdefer gpa.free(path);
         const f = try gpa.create(Fake);
         errdefer gpa.destroy(f);
@@ -180,7 +180,7 @@ pub const Fake = struct {
     fn makeFilesRoot(f: *Fake, rnd: [6]u8) !void {
         var buf: [64]u8 = undefined;
         const dir = try std.fmt.bufPrint(&buf, "/tmp/rweb-fake-files-{x}", .{rnd});
-        _ = try Io.Dir.cwd().createDirPathStatus(f.io, dir, @enumFromInt(0o700));
+        _ = try Io.Dir.cwd().createDirPathStatus(f.io, dir, @fromBackingInt(@intCast(0o700)));
         errdefer Io.Dir.cwd().deleteTree(f.io, dir) catch {};
         // The real path (on macOS /tmp is a link to /private/tmp), so requests compare with it.
         f.files_root = try Io.Dir.cwd().realPathFileAlloc(f.io, dir, f.gpa);
@@ -332,7 +332,7 @@ pub const Fake = struct {
         f.mu.lockUncancelable(f.io);
         defer f.mu.unlock(f.io);
         f.event_seq += 1;
-        const text = std.fmt.allocPrint(f.gpa, "{{\"type\":\"event\",\"seq\":{d},\"payload\":{s}}}", .{ f.event_seq, payload_json }) catch return;
+        const text = f.gpa.print("{{\"type\":\"event\",\"seq\":{d},\"payload\":{s}}}", .{ f.event_seq, payload_json }) catch return;
         defer f.gpa.free(text);
         for (f.control_conns.items) |cn| cn.writeFrame(.text, text) catch {};
     }
@@ -390,7 +390,7 @@ pub const Fake = struct {
     fn newId(f: *Fake, kind: []const u8) ![]u8 {
         const n = f.next_id;
         f.next_id += 1;
-        return std.fmt.allocPrint(f.gpa, "{s}:00000000-0000-0000-0000-{x:0>12}", .{ kind, n });
+        return f.gpa.print("{s}:00000000-0000-0000-0000-{x:0>12}", .{ kind, n });
     }
 
     fn createSessionLocked(f: *Fake, label: ?[]const u8) !*Session {
@@ -562,7 +562,7 @@ pub const Fake = struct {
 
         var tok_raw: [16]u8 = undefined;
         f.io.random(&tok_raw);
-        const token = try std.fmt.allocPrint(gpa, "{x}", .{tok_raw});
+        const token = try gpa.print("{x}", .{tok_raw});
         var client_id: []u8 = undefined;
         var resumed = false;
         {
@@ -578,7 +578,7 @@ pub const Fake = struct {
             if (!resumed) {
                 var idr: [6]u8 = undefined;
                 f.io.random(&idr);
-                client_id = try std.fmt.allocPrint(gpa, "client:00000000-0000-0000-0000-{x}", .{idr});
+                client_id = try gpa.print("client:00000000-0000-0000-0000-{x}", .{idr});
             }
             try f.clients.put(gpa, token, client_id);
         }
@@ -630,7 +630,7 @@ pub const Fake = struct {
         if (std.mem.eql(u8, method, "rweb.test.no_answer")) return;
         if (f.silent_method) |sm| if (std.mem.eql(u8, method, sm)) return;
         if (std.mem.eql(u8, method, "data.connect")) if (f.data_connect_payload) |raw| {
-            const text = try std.fmt.allocPrint(arena, "{{\"type\":\"response\",\"id\":{f},\"seq\":0,\"payload\":{s}}}", .{ std.json.fmt(id, .{}), raw });
+            const text = try arena.print("{{\"type\":\"response\",\"id\":{f},\"seq\":0,\"payload\":{s}}}", .{ std.json.fmt(id, .{}), raw });
             return c.writeFrame(.text, text);
         };
         if (std.mem.eql(u8, method, "session.list")) {
@@ -1003,7 +1003,7 @@ fn connectControl(f: *Fake, hello: []const u8) !*ws.Conn {
 
 /// Send a request and return the parsed response payload object. Caller frees with `deinit`.
 fn rpc(c: *ws.Conn, id: []const u8, method: []const u8, payload: []const u8) !std.json.Parsed(std.json.Value) {
-    const req = try std.fmt.allocPrint(testing.allocator, "{{\"type\":\"request\",\"id\":\"{s}\",\"method\":\"{s}\",\"payload\":{s}}}", .{ id, method, payload });
+    const req = try testing.allocator.print("{{\"type\":\"request\",\"id\":\"{s}\",\"method\":\"{s}\",\"payload\":{s}}}", .{ id, method, payload });
     defer testing.allocator.free(req);
     try c.writeFrame(.text, req);
     const m = try c.readMessage(testing.allocator);
@@ -1038,7 +1038,7 @@ fn open(c: *ws.Conn) !Opened {
     errdefer a.free(sid);
     const bid = try a.dupe(u8, pl.get("initial_windows").?.array.items[0].object.get("block_ids").?.array.items[0].string);
     errdefer a.free(bid);
-    const pa = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{sid});
+    const pa = try a.print("{{\"session_id\":\"{s}\"}}", .{sid});
     defer a.free(pa);
     var at = try rpc(c, "2", "session.attach", pa);
     at.deinit();
@@ -1047,7 +1047,7 @@ fn open(c: *ws.Conn) !Opened {
 
 fn getTicket(c: *ws.Conn, id: []const u8, sid: []const u8, bid: []const u8) ![16]u8 {
     const a = testing.allocator;
-    const pd = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\",\"subprotocol\":\"{s}\"}}", .{ sid, bid, data_subprotocol });
+    const pd = try a.print("{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\",\"subprotocol\":\"{s}\"}}", .{ sid, bid, data_subprotocol });
     defer a.free(pd);
     var tk = try rpc(c, id, "data.connect", pd);
     defer tk.deinit();
@@ -1136,7 +1136,7 @@ test "control: errors for unknown methods and unattached sessions" {
     defer r.deinit();
     try testing.expectEqualStrings("method_not_found", r.value.object.get("error").?.object.get("code").?.string);
     const s = try f.createSession(null);
-    const p = try std.fmt.allocPrint(testing.allocator, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\"}}", .{ s.session_id, s.block_id });
+    const p = try testing.allocator.print("{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\"}}", .{ s.session_id, s.block_id });
     defer testing.allocator.free(p);
     var r2 = try rpc(c, "2", "data.connect", p);
     defer r2.deinit();
@@ -1172,7 +1172,7 @@ test "data: snapshot decodes, resize follows, typed text is echoed" {
     try testing.expectEqual(@as(u16, 24), term.rows);
 
     // Type into the block: the echo arrives on the stream, after the resize.
-    const pw = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"args\":{{\"data\":\"hi\\n\"}}}}", .{ o.session_id, o.block_id });
+    const pw = try a.print("{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"args\":{{\"data\":\"hi\\n\"}}}}", .{ o.session_id, o.block_id });
     defer a.free(pw);
     var wr = try rpc(c, "4", "com.superlogical.terminal.write", pw);
     defer wr.deinit();
@@ -1275,7 +1275,7 @@ test "restart: connections drop, old tokens start a new client, sessions keep th
     // The old control connection is gone, without a close frame.
     try testing.expect(std.meta.isError(c.readMessage(a)));
 
-    const hello = try std.fmt.allocPrint(a, "{{\"type\":\"hello\",\"api_revision\":18,\"api_min_revision\":18,\"reconnect_token\":\"{s}\"}}", .{token});
+    const hello = try a.print("{{\"type\":\"hello\",\"api_revision\":18,\"api_min_revision\":18,\"reconnect_token\":\"{s}\"}}", .{token});
     defer a.free(hello);
     const c2 = try connectControl(f, hello);
     defer c2.deinit(a);
@@ -1303,7 +1303,7 @@ test "control: reconnect token resumes the client within the window" {
     w.deinit();
     c.deinit(a);
 
-    const hello = try std.fmt.allocPrint(a, "{{\"type\":\"hello\",\"api_revision\":18,\"api_min_revision\":18,\"reconnect_token\":\"{s}\"}}", .{token});
+    const hello = try a.print("{{\"type\":\"hello\",\"api_revision\":18,\"api_min_revision\":18,\"reconnect_token\":\"{s}\"}}", .{token});
     defer a.free(hello);
     const c2 = try connectControl(f, hello);
     defer c2.deinit(a);

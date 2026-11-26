@@ -28,29 +28,29 @@ pub const default_ssh_port = 7700;
 /// relative one), else `$HOME/.config/rweb`.
 pub fn configDir(arena: Allocator, env: Env, given: ?[]const u8) error{ NoHome, OutOfMemory }![]const u8 {
     if (given) |g| return std.mem.trimEnd(u8, g, "/");
-    if (env.xdg_config_home) |x| if (x.len > 0 and x[0] == '/') return std.fmt.allocPrint(arena, "{s}/rweb", .{std.mem.trimEnd(u8, x, "/")});
+    if (env.xdg_config_home) |x| if (x.len > 0 and x[0] == '/') return arena.print("{s}/rweb", .{std.mem.trimEnd(u8, x, "/")});
     const home = env.home orelse return error.NoHome;
     if (home.len == 0 or home[0] != '/') return error.NoHome;
-    return std.fmt.allocPrint(arena, "{s}/.config/rweb", .{std.mem.trimEnd(u8, home, "/")});
+    return arena.print("{s}/.config/rweb", .{std.mem.trimEnd(u8, home, "/")});
 }
 
 /// The folder for sockets that live only while the user is logged in: `$XDG_RUNTIME_DIR`, else
 /// `/run/user/<uid>` (Linux).
 pub fn runtimeDir(arena: Allocator, env: Env) error{OutOfMemory}![]const u8 {
     if (env.xdg_runtime_dir) |x| if (x.len > 0 and x[0] == '/') return std.mem.trimEnd(u8, x, "/");
-    return std.fmt.allocPrint(arena, "/run/user/{d}", .{env.uid});
+    return arena.print("/run/user/{d}", .{env.uid});
 }
 
 /// `rweb tailscale`'s unix socket (Linux).
 pub fn tailscaleSocket(arena: Allocator, env: Env) error{OutOfMemory}![]const u8 {
-    return std.fmt.allocPrint(arena, "{s}/rweb/bridge.sock", .{try runtimeDir(arena, env)});
+    return arena.print("{s}/rweb/bridge.sock", .{try runtimeDir(arena, env)});
 }
 
 /// `rweb ssh`'s unix socket: in the runtime folder on Linux, under `<config>/run` on macOS (which
 /// has no per-user runtime folder).
 pub fn sshSocket(arena: Allocator, env: Env, config: []const u8) error{OutOfMemory}![]const u8 {
-    if (env.os.isDarwin()) return std.fmt.allocPrint(arena, "{s}/run/ssh.sock", .{config});
-    return std.fmt.allocPrint(arena, "{s}/rweb/ssh.sock", .{try runtimeDir(arena, env)});
+    if (env.os.isDarwin()) return arena.print("{s}/run/ssh.sock", .{config});
+    return arena.print("{s}/rweb/ssh.sock", .{try runtimeDir(arena, env)});
 }
 
 // ---- secrets rweb makes ----
@@ -84,7 +84,7 @@ pub fn ensureSecretFile(arena: Allocator, io: Io, path: []const u8, problem: *xf
     try newSecret(io, text[0..secret_len]);
     defer std.crypto.secureZero(u8, &text);
     text[secret_len] = '\n';
-    const f = up.dir.createFile(io, base, .{ .exclusive = true, .truncate = false, .permissions = @enumFromInt(0o600) }) catch |e| switch (e) {
+    const f = up.dir.createFile(io, base, .{ .exclusive = true, .truncate = false, .permissions = @fromBackingInt(@intCast(0o600)) }) catch |e| switch (e) {
         error.PathAlreadyExists => return false,
         else => return e,
     };
@@ -148,7 +148,7 @@ pub fn tailscaleNextStep(w: *Io.Writer, listen: Served, backend_secret_file: ?[]
 pub fn tokenHosts(arena: Allocator, tcp_port: ?u16) Allocator.Error![]const []const u8 {
     const names = [_][]const u8{ "127.0.0.1", "localhost", "[::1]" };
     const out = try arena.alloc([]const u8, names.len);
-    for (names, 0..) |n, i| out[i] = if (tcp_port) |p| try std.fmt.allocPrint(arena, "{s}:{d}", .{ n, p }) else n;
+    for (names, 0..) |n, i| out[i] = if (tcp_port) |p| try arena.print("{s}:{d}", .{ n, p }) else n;
     return out;
 }
 
@@ -220,7 +220,7 @@ test "a made secret is 32 random bytes in base64url, 0600, made once and never o
     const root = try tmp.dir.realPathFileAlloc(io, ".", arena);
     var p: xfer.Problem = .{};
     // Its folders are made 0700, under folders that passed the checks.
-    const path = try std.fmt.allocPrint(arena, "{s}/cfg/rweb/token", .{root});
+    const path = try arena.print("{s}/cfg/rweb/token", .{root});
     try testing.expect(try ensureSecretFile(arena, io, path, &p));
     const first = try xfer.readPrivateFile(arena, io, path, 4096, &p);
     try testing.expectEqual(@as(usize, secret_len + 1), first.len);
@@ -233,18 +233,18 @@ test "a made secret is 32 random bytes in base64url, 0600, made once and never o
     try testing.expect(!try ensureSecretFile(arena, io, path, &p));
     try testing.expectEqualStrings(first, try xfer.readPrivateFile(arena, io, path, 4096, &p));
     // Another one differs.
-    const other = try std.fmt.allocPrint(arena, "{s}/cfg/rweb/backend-secret", .{root});
+    const other = try arena.print("{s}/cfg/rweb/backend-secret", .{root});
     try testing.expect(try ensureSecretFile(arena, io, other, &p));
     try testing.expect(!std.mem.eql(u8, first, try xfer.readPrivateFile(arena, io, other, 4096, &p)));
     // A link in its place is never written through, and a file of the user's is never replaced.
     try tmp.dir.createDirPath(io, "cfg/rweb");
     try tmp.dir.symLink(io, "token", "cfg/rweb/linked", .{});
-    try testing.expect(!try ensureSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/cfg/rweb/linked", .{root}), &p));
+    try testing.expect(!try ensureSecretFile(arena, io, try arena.print("{s}/cfg/rweb/linked", .{root}), &p));
     try testing.expectEqualStrings(first, try xfer.readPrivateFile(arena, io, path, 4096, &p));
     // A folder others can enter is refused, with where.
     try tmp.dir.createDirPath(io, "open");
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/open", .{root}, 0), 0o755));
-    try testing.expectError(error.TooOpen, ensureSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/open/token", .{root}), &p));
+    try testing.expectError(error.TooOpen, ensureSecretFile(arena, io, try arena.print("{s}/open/token", .{root}), &p));
 }
 
 test "the printed next steps name files, never secrets, and quote what a shell would split" {

@@ -987,7 +987,7 @@ fn readDarwinAcl(fd: posix.fd_t, out: []DarwinAce) CheckError![]const DarwinAce 
         // ENOENT: no ACL; ENOTSUP (std's `OPNOTSUPP`, 45 on macOS) or EOPNOTSUPP (102, which std's
         // `E` does not name): a filesystem without ACLs.
         const darwin_eopnotsupp: c_int = 102;
-        return if (err == @intFromEnum(std.c.E.NOENT) or err == @intFromEnum(std.c.E.OPNOTSUPP) or err == darwin_eopnotsupp) out[0..0] else error.AclUnreadable;
+        return if (err == @backingInt(std.c.E.NOENT) or err == @backingInt(std.c.E.OPNOTSUPP) or err == darwin_eopnotsupp) out[0..0] else error.AclUnreadable;
     };
     defer _ = acl_free(acl);
     var n: usize = 0;
@@ -1149,7 +1149,7 @@ pub fn openFolderAt(io: Io, fd: posix.fd_t, name: []const u8, create: bool) Open
         if (e != error.FileNotFound or !create) return folderOpenFailed(fd, name, e);
     }
     var made = true;
-    (Io.Dir{ .handle = fd }).createDir(io, name, @enumFromInt(0o700)) catch |e| switch (e) {
+    (Io.Dir{ .handle = fd }).createDir(io, name, @fromBackingInt(@intCast(0o700))) catch |e| switch (e) {
         error.PathAlreadyExists => made = false, // made meanwhile, by us or root (the folder passed its check)
         else => return e,
     };
@@ -2011,13 +2011,13 @@ test "contentDisposition holds a long name of multibyte characters, or cuts it b
 }
 
 fn writeFileMode(io: Io, dir: Io.Dir, name: []const u8, mode: u32, text: []const u8) !void {
-    const f = try dir.createFile(io, name, .{ .permissions = @enumFromInt(mode) });
+    const f = try dir.createFile(io, name, .{ .permissions = @fromBackingInt(@intCast(mode)) });
     defer f.close(io);
     try f.writeStreamingAll(io, text);
 }
 
 fn chmodPath(arena: Allocator, path: []const u8, mode: std.c.mode_t) !void {
-    const z = try std.fmt.allocPrintSentinel(arena, "{s}", .{path}, 0);
+    const z = try arena.printSentinel("{s}", .{path}, 0);
     if (std.c.chmod(z, mode) != 0) return error.ChmodFailed;
 }
 
@@ -2034,30 +2034,30 @@ test "a private file is read only through a checked descriptor, in folders nobod
     try tmp.dir.createDirPath(io, "adir");
     try tmp.dir.createDirPath(io, "open");
     try writeFileMode(io, tmp.dir, "open/ok", 0o600, "secret");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/open", .{root}), 0o777);
+    try chmodPath(arena, try arena.print("{s}/open", .{root}), 0o777);
     try tmp.dir.createDirPath(io, "sticky");
     try writeFileMode(io, tmp.dir, "sticky/ok", 0o600, "secret");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/sticky", .{root}), 0o1777);
+    try chmodPath(arena, try arena.print("{s}/sticky", .{root}), 0o1777);
     try writeFileMode(io, tmp.dir, "big", 0o600, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
 
     var p: Problem = .{};
-    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/ok", .{root}), 4096, &p));
+    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print("{s}/ok", .{root}), 4096, &p));
     // A symbolic link is not followed, even to a good file.
-    try testing.expectError(error.SymLink, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/link", .{root}), 4096, &p));
+    try testing.expectError(error.SymLink, readPrivateFile(arena, io, try arena.print("{s}/link", .{root}), 4096, &p));
     // A directory is not a file.
-    try testing.expectError(error.NotARegularFile, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/adir", .{root}), 4096, &p));
+    try testing.expectError(error.NotARegularFile, readPrivateFile(arena, io, try arena.print("{s}/adir", .{root}), 4096, &p));
     // A folder others can write to (not sticky) could have the file swapped: refused, and named.
-    const open_ok = try std.fmt.allocPrint(arena, "{s}/open/ok", .{root});
+    const open_ok = try arena.print("{s}/open/ok", .{root});
     try testing.expectError(error.FolderWritableByOthers, readPrivateFile(arena, io, open_ok, 4096, &p));
     try testing.expect(std.mem.endsWith(u8, p.pathText(), "/open"));
     // A sticky one (like /tmp) is fine: others cannot rename or remove what is ours there.
-    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/sticky/ok", .{root}), 4096, &p));
+    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print("{s}/sticky/ok", .{root}), 4096, &p));
     // Too long, and missing.
-    try testing.expectError(error.TooLong, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/big", .{root}), 16, &p));
-    try testing.expectError(error.FileNotFound, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/missing", .{root}), 16, &p));
+    try testing.expectError(error.TooLong, readPrivateFile(arena, io, try arena.print("{s}/big", .{root}), 16, &p));
+    try testing.expectError(error.FileNotFound, readPrivateFile(arena, io, try arena.print("{s}/missing", .{root}), 16, &p));
     // A relative path through a linked folder resolves to the real folder first.
     try tmp.dir.symLink(io, "sticky", "via", .{});
-    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/via/ok", .{root}), 4096, &p));
+    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print("{s}/via/ok", .{root}), 4096, &p));
 }
 
 test "the owner and mode rules, for owners a test cannot create" {
@@ -2106,18 +2106,18 @@ test "a folder its group can write to passes only when the group is a safe one" 
     const root = try tmp.dir.realPathFileAlloc(io, ".", arena);
     // Linux's umask 0002 makes folders like this one (and `.zig-cache` 0775).
     try tmp.dir.createDirPath(io, "grp");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/grp", .{root}), 0o775);
+    try chmodPath(arena, try arena.print("{s}/grp", .{root}), 0o775);
     try writeFileMode(io, tmp.dir, "grp/ok", 0o600, "secret");
     try writeFileMode(io, tmp.dir, "grp/prog", 0o775, "#!/bin/sh\n");
-    const file = try std.fmt.allocPrint(arena, "{s}/grp/ok", .{root});
-    const prog = try std.fmt.allocPrint(arena, "{s}/grp/prog", .{root});
+    const file = try arena.print("{s}/grp/ok", .{root});
+    const prog = try arena.print("{s}/grp/prog", .{root});
     defer test_group_safe = null;
     var p: Problem = .{};
     // A safe group (macOS's admin): the folder, and a program it can write, pass.
     test_group_safe = true;
     try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, file, 4096, &p));
     try testing.expectEqualStrings(prog, try checkedProgram(arena, io, prog, &p));
-    const up = try openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/grp/uploads", .{root}), &p);
+    const up = try openUploadDir(arena, io, try arena.print("{s}/grp/uploads", .{root}), &p);
     up.dir.close(io);
     // Any other group: refused, and the folder named.
     test_group_safe = false;
@@ -2144,19 +2144,19 @@ test "a program is checked by its real path, in folders nobody else can change" 
     try writeFileMode(io, tmp.dir, "prog", 0o700, "#!/bin/sh\n");
     try tmp.dir.symLink(io, "prog", "via", .{});
     try writeFileMode(io, tmp.dir, "wide", 0o700, "#!/bin/sh\n");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/wide", .{root}), 0o757);
+    try chmodPath(arena, try arena.print("{s}/wide", .{root}), 0o757);
     try tmp.dir.createDirPath(io, "open");
     try writeFileMode(io, tmp.dir, "open/prog", 0o700, "#!/bin/sh\n");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/open", .{root}), 0o777);
+    try chmodPath(arena, try arena.print("{s}/open", .{root}), 0o777);
     var p: Problem = .{};
-    const prog = try std.fmt.allocPrint(arena, "{s}/prog", .{root});
+    const prog = try arena.print("{s}/prog", .{root});
     try testing.expectEqualStrings(prog, try checkedProgram(arena, io, prog, &p));
     // A link is resolved: the program that runs is the one that was checked.
-    try testing.expectEqualStrings(prog, try checkedProgram(arena, io, try std.fmt.allocPrint(arena, "{s}/via", .{root}), &p));
-    try testing.expectError(error.ProgramWritableByOthers, checkedProgram(arena, io, try std.fmt.allocPrint(arena, "{s}/wide", .{root}), &p));
-    try testing.expectError(error.FolderWritableByOthers, checkedProgram(arena, io, try std.fmt.allocPrint(arena, "{s}/open/prog", .{root}), &p));
+    try testing.expectEqualStrings(prog, try checkedProgram(arena, io, try arena.print("{s}/via", .{root}), &p));
+    try testing.expectError(error.ProgramWritableByOthers, checkedProgram(arena, io, try arena.print("{s}/wide", .{root}), &p));
+    try testing.expectError(error.FolderWritableByOthers, checkedProgram(arena, io, try arena.print("{s}/open/prog", .{root}), &p));
     try testing.expect(std.mem.endsWith(u8, p.pathText(), "/open"));
-    try testing.expectError(error.FileNotFound, checkedProgram(arena, io, try std.fmt.allocPrint(arena, "{s}/missing", .{root}), &p));
+    try testing.expectError(error.FileNotFound, checkedProgram(arena, io, try arena.print("{s}/missing", .{root}), &p));
     try testing.expectError(error.BadPath, checkedProgram(arena, io, "prog", &p));
 }
 
@@ -2170,31 +2170,31 @@ test "the upload folder is made private if missing, and must be a private folder
     const root = try tmp.dir.realPathFileAlloc(io, ".", arena);
     var p: Problem = .{};
     // Missing: made 0700, and opened.
-    const fresh = try std.fmt.allocPrint(arena, "{s}/up/loads/", .{root});
+    const fresh = try arena.print("{s}/up/loads/", .{root});
     const up = try openUploadDir(arena, io, fresh, &p);
     defer up.dir.close(io);
     const st = try up.dir.stat(io);
-    try testing.expectEqual(@as(u32, 0o700), @intFromEnum(st.permissions) & 0o777);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/up/loads", .{root}), up.real_path);
+    try testing.expectEqual(@as(u32, 0o700), @backingInt(st.permissions) & 0o777);
+    try testing.expectEqualStrings(try arena.print("{s}/up/loads", .{root}), up.real_path);
     // Through a linked folder: the path to paste is the real one, not the link's.
     try tmp.dir.symLink(io, "up", "via", .{});
-    const via = try openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/via/more", .{root}), &p);
+    const via = try openUploadDir(arena, io, try arena.print("{s}/via/more", .{root}), &p);
     defer via.dir.close(io);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/up/more", .{root}), via.real_path);
+    try testing.expectEqualStrings(try arena.print("{s}/up/more", .{root}), via.real_path);
     // Under a folder others can write to: refused, and nothing is made there.
     try tmp.dir.createDirPath(io, "open");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/open", .{root}), 0o777);
-    try testing.expectError(error.FolderWritableByOthers, openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/open/new/uploads", .{root}), &p));
+    try chmodPath(arena, try arena.print("{s}/open", .{root}), 0o777);
+    try testing.expectError(error.FolderWritableByOthers, openUploadDir(arena, io, try arena.print("{s}/open/new/uploads", .{root}), &p));
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "open/new", .{}));
     try testing.expectError(error.BadPath, openUploadDir(arena, io, "relative/uploads", &p));
     // Open to others, a link to a good folder, a file.
     try tmp.dir.createDirPath(io, "wide");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/wide", .{root}), 0o755);
-    try testing.expectError(error.TooOpen, openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/wide", .{root}), &p));
+    try chmodPath(arena, try arena.print("{s}/wide", .{root}), 0o755);
+    try testing.expectError(error.TooOpen, openUploadDir(arena, io, try arena.print("{s}/wide", .{root}), &p));
     try tmp.dir.symLink(io, "up/loads", "linked", .{});
-    try testing.expectError(error.SymLink, openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/linked", .{root}), &p));
+    try testing.expectError(error.SymLink, openUploadDir(arena, io, try arena.print("{s}/linked", .{root}), &p));
     try writeFileMode(io, tmp.dir, "file", 0o600, "x");
-    try testing.expectError(error.NotADirectory, openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/file", .{root}), &p));
+    try testing.expectError(error.NotADirectory, openUploadDir(arena, io, try arena.print("{s}/file", .{root}), &p));
 }
 
 test "a token that has expired is nothing, and is dropped" {
@@ -2353,13 +2353,13 @@ test "a program is opened inside its checked folder, never through a link, and r
     try tmp.dir.symLink(io, "real", "via", .{});
     var p: Problem = .{};
     // Through a linked folder: the path to run is the checked one, with no link on it.
-    const want = try std.fmt.allocPrint(arena, "{s}/real/bin/ts", .{root});
-    try testing.expectEqualStrings(want, try checkedProgram(arena, io, try std.fmt.allocPrint(arena, "{s}/via/bin/ts", .{root}), &p));
+    const want = try arena.print("{s}/real/bin/ts", .{root});
+    try testing.expectEqualStrings(want, try checkedProgram(arena, io, try arena.print("{s}/via/bin/ts", .{root}), &p));
     // A FIFO there is refused at once, not waited on; a folder is not a program.
-    const fifo = try std.fmt.allocPrintSentinel(arena, "{s}/real/bin/fifo", .{root}, 0);
+    const fifo = try arena.printSentinel("{s}/real/bin/fifo", .{root}, 0);
     try testing.expectEqual(@as(c_int, 0), mkfifo(fifo, 0o700));
     try testing.expectError(error.NotARegularFile, checkedProgram(arena, io, fifo, &p));
-    try testing.expectError(error.NotARegularFile, checkedProgram(arena, io, try std.fmt.allocPrint(arena, "{s}/real/bin", .{root}), &p));
+    try testing.expectError(error.NotARegularFile, checkedProgram(arena, io, try arena.print("{s}/real/bin", .{root}), &p));
 }
 
 extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
@@ -2381,9 +2381,9 @@ test "macOS: an ACL entry that lets another user change a folder or program is r
     try tmp.dir.createDirPath(io, "acl");
     try writeFileMode(io, tmp.dir, "acl/ok", 0o600, "secret");
     try writeFileMode(io, tmp.dir, "acl/prog", 0o755, "#!/bin/sh\n");
-    const dir = try std.fmt.allocPrint(arena, "{s}/acl", .{root});
-    const file = try std.fmt.allocPrint(arena, "{s}/acl/ok", .{root});
-    const prog = try std.fmt.allocPrint(arena, "{s}/acl/prog", .{root});
+    const dir = try arena.print("{s}/acl", .{root});
+    const file = try arena.print("{s}/acl/ok", .{root});
+    const prog = try arena.print("{s}/acl/prog", .{root});
     // Whatever happens, the entries go (an `everyone deny delete` would stop the clean-up).
     defer runTool(arena, io, &.{ "/bin/chmod", "-RN", dir }) catch {};
     var p: Problem = .{};
@@ -2410,11 +2410,11 @@ test "macOS: an ACL entry that lets another user change a folder or program is r
     // An entry only for new folders: this folder passes; a folder rweb makes in it starts without
     // the entry, one made otherwise inherits it and is refused as an upload folder.
     try runTool(arena, io, &.{ "/bin/chmod", "+a", "user:nobody allow add_file,directory_inherit,only_inherit", dir });
-    const up = try openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/acl/made", .{root}), &p);
+    const up = try openUploadDir(arena, io, try arena.print("{s}/acl/made", .{root}), &p);
     up.dir.close(io);
     try tmp.dir.createDirPath(io, "acl/other");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/acl/other", .{root}), 0o700);
-    try testing.expectError(error.AclGivesOthersWrite, openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/acl/other", .{root}), &p));
+    try chmodPath(arena, try arena.print("{s}/acl/other", .{root}), 0o700);
+    try testing.expectError(error.AclGivesOthersWrite, openUploadDir(arena, io, try arena.print("{s}/acl/other", .{root}), &p));
 }
 
 test "Linux: a named ACL entry that lets another user write to a folder is refused" {
@@ -2427,10 +2427,10 @@ test "Linux: a named ACL entry that lets another user write to a folder is refus
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", arena);
     try tmp.dir.createDirPath(io, "acl");
-    const dir = try std.fmt.allocPrint(arena, "{s}/acl", .{root});
+    const dir = try arena.print("{s}/acl", .{root});
     try chmodPath(arena, dir, 0o700);
     try writeFileMode(io, tmp.dir, "acl/ok", 0o600, "secret");
-    const file = try std.fmt.allocPrint(arena, "{s}/acl/ok", .{root});
+    const file = try arena.print("{s}/acl/ok", .{root});
     var p: Problem = .{};
     // No `setfacl`, or a filesystem without ACLs: nothing to test here.
     runTool(arena, io, &.{ "setfacl", "-m", "u:65534:rwx", dir }) catch return error.SkipZigTest;
@@ -2464,56 +2464,56 @@ test "links on the given path are followed only from checked folders, and the wa
     try writeFileMode(io, tmp.dir, "good/prog", 0o755, "#!/bin/sh\n");
     try tmp.dir.symLink(io, "prog", "good/lnprog", .{});
     try tmp.dir.symLink(io, "good", "rel", .{});
-    try tmp.dir.symLink(io, try std.fmt.allocPrint(arena, "{s}/good", .{root}), "abs", .{});
+    try tmp.dir.symLink(io, try arena.print("{s}/good", .{root}), "abs", .{});
     try tmp.dir.createDirPath(io, "sub");
     try tmp.dir.symLink(io, "../good", "sub/up", .{});
     try tmp.dir.symLink(io, "rel", "chain", .{});
     var p: Problem = .{};
     // Relative and absolute targets, `..` in a target, a link to a link: all lead to the good folder.
     for ([_][]const u8{ "rel", "abs", "sub/up", "chain" }) |via| {
-        try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/{s}/ok", .{ root, via }), 4096, &p));
+        try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print("{s}/{s}/ok", .{ root, via }), 4096, &p));
     }
     // A program through links (its own name one too) is run by the path with no link on it.
-    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/good/prog", .{root}), try checkedProgram(arena, io, try std.fmt.allocPrint(arena, "{s}/sub/up/lnprog", .{root}), &p));
+    try testing.expectEqualStrings(try arena.print("{s}/good/prog", .{root}), try checkedProgram(arena, io, try arena.print("{s}/sub/up/lnprog", .{root}), &p));
     // The upload folder's path to paste is the resolved one.
-    const up = try openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/sub/up/new", .{root}), &p);
+    const up = try openUploadDir(arena, io, try arena.print("{s}/sub/up/new", .{root}), &p);
     up.dir.close(io);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/good/new", .{root}), up.real_path);
+    try testing.expectEqualStrings(try arena.print("{s}/good/new", .{root}), up.real_path);
     // A link in a folder others can write to: that folder is refused before the link is read.
     try tmp.dir.createDirPath(io, "open");
     try writeFileMode(io, tmp.dir, "open/ok", 0o600, "secret");
     try tmp.dir.symLink(io, "../good", "open/l", .{});
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/open", .{root}), 0o777);
-    try testing.expectError(error.FolderWritableByOthers, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/open/l/ok", .{root}), 4096, &p));
-    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/open", .{root}), p.pathText());
+    try chmodPath(arena, try arena.print("{s}/open", .{root}), 0o777);
+    try testing.expectError(error.FolderWritableByOthers, readPrivateFile(arena, io, try arena.print("{s}/open/l/ok", .{root}), 4096, &p));
+    try testing.expectEqualStrings(try arena.print("{s}/open", .{root}), p.pathText());
     // A link to such a folder: refused there, named by the path the walk resolved.
     try tmp.dir.symLink(io, "open", "toopen", .{});
-    try testing.expectError(error.FolderWritableByOthers, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/toopen/ok", .{root}), 4096, &p));
-    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/open", .{root}), p.pathText());
+    try testing.expectError(error.FolderWritableByOthers, readPrivateFile(arena, io, try arena.print("{s}/toopen/ok", .{root}), 4096, &p));
+    try testing.expectEqualStrings(try arena.print("{s}/open", .{root}), p.pathText());
     try testing.expectEqual(@as(u32, 0o777), p.found.?.mode & 0o7777);
     // Our own link in a sticky folder (like /tmp) is followed.
     try tmp.dir.createDirPath(io, "sticky");
     try tmp.dir.symLink(io, "../good", "sticky/l", .{});
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/sticky", .{root}), 0o1777);
-    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/sticky/l/ok", .{root}), 4096, &p));
+    try chmodPath(arena, try arena.print("{s}/sticky", .{root}), 0o1777);
+    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print("{s}/sticky/l/ok", .{root}), 4096, &p));
     // A loop of links.
     try tmp.dir.symLink(io, "loop2", "loop1", .{});
     try tmp.dir.symLink(io, "loop1", "loop2", .{});
-    try testing.expectError(error.TooManyLinks, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/loop1/ok", .{root}), 4096, &p));
+    try testing.expectError(error.TooManyLinks, readPrivateFile(arena, io, try arena.print("{s}/loop1/ok", .{root}), 4096, &p));
     // `..` in the given path is refused; `.` changes nothing.
-    try testing.expectError(error.BadPath, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/good/../good/ok", .{root}), 4096, &p));
-    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/./good/ok", .{root}), 4096, &p));
+    try testing.expectError(error.BadPath, readPrivateFile(arena, io, try arena.print("{s}/good/../good/ok", .{root}), 4096, &p));
+    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print("{s}/./good/ok", .{root}), 4096, &p));
     // A relative path is walked from the current folder's real path.
-    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/rel/ok", .{&tmp.sub_path}), 4096, &p));
+    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print(".zig-cache/tmp/{s}/rel/ok", .{&tmp.sub_path}), 4096, &p));
     // The secret itself a link: refused, with where it leads noted for the message.
     try tmp.dir.symLink(io, "good/ok", "fl", .{});
-    try testing.expectError(error.SymLink, readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "{s}/fl", .{root}), 4096, &p));
+    try testing.expectError(error.SymLink, readPrivateFile(arena, io, try arena.print("{s}/fl", .{root}), 4096, &p));
     try testing.expectEqualStrings("good/ok", p.detail());
     // So is a link as the upload folder itself.
-    try testing.expectError(error.SymLink, openUploadDir(arena, io, try std.fmt.allocPrint(arena, "{s}/rel", .{root}), &p));
+    try testing.expectError(error.SymLink, openUploadDir(arena, io, try arena.print("{s}/rel", .{root}), &p));
     try testing.expectEqualStrings("good", p.detail());
     // A folder through a link, for the socket's chain.
-    const fd = try openChain(arena, io, try std.fmt.allocPrint(arena, "{s}/sub/up", .{root}), false, &p);
+    const fd = try openChain(arena, io, try arena.print("{s}/sub/up", .{root}), false, &p);
     closeFd(io, fd);
 }
 
@@ -2525,20 +2525,20 @@ test "macOS: /tmp and /var, links root owns in /, lead to their real folders" {
     const io = testing.io;
     var rnd: [4]u8 = undefined;
     io.random(&rnd);
-    const name = try std.fmt.allocPrint(arena, "rweb-test-xfer-{x}", .{rnd});
-    defer Io.Dir.cwd().deleteTree(io, std.fmt.allocPrint(arena, "/private/tmp/{s}", .{name}) catch unreachable) catch {};
-    defer Io.Dir.cwd().deleteTree(io, std.fmt.allocPrint(arena, "/private/var/tmp/{s}", .{name}) catch unreachable) catch {};
+    const name = try arena.print("rweb-test-xfer-{x}", .{rnd});
+    defer Io.Dir.cwd().deleteTree(io, arena.print("/private/tmp/{s}", .{name}) catch unreachable) catch {};
+    defer Io.Dir.cwd().deleteTree(io, arena.print("/private/var/tmp/{s}", .{name}) catch unreachable) catch {};
     var p: Problem = .{};
-    const up = try openUploadDir(arena, io, try std.fmt.allocPrint(arena, "/tmp/{s}/up", .{name}), &p);
+    const up = try openUploadDir(arena, io, try arena.print("/tmp/{s}/up", .{name}), &p);
     try writeFileMode(io, up.dir, "s", 0o600, "secret");
     up.dir.close(io);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "/private/tmp/{s}/up", .{name}), up.real_path);
-    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try std.fmt.allocPrint(arena, "/tmp/{s}/up/s", .{name}), 4096, &p));
+    try testing.expectEqualStrings(try arena.print("/private/tmp/{s}/up", .{name}), up.real_path);
+    try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print("/tmp/{s}/up/s", .{name}), 4096, &p));
     const fd = try openChain(arena, io, "/var/tmp", false, &p);
     closeFd(io, fd);
-    const vup = try openUploadDir(arena, io, try std.fmt.allocPrint(arena, "/var/tmp/{s}", .{name}), &p);
+    const vup = try openUploadDir(arena, io, try arena.print("/var/tmp/{s}", .{name}), &p);
     vup.dir.close(io);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "/private/var/tmp/{s}", .{name}), vup.real_path);
+    try testing.expectEqualStrings(try arena.print("/private/var/tmp/{s}", .{name}), vup.real_path);
 }
 
 test "a private file or folder accepts no group in its access list, admin included; admin may change folders on the way" {
@@ -2919,12 +2919,12 @@ test "a Problem copied after a walk past a link still names where the walk faile
     // `lnk` -> `open`, a folder every user can change: the walk follows the link, then fails at
     // `<root>/open`, a path it holds in the Problem's own buffer.
     try tmp.dir.createDirPath(io, "open");
-    try chmodPath(arena, try std.fmt.allocPrint(arena, "{s}/open", .{root}), 0o777);
+    try chmodPath(arena, try arena.print("{s}/open", .{root}), 0o777);
     try writeFileMode(io, tmp.dir, "open/ts", 0o755, "#!/bin/sh\n");
     try tmp.dir.symLink(io, "open", "lnk", .{});
     var p: Problem = .{};
-    try testing.expectError(error.FolderWritableByOthers, checkedProgram(arena, io, try std.fmt.allocPrint(arena, "{s}/lnk/ts", .{root}), &p));
-    const want = try std.fmt.allocPrint(arena, "{s}/open", .{root});
+    try testing.expectError(error.FolderWritableByOthers, checkedProgram(arena, io, try arena.print("{s}/lnk/ts", .{root}), &p));
+    const want = try arena.print("{s}/open", .{root});
     try testing.expectEqualStrings(want, p.pathText());
     try testing.expect(p.buf_path != null);
     const copy = p;

@@ -294,17 +294,17 @@ pub const Input = struct {
                 method = "com.superlogical.terminal.write";
                 const data = std.json.Stringify.valueAlloc(gpa, t.items, .{}) catch return false;
                 defer gpa.free(data);
-                break :blk std.fmt.allocPrint(gpa, "{{\"session_id\":{s},\"block_id\":{s},\"args\":{{\"data\":{s}}}}}", .{ sid, bid, data }) catch return false;
+                break :blk gpa.print("{{\"session_id\":{s},\"block_id\":{s},\"args\":{{\"data\":{s}}}}}", .{ sid, bid, data }) catch return false;
             },
             .key => |k| blk: {
                 method = "client.key";
-                break :blk std.fmt.allocPrint(gpa, "{{\"session_id\":{s},\"block_id\":{s},\"key\":{s}}}", .{ sid, bid, k }) catch return false;
+                break :blk gpa.print("{{\"session_id\":{s},\"block_id\":{s},\"key\":{s}}}", .{ sid, bid, k }) catch return false;
             },
             .event => |e| blk: {
                 method = "block.event";
                 const kind = std.json.Stringify.valueAlloc(gpa, e.kind, .{}) catch return false;
                 defer gpa.free(kind);
-                break :blk std.fmt.allocPrint(gpa, "{{\"session_id\":{s},\"block_id\":{s},\"event\":{{\"type\":{s},\"payload\":{s}}}}}", .{ sid, bid, kind, e.payload }) catch return false;
+                break :blk gpa.print("{{\"session_id\":{s},\"block_id\":{s},\"event\":{{\"type\":{s},\"payload\":{s}}}}}", .{ sid, bid, kind, e.payload }) catch return false;
             },
         };
         defer gpa.free(body);
@@ -523,7 +523,7 @@ test "input: through the control connection to the fake, the echo arrives in ord
     const ctl = try Control.open(a, testing.io, .{ .socket_path = f.path });
     defer ctl.close();
     const made = try f.createSession("rweb-test-input");
-    const body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{made.session_id});
+    const body = try a.print("{{\"session_id\":\"{s}\"}}", .{made.session_id});
     defer a.free(body);
     var at = try ctl.call("session.attach", body);
     at.deinit();
@@ -564,7 +564,7 @@ test "live: characters submitted one at a time reach a real shell in order (need
     defer a.free(sid);
     const bid = try a.dupe(u8, p.get("initial_windows").?.array.items[0].object.get("block_ids").?.array.items[0].string);
     defer a.free(bid);
-    const sid_body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{sid});
+    const sid_body = try a.print("{{\"session_id\":\"{s}\"}}", .{sid});
     defer a.free(sid_body);
     defer {
         if (ctl.call("session.destroy", sid_body)) |r| {
