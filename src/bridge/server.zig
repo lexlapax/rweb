@@ -61,7 +61,7 @@ pub const Options = struct {
 };
 
 const security_headers = [_]std.http.Header{
-    .{ .name = "content-security-policy", .value = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" },
+    .{ .name = "content-security-policy", .value = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" },
     .{ .name = "x-content-type-options", .value = "nosniff" },
     .{ .name = "referrer-policy", .value = "no-referrer" },
     .{ .name = "cross-origin-opener-policy", .value = "same-origin" },
@@ -1285,6 +1285,8 @@ test "server: assets are served with a strict content security policy" {
     try testing.expect(std.mem.indexOf(u8, h.body, "<title>rweb</title>") != null);
     try testing.expect(std.mem.indexOf(u8, h.head, "content-security-policy") != null or std.mem.indexOf(u8, h.head, "Content-Security-Policy") != null);
     try testing.expect(std.mem.indexOf(u8, h.head, "frame-ancestors 'none'") != null);
+    // The web app manifest is same-origin; without `manifest-src`, `default-src 'none'` would block it.
+    try testing.expect(std.mem.indexOf(u8, h.head, "manifest-src 'self'") != null);
     // Nothing in the page loads from elsewhere.
     try testing.expect(std.mem.indexOf(u8, h.body, "http://") == null and std.mem.indexOf(u8, h.body, "https://") == null);
 
@@ -1293,6 +1295,22 @@ test "server: assets are served with a strict content security policy" {
         defer freeHttp(a);
         try testing.expectEqual(@as(u16, 200), a.status);
         try testing.expect(a.body.len > 100);
+    }
+    // The icons and the manifest, with the types browsers need to use them (nosniff is on).
+    for ([_][2][]const u8{
+        .{ "/manifest.webmanifest", "application/manifest+json" },
+        .{ "/icons/favicon.svg", "image/svg+xml" },
+        .{ "/icons/favicon.ico", "image/x-icon" },
+        .{ "/icons/apple-touch-icon.png", "image/png" },
+        .{ "/icons/icon-192.png", "image/png" },
+        .{ "/icons/icon-512.png", "image/png" },
+        .{ "/icons/icon-maskable-512.png", "image/png" },
+    }) |pt| {
+        const a = try getT(rig, pt[0], "");
+        defer freeHttp(a);
+        try testing.expectEqual(@as(u16, 200), a.status);
+        try testing.expectEqualStrings(pt[1], headerValue(a.head, "content-type").?);
+        try testing.expectEqualSlices(u8, assets.find(pt[0]).?.body, a.body);
     }
     const nf = try getT(rig, "/nope", "");
     defer freeHttp(nf);

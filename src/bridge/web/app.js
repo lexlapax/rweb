@@ -873,7 +873,19 @@ async function doPaste() {
   const mods = el('div', ''); mods.id = 'keys-mods'; mods.append(...main.querySelectorAll(':scope > button'));
   main.append(mods, pad);
   K.ROW_MORE.forEach(k => make(k, more));
-  const paste = el('button', '', 'Paste'); paste.dataset.keep = 'paste'; paste.onpointerdown = e => { e.preventDefault(); doPaste(); }; more.append(paste);
+  // Paste opens a dialog, so it acts on a completed tap that ends on it, not on first touch like the
+  // other keys: a touch meant for its neighbour (End) must not open it.
+  const paste = el('button', '', 'Paste'); paste.dataset.keep = 'paste';
+  let pasteDown = false;
+  paste.onpointerdown = e => { e.preventDefault(); pasteDown = true; };
+  paste.onpointercancel = () => { pasteDown = false; };
+  paste.onpointerup = e => {
+    e.preventDefault();
+    const on = document.elementFromPoint(e.clientX, e.clientY);
+    if (pasteDown && on && on.closest('button') === paste) doPaste();
+    pasteDown = false;
+  };
+  more.append(paste);
 })();
 
 let hold = null;

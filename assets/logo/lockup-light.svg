@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 405 128" role="img">
+<title>rweb</title>
+<g transform="scale(.25)">
+<rect width="512" height="512" rx="112" fill="#181818"/>
+<rect x="4" y="4" width="504" height="504" rx="108" fill="none" stroke="#2e2e2e" stroke-width="8"/>
+<g fill="#474747"><circle cx="116" cy="112" r="15"/><circle cx="164" cy="112" r="15"/><circle cx="212" cy="112" r="15"/></g>
+<path d="M150 200 240 280 150 360" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke="#ececec" stroke-width="46"/>
+<rect x="286" y="204" width="86" height="152" rx="6" fill="#3fb950"/>
+</g>
+<path transform="translate(166 16.12) scale(.84)" d="M6 100V44M6 70Q6 44 32 44H40M60 44V86A14 14 0 0 0 88 86A14 14 0 0 0 116 86V44M88 86V62M136 72H192A28 28 0 1 0 185.4 90M212 14V100M212 72A28 28 0 1 1 212 72.01" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke="#181818" stroke-width="12"/>
+</svg>

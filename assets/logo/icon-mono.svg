@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img">
+<title>rweb</title>
+<rect width="512" height="512" rx="112" fill="#181818"/>
+<g fill="#ffffff"><circle cx="116" cy="112" r="15"/><circle cx="164" cy="112" r="15"/><circle cx="212" cy="112" r="15"/></g>
+<path d="M150 200 240 280 150 360" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke="#ffffff" stroke-width="46"/>
+<rect x="286" y="204" width="86" height="152" rx="6" fill="#ffffff"/>
+</svg>

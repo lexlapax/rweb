@@ -8,6 +8,7 @@
 - [Licence](../LICENSE): MIT.
 - [Third-party notices](../THIRD-PARTY-NOTICES.md): the software rweb contains or serves, with licences.
 - [Contributing](../CONTRIBUTING.md): a one-person project; forks are welcome, pull requests are not taken.
+- [Logo](../assets/logo/README.md): the logo's files, colours, sizes and spacing, and how its images are built.
 
 ## How it works
 

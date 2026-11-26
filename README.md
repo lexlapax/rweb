@@ -1,4 +1,10 @@
-# rweb
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/lockup.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo/lockup-light.svg">
+    <img alt="rweb" src="assets/logo/lockup-light.svg" width="253" height="80">
+  </picture>
+</h1>
 
 **A web client for [Rex](https://www.superlogical.com/rex), the terminal multiplexer, for when you are
 away from your Rex machines.** Open your Rex sessions in a phone, tablet or laptop browser, answer the

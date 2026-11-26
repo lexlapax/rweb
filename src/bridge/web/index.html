@@ -4,15 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#111418" id="theme-color">
+<meta name="theme-color" content="#181818" id="theme-color">
 <title>rweb</title>
+<link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="icons/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
 <link rel="stylesheet" href="vendor/xterm.css">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header id="bar">
   <button id="menu" class="icon" aria-label="Sessions and terminals" aria-controls="list" aria-expanded="true">&#9776;</button>
-  <div id="crumb" aria-live="polite"><div id="crumb-main"><span id="crumb-session"></span><span id="crumb-sep" aria-hidden="true"> &rsaquo; </span><span id="crumb-term"></span><span id="crumb-count" class="dim"></span></div><div id="crumb-sub" class="dim"></div></div>
+  <div id="crumb" aria-live="polite"><div id="crumb-main"><img id="crumb-logo" src="icons/favicon.svg" alt="" width="22" height="22"><span id="crumb-session"></span><span id="crumb-sep" aria-hidden="true"> &rsaquo; </span><span id="crumb-term"></span><span id="crumb-count" class="dim"></span></div><div id="crumb-sub" class="dim"></div></div>
   <button id="tabsel" hidden aria-haspopup="menu" aria-expanded="false" aria-label="Switch terminal"></button>
   <span class="spacer"></span>
   <span id="dot" class="dot" role="status" aria-label="connecting" title="connecting"></span>

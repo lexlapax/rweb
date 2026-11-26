@@ -21,6 +21,13 @@ pub const all = [_]Asset{
     .{ .path = "/keys.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/keys.js") },
     .{ .path = "/diag.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/diag.js") },
     .{ .path = "/app.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/app.css") },
+    .{ .path = "/manifest.webmanifest", .content_type = "application/manifest+json", .body = @embedFile("web/manifest.webmanifest") },
+    .{ .path = "/icons/favicon.svg", .content_type = "image/svg+xml", .body = @embedFile("web/icons/favicon.svg") },
+    .{ .path = "/icons/favicon.ico", .content_type = "image/x-icon", .body = @embedFile("web/icons/favicon.ico") },
+    .{ .path = "/icons/apple-touch-icon.png", .content_type = "image/png", .body = @embedFile("web/icons/apple-touch-icon.png") },
+    .{ .path = "/icons/icon-192.png", .content_type = "image/png", .body = @embedFile("web/icons/icon-192.png") },
+    .{ .path = "/icons/icon-512.png", .content_type = "image/png", .body = @embedFile("web/icons/icon-512.png") },
+    .{ .path = "/icons/icon-maskable-512.png", .content_type = "image/png", .body = @embedFile("web/icons/icon-maskable-512.png") },
     .{ .path = "/vendor/xterm.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/xterm.js") },
     .{ .path = "/vendor/xterm.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/vendor/xterm.css") },
     .{ .path = "/vendor/addon-fit.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/addon-fit.js") },
@@ -130,6 +137,43 @@ test "the page references only files that are embedded, and carries no inline co
     while (scripts.next()) |s| try std.testing.expect(std.mem.startsWith(u8, s, " src=\""));
     try std.testing.expect(std.mem.indexOf(u8, page, " onclick=") == null);
     try std.testing.expect(std.mem.indexOf(u8, page, "<style") == null);
+}
+
+// The manifest's addresses resolve against its own URL, so relative ones also work under the tunnel's
+// path prefix; each icon it names is embedded and has the type it claims.
+test "the web app manifest names only embedded icons, by relative paths" {
+    const gpa = std.testing.allocator;
+    const m = find("/manifest.webmanifest").?.body;
+    const Icon = struct { src: []const u8, sizes: []const u8, type: []const u8, purpose: ?[]const u8 = null };
+    const Manifest = struct {
+        name: []const u8,
+        short_name: []const u8,
+        start_url: []const u8,
+        scope: []const u8,
+        display: []const u8,
+        background_color: []const u8,
+        theme_color: []const u8,
+        icons: []const Icon,
+    };
+    const parsed = try std.json.parseFromSlice(Manifest, gpa, m, .{});
+    defer parsed.deinit();
+    const v = parsed.value;
+    try std.testing.expectEqualStrings("./", v.start_url);
+    try std.testing.expectEqualStrings("./", v.scope);
+    var maskable = false;
+    for (v.icons) |icon| {
+        try std.testing.expect(icon.src.len > 0 and icon.src[0] != '/' and std.mem.indexOf(u8, icon.src, "//") == null);
+        var buf: [96]u8 = undefined;
+        const a = find(try std.fmt.bufPrint(&buf, "/{s}", .{icon.src})) orelse return error.NotEmbedded;
+        try std.testing.expectEqualStrings(icon.type, a.content_type);
+        // A PNG's width and height are in its header; both must match `sizes`.
+        try std.testing.expect(std.mem.startsWith(u8, a.body, "\x89PNG\r\n\x1a\n"));
+        const w = std.mem.readInt(u32, a.body[16..20], .big);
+        const h = std.mem.readInt(u32, a.body[20..24], .big);
+        try std.testing.expectEqualStrings(icon.sizes, try std.fmt.bufPrint(&buf, "{d}x{d}", .{ w, h }));
+        if (icon.purpose) |p| maskable = maskable or std.mem.eql(u8, p, "maskable");
+    }
+    try std.testing.expect(maskable);
 }
 
 test "page scripts load and connect by relative paths only" {

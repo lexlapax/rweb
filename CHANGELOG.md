@@ -28,6 +28,9 @@ the Rex API revisions it speaks.
 - Malformed `tailscale status --json` is an error at startup, never a crash.
 - `tools/release.sh` refuses a release folder that is a link or another user's, and makes its own
   private (`0700`) before building in it.
+- The page has a logo: a favicon, home-screen icons for iOS and Android with a web app manifest (added to
+  a home screen, it opens without the browser's bars), and the logo before the title while no terminal
+  is open. Sources and rules: `assets/logo/`.
 
 From the second review (details: `docs/security-review-2026-11-25-round2.md`):
 
@@ -137,6 +140,10 @@ From the fourth review (details: `docs/security-review-2026-11-25-round4.md`):
   pinned one unless told otherwise, and writes `BUILDINFO`; a build from a changed working tree shows
   `-dirty` in `rweb --version`; the docs name `tools/release.sh` as the only release path.
 - The Phase 0 spike is removed from the tree (it loaded xterm.js from a CDN; it is in Git history).
+- The page, from live testing on phones: the key bar's Paste acts on a completed tap that ends on it (a
+  touch meant for End next to it could open the paste dialog); only terminal text, the Copy view and
+  fields can be selected, so a long press or "Select all" copies terminal text instead of the page's
+  labels and hidden dialogs; typing right after switching terminals reaches the new terminal.
 - README: "About this project"; `CONTRIBUTING.md`. Vendored browser code: what is and is not known about
   its provenance is recorded, and a rebuild from recorded sources is planned for Phase 6.
 

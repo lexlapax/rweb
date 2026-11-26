@@ -1,7 +1,23 @@
 # Agent context map
 
-Last updated: 2026-11-25 (laptop-mac: fourth review round and its fixes; live test pending). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
+Last updated: 2026-11-26 (laptop-mac: logo added; fourth review round and its fixes; live test pending). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-26: logo
+
+The owner chose concept A ("prompt in a window", Terminal green: tile `#181818`, foreground `#ececec`,
+accent `#3fb950`). Sources, colours, sizes and spacing in [assets/logo/README.md](assets/logo/README.md);
+`assets/logo/build.sh` exports every raster with headless Chrome (byte-identical on a rerun) and
+`ico.py` packs `favicon.ico`. The page serves `icons/` (favicon SVG and ICO, apple-touch-icon, 192, 512,
+maskable 512) and `manifest.webmanifest` (relative URLs, `display: standalone`), with links in
+`index.html`; the logo shows before the title while no terminal is open (CSS `:has`, app.js unchanged).
+CSP gains `manifest-src 'self'` (`img-src 'self' data:` was already there); the manifest link uses
+`crossorigin="use-credentials"` so the tunnel's cookie reaches it. Tests: the manifest names embedded
+PNGs of the stated sizes; the server serves each icon with its type and the CSP has `manifest-src`.
+README heading is the lockup (`<picture>`, dark and light). Checked on laptop-mac: `zig build test`
+265/275 (10 skipped, no live), `web-test` 29/29, `zig build`; the header and every raster looked at in
+headless Chrome. Not checked: a phone's home screen or a simulator. Release archives (`tools/dist.sh`)
+copy `README.md` without `assets/`, so there the heading shows its alt text.
 
 ## 2026-11-25: fourth review round of `c5fd3c1` and its fixes
 
@@ -28,7 +44,12 @@ the next commit; the tools scripts are now executable (`tools/release.sh` never 
 typing still lost right after a switch on desktop because focus stays on the clicked tab until `opened`
 (as in 0.1.0); the page now focuses the terminal when the switch starts (wide screens only). Android
 emulator on linux-box → laptop-mac through Serve: page, drawer, typing through Gboard and the key bar's ^C
-work; iOS Simulator on laptop-mac → linux-box: page loads and connects through Serve.
+work; iOS Simulator on laptop-mac → linux-box: page loads and connects through Serve. Owner's phone test
+(Samsung, Chrome): tapping End on the key bar opened the Paste dialog (Paste fired on first touch; now on
+a completed tap ending on it); copy looked broken: on the emulator, menu Copy, long-press Copy and menu
+Paste (after Chrome's clipboard permission) work, but "Select all" took in the page's labels and hidden
+dialogs (now only terminal text, the Copy view and fields are selectable). Logo (concept A, terminal
+green) added in every format and wired into the page, manifest and README.
 
 ## 2026-11-25: third review round of `4c383fb` and its fixes
 

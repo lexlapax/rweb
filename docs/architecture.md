@@ -229,9 +229,10 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 | --- | --- |
 | `src/rex/` | Rex client library: `ws.zig` (WebSocket over a unix socket), `control.zig` (hello, revisions, calls, events, reconnect), `api.zig` (typed calls), `data.zig` and `rex1.zig` (output streams), `mirror.zig` (libghostty-vt terminal), `input.zig` (ordered input), `transfer.zig` (downloads), `wire.zig` (handshake parsers), `fake.zig` (a fake Rex for tests) |
 | `src/bridge/` | The program: `main.zig` (start-up, `--version`), `cli.zig` (options), `access.zig` (who may talk to it), `server.zig` (HTTP and WebSocket), `protocol.zig` (browser protocol), `hub.zig` (sessions, terminals, viewers), `xfer.zig` (file transfer), `assets.zig` (embedded page) |
-| `src/bridge/web/` | The page: `index.html`, `app.js`, `app.css`, `keys.js` (pure key and touch logic, tested with Node), `wterm-shim.js`, `diag.js`; `vendor/` holds xterm.js and wterm with their licences and checksums |
+| `src/bridge/web/` | The page: `index.html`, `app.js`, `app.css`, `keys.js` (pure key and touch logic, tested with Node), `wterm-shim.js`, `diag.js`, `manifest.webmanifest`; `icons/` holds the favicons and app icons; `vendor/` holds xterm.js and wterm with their licences and checksums |
 | `src/fuzz.zig` | Fuzz targets for every parser that reads outside bytes (`zig build fuzz --fuzz`) |
 | `tests/web/` | Tests for the page's logic (`zig build web-test`) |
+| `assets/logo/` | The logo's SVG sources, the social preview and `build.sh`, which exports the rasters (the page's icons are in `src/bridge/web/icons/`) |
 | `tools/` | `dist.sh` and `release.sh` (release archives; `release-base.test.sh` checks its folder rules), `notices.py` (third-party notices) |
 
 ## Pinned dependencies
