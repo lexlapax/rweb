@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: `f43ae8e` on all four hosts; browsers and the owner's phone checked; the 0.1.1 release commit next, on the owner's word).
+Last updated: 2026-11-26 (laptop-mac: the 0.1.1 release commit; archives, tag and setup-repo pin follow; the GitHub Release waits for the decision on making the repository public).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## 2026-11-26: `f43ae8e` deployed

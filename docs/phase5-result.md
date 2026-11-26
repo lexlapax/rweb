@@ -105,6 +105,21 @@ The owner chose to run the release binaries on the machines before publishing an
   `e901ca9`, fanned out from linux-box) and installed the same Linux archive; `rweb.service` runs on its
   unix socket. Its Serve entry (`rweb-serve on`, sudo) is the owner's step.
 
+## 0.1.1 (2026-11-26)
+
+The release commit dates the changelog; its code is that of `f43ae8e`, the commit deployed and tested
+below.
+
+- Reviews before it: six rounds on the release candidate, the last with a follow-up and a second look
+  (docs/security-review-2026-11-26-round6.md).
+- `f43ae8e` on all four hosts through setup-repo (pin `a9451b7`), re-applied and restarted on each; tested
+  through Tailscale Serve from other nodes in desktop Chrome, Android emulator Chrome and iOS Simulator
+  Mobile Safari against every host (16 scripted checks each, Rex's own capture read afterwards), and on
+  the owner's phone, which passed.
+- Archives of this commit: `tools/release.sh` on laptop-mac with official Zig 0.17.1, recorded in
+  `BUILDINFO`; the hosts are moved to them through setup-repo.
+- Step 4, the GitHub Release: waits for the owner's decision on making the repository public.
+
 ## Next
 
 - Done 2026-11-25: gateway-box's Serve entry and phone check; the Zig pin (official 0.17.1, above).
