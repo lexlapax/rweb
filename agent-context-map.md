@@ -24,7 +24,11 @@ live config; through linux-box's Serve from desktop Chrome a Unicode paste (`’
 and a two-line paste into zsh worked, and rapid terminal switching never sent typing to a terminal not on
 screen; but keystrokes typed right after a switch were dropped (the round-3 page waited for `opened`
 before sending input; not needed for safety since the bridge handles a page's messages in order). Fixed in
-the next commit; the tools scripts are now executable (`tools/release.sh` never was).
+the next commit; the tools scripts are now executable (`tools/release.sh` never was). Live with 4c79a12:
+typing still lost right after a switch on desktop because focus stays on the clicked tab until `opened`
+(as in 0.1.0); the page now focuses the terminal when the switch starts (wide screens only). Android
+emulator on linux-box → laptop-mac through Serve: page, drawer, typing through Gboard and the key bar's ^C
+work; iOS Simulator on laptop-mac → linux-box: page loads and connects through Serve.
 
 ## 2026-11-25: third review round of `4c383fb` and its fixes
 

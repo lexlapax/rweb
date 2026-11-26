@@ -619,6 +619,9 @@ function openBlock(session, block, restoring) {
   forgetPaste();
   term.reset(); clearLatched(); softReset();
   send({t: 'open', session, block});
+  // On a wide screen typing goes to the terminal at once (on a phone this would pop up the keyboard):
+  // what is typed right after a switch reaches the terminal just opened, as the bridge keeps the order.
+  if (!NARROW.matches && !restoring) term.focus();
   closeListIfNarrow(); closePop();
   renderAll(); renderStatus();
 }
