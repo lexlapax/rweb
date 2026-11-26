@@ -176,6 +176,8 @@ From the fifth review (details: `docs/security-review-2026-11-26-round5.md`, in 
 - Behind a token, rweb answers only for `127.0.0.1`, `localhost` and `[::1]` unless `--allow-host` says
   otherwise, and refuses a token that arrives from another website, even a right one (a link on another
   site cannot sign you in; type or bookmark the address).
+- An upload is written under a temporary name (`.rweb-upload-….part`) and gets its real name only when it
+  is complete; if rweb is stopped in the middle, the next start removes what was left.
 - rweb gives `tailscale` ten seconds to answer and reads at most 1 MiB from it, so a hung `tailscale`
   cannot stall the check of this machine's own addresses.
 - Wrong tokens are limited: after 10 in a minute, wrong tokens get 429 until the minute ends. A right

@@ -18,12 +18,18 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 - **Checks run:** macOS `zig build test` after the renames 382/393 (11 skipped) and after the small
   fixes 315/325 (10 skipped; fuzz from cache), web tests 42/42; Linux after the renames only: with the
   live Rex 390/393 (3 skipped), without it 381/393 (12 skipped), `zig fmt --check` clean; the Linux
-  release binary read with `readelf` (static PIE, no interpreter, no needed libraries). **Not run:** the
-  small fixes on Linux (they compile for it), `tools/release.sh`, any measurement.
+  release binary read with `readelf` (static PIE, no interpreter, no needed libraries). **Not run
+  then:** the small fixes on Linux and `tools/release.sh` (both run later the same day, below); any
+  measurement.
+- **After that, same day:** uploads are written to a part file and named only when complete; leftover
+  part files are removed at start (so a stop, crash or power cut never leaves a file that looks whole).
+  Checks on that commit: macOS `zig build test` 316/326 (10 skipped; fuzz from cache); Linux with the
+  live Rex 391/394 (3 skipped), without it 382/394 (12 skipped), which also covers the small fixes above;
+  `zig fmt --check` clean on both; `tools/release.sh HEAD` as a dry run in a scratch base (tests in
+  `ReleaseSafe`, both archives, checksums). Not run: the upload change in a browser or simulator.
 - **Open (Phase B, after 0.1.1, each with measurements):** typed JSON in the Rex client; the release
   allocator decision; per-frame and per-keystroke allocations; `checkAllAllocationFailures` tests; event
-  waits, one write-deadline watcher, the mutex around Rex calls; assertions on internal invariants; a
-  partial upload left by a stop signal. The audit document lists each with file and line.
+  waits, one write-deadline watcher, the mutex around Rex calls; assertions on internal invariants. The audit document lists each with file and line.
 
 ## 2026-11-26: round five (in progress, not merged, not released)
 

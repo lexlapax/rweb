@@ -143,8 +143,9 @@ Fixed in the same commit as this document, each small: `tailscale` now runs with
 1 MiB cap on its output (items 16 and 19); a failed `Hub.open` frees what it made; a connection that
 cannot be tracked is closed, not served (the rest of F7); a failed close-on-exec on the loopback listener
 fails the listener; the two `allocPrintSentinel` calls use `Allocator.printSentinel`; and
-`tools/release.sh` runs the tests in `ReleaseSafe`, the mode it packs (item 2). Still open: a stop signal
-in the middle of an upload leaves the partial file in the upload folder (the handler exits at once).
+`tools/release.sh` runs the tests in `ReleaseSafe`, the mode it packs (item 2). A stop signal in the
+middle of an upload no longer leaves a file that looks whole: uploads are written to a part file, named
+when complete, and leftover part files are removed at the next start (a later commit).
 The text below is the finding as made, before those fixes.
 
 None is a way in, a crash from peer input, or unbounded memory. In order of weight:

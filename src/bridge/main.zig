@@ -255,6 +255,8 @@ pub fn main(init: std.process.Init) !void {
             var up_problem: xfer.Problem = .{};
             const up = xfer.openUploadDir(arena, io, dir, &up_problem) catch |e| refuseFile("the upload folder", dir, e, &up_problem, .{ .item_option = "--upload-dir" });
             transfer.upload_dir_handle = up.dir;
+            const swept = xfer.sweepUploadParts(io, up.dir);
+            if (swept > 0) std.debug.print("rweb: removed {d} unfinished upload(s) left in the upload folder\n", .{swept});
             transfer.upload_dir = dir;
             // What is pasted and shown: the folder's real path, as it was when it was opened.
             transfer.upload_dir_real = up.real_path;

@@ -1437,6 +1437,25 @@ pub fn readPrivateFile(arena: Allocator, io: Io, path: []const u8, limit: usize,
 /// private folder of ours.
 pub const UploadDir = struct { dir: Io.Dir, real_path: []const u8 };
 
+/// An upload is written under this name and linked to its real one when complete (`server.zig`).
+pub const upload_part_prefix = ".rweb-upload-";
+pub const upload_part_suffix = ".part";
+
+/// Remove part files a stopped or crashed rweb left in the upload folder. Only rweb's own names, only
+/// regular files; the folder is ours and closed to others, so nothing here is another user's. Returns
+/// how many were removed.
+pub fn sweepUploadParts(io: Io, dir: Io.Dir) usize {
+    var n: usize = 0;
+    var it = dir.iterate();
+    while (it.next(io) catch null) |e| {
+        if (e.kind != .file) continue;
+        if (!std.mem.startsWith(u8, e.name, upload_part_prefix) or !std.mem.endsWith(u8, e.name, upload_part_suffix)) continue;
+        dir.deleteFile(io, e.name) catch continue;
+        n += 1;
+    }
+    return n;
+}
+
 pub fn openUploadDir(arena: Allocator, io: Io, path: []const u8, problem: *Problem) OpenError!UploadDir {
     problem.setPath(path);
     const trimmed = std.mem.trimEnd(u8, path, "/");
@@ -2945,4 +2964,19 @@ test "no internal error name reaches the user" {
     var w: Io.Writer = .fixed(&b);
     try explain(&w, "its token", "/nowhere/t", error.FolderWritableByGroup, &.{ .ext_path = "/nowhere", .found = .{ .uid = 0, .gid = 0, .mode = S_IFDIR | 0o775 } }, .{});
     try testing.expect(std.mem.startsWith(u8, w.buffered(), "rweb: /nowhere can be changed by members of group \""));
+}
+
+test "sweepUploadParts removes only rweb's own part files" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const d = tmp.dir;
+    for ([_][]const u8{ ".rweb-upload-0123abcd.part", ".rweb-upload-ffff.part", "report.pdf", "notes.part", ".rweb-upload-keep.txt" }) |name| {
+        const f = try d.createFile(testing.io, name, .{});
+        f.close(testing.io);
+    }
+    try d.createDir(testing.io, ".rweb-upload-dir.part", .default_dir);
+    try testing.expectEqual(@as(usize, 2), sweepUploadParts(testing.io, d));
+    for ([_][]const u8{ "report.pdf", "notes.part", ".rweb-upload-keep.txt", ".rweb-upload-dir.part" }) |name| _ = try d.statFile(testing.io, name, .{});
+    try testing.expectError(error.FileNotFound, d.statFile(testing.io, ".rweb-upload-0123abcd.part", .{}));
+    try testing.expectEqual(@as(usize, 0), sweepUploadParts(testing.io, d));
 }

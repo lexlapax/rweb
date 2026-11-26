@@ -1093,33 +1093,18 @@ pub const Server = struct {
         if (len != entry.size) return refuseXfer(req, .bad_request, "the size is not what was announced\n");
         if (len > s.hub.cfg.transfer.max_bytes) return refuseXfer(req, .payload_too_large, "too large\n");
 
-        // A name that is safe, and that does not replace anything: "a.txt", "a (1).txt", ...
-        var nb: [128]u8 = undefined;
-        const safe = xfer.safeName(&nb, entry.name);
-        var name_buf: [160]u8 = undefined;
-        var final: []const u8 = safe;
-        var file: ?Io.File = null;
-        var attempt: u32 = 0;
-        while (attempt < 100) : (attempt += 1) {
-            if (attempt > 0) {
-                const dot = std.mem.lastIndexOfScalar(u8, safe, '.');
-                const stem = if (dot) |d| (if (d == 0) safe else safe[0..d]) else safe;
-                const ext = if (dot) |d| (if (d == 0) "" else safe[d..]) else "";
-                final = std.fmt.bufPrint(&name_buf, "{s} ({d}){s}", .{ stem, attempt, ext }) catch return refuseXfer(req, .internal_server_error, "name\n");
-            }
-            if (dir.createFile(s.io, final, .{ .exclusive = true, .permissions = @fromBackingInt(@intCast(0o600)) })) |f| {
-                file = f;
-                break;
-            } else |e| switch (e) {
-                error.PathAlreadyExists => continue,
-                else => return refuseXfer(req, .internal_server_error, "cannot create the file\n"),
-            }
-        }
-        const f = file orelse return refuseXfer(req, .internal_server_error, "no free name\n");
-        var keep = false;
+        // The bytes go into a part file first, and it gets its real name only when all of them are in:
+        // a stop, a crash or a power cut in the middle leaves a `.rweb-upload-*.part`, never a file that
+        // looks whole (the next start removes leftover part files: `xfer.sweepUploadParts`).
+        var part_buf: [xfer.upload_part_prefix.len + 32 + xfer.upload_part_suffix.len + 1]u8 = undefined;
+        var raw: [16]u8 = undefined;
+        s.io.randomSecure(&raw) catch return refuseXfer(req, .internal_server_error, "cannot create the file\n");
+        const part = std.fmt.bufPrintSentinel(&part_buf, "{s}{x}{s}", .{ xfer.upload_part_prefix, &raw, xfer.upload_part_suffix }, 0) catch unreachable; // the buffer is sized for it
+        const f = dir.createFile(s.io, part, .{ .exclusive = true, .permissions = @fromBackingInt(@intCast(0o600)) }) catch
+            return refuseXfer(req, .internal_server_error, "cannot create the file\n");
         defer {
             f.close(s.io);
-            if (!keep) dir.deleteFile(s.io, final) catch {};
+            dir.deleteFile(s.io, part) catch {}; // the part file never stays: done, it has its real name too
         }
 
         // The body, exactly `len` bytes, each read within `transfer_idle_ms` of the last.
@@ -1139,7 +1124,29 @@ pub const Server = struct {
             progress.touch(s.io);
         }
         if (!s.hub.mayUpload(entry.viewer_id, entry.session_id, entry.block_id)) return refuseXfer(req, .forbidden, "this page can no longer write to that terminal\n");
-        keep = true;
+        // Its real name: one that is safe, and that replaces nothing ("a.txt", "a (1).txt", ...). A hard
+        // link fails if the name exists, so nothing is ever replaced, even by a racing upload.
+        var nb: [128]u8 = undefined;
+        const safe = xfer.safeName(&nb, entry.name);
+        var name_buf: [161]u8 = undefined;
+        var final: [:0]const u8 = "";
+        var named = false;
+        var attempt: u32 = 0;
+        while (attempt < 100) : (attempt += 1) {
+            const dot = std.mem.lastIndexOfScalar(u8, safe, '.');
+            const stem = if (dot) |d| (if (d == 0) safe else safe[0..d]) else safe;
+            const ext = if (dot) |d| (if (d == 0) "" else safe[d..]) else "";
+            final = (if (attempt == 0)
+                std.fmt.bufPrintSentinel(&name_buf, "{s}", .{safe}, 0)
+            else
+                std.fmt.bufPrintSentinel(&name_buf, "{s} ({d}){s}", .{ stem, attempt, ext }, 0)) catch return refuseXfer(req, .internal_server_error, "name\n");
+            if (std.c.linkat(dir.handle, part, dir.handle, final, 0) == 0) {
+                named = true;
+                break;
+            }
+            if (std.c._errno().* != @backingInt(std.c.E.EXIST)) return refuseXfer(req, .internal_server_error, "cannot create the file\n");
+        }
+        if (!named) return refuseXfer(req, .internal_server_error, "no free name\n");
         log.info("upload done: {s} {d} bytes", .{ final, len });
 
         // Tell the terminal where it is: the quoted path, as if pasted (no Enter).
@@ -2870,6 +2877,15 @@ test "server: an upload goes into the folder opened at startup, whatever replace
     }
 }
 
+fn countParts(dir: Io.Dir) usize {
+    var n: usize = 0;
+    var it = dir.iterate();
+    while (it.next(testing.io) catch null) |e| {
+        if (std.mem.startsWith(u8, e.name, xfer.upload_part_prefix)) n += 1;
+    }
+    return n;
+}
+
 test "server: an upload that stops sending is cut, and its partial file removed" {
     var db: [64]u8 = undefined;
     const up = try uploadDir(&db);
@@ -2892,13 +2908,30 @@ test "server: an upload that stops sending is cut, and its partial file removed"
     try w.interface.writeAll(req);
     try w.interface.flush();
     const t0 = nowMs(testing.io);
+    // While the bytes are still coming, the file has no real name yet: only a part file exists. A stop
+    // or a crash now leaves nothing that looks like a finished upload.
+    const partial = try a.print("{s}/stall.bin", .{up.path});
+    defer a.free(partial);
+    var saw_part = false;
+    for (0..100) |_| {
+        if (countParts(up.dir) == 1) {
+            saw_part = true;
+            break;
+        }
+        try testing.io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try testing.expect(saw_part);
+    try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, partial, .{}));
     var rb: [256]u8 = undefined;
     var r = stream.reader(testing.io, &rb);
     while (true) _ = r.interface.takeByte() catch break; // until the bridge cuts it
     try testing.expect(nowMs(testing.io) - t0 < 5_000);
-    // The partial file goes as the handler unwinds.
-    const partial = try a.print("{s}/stall.bin", .{up.path});
-    defer a.free(partial);
+    // The part file goes as the handler unwinds, and the real name was never made.
+    for (0..100) |_| {
+        if (countParts(up.dir) == 0) break;
+        try testing.io.sleep(.fromMilliseconds(10), .awake);
+    }
+    try testing.expectEqual(@as(usize, 0), countParts(up.dir));
     var gone = false;
     for (0..100) |_| {
         if (Io.Dir.cwd().statFile(testing.io, partial, .{})) |_| {} else |_| {
