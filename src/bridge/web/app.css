@@ -189,8 +189,7 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 #crumb-sub:empty { display: none; }
 #crumb-sub .bad { color: var(--bad); }
 /* The logo before the title "rweb", shown only while no terminal is open (the separator is hidden then). */
-#crumb-logo { display: none; width: 22px; height: 22px; margin-right: 8px; vertical-align: -6px; }
-#crumb-main:has(#crumb-sep[hidden]) #crumb-logo { display: inline-block; }
+#crumb-logo { display: inline-block; flex: none; width: 22px; height: 22px; margin-right: 8px; vertical-align: -6px; }
 #ports { display: flex; gap: 4px; margin-left: auto; }
 .chip { font: 11px ui-monospace, Menlo, monospace; color: var(--good); border: 1px solid #2c4a33; background: #1d2a21; border-radius: 10px; padding: 2px 7px; }
 #tab-menu { margin-left: 0; }

@@ -49,7 +49,8 @@ work; iOS Simulator on laptop-mac → linux-box: page loads and connects through
 a completed tap ending on it); copy looked broken: on the emulator, menu Copy, long-press Copy and menu
 Paste (after Chrome's clipboard permission) work, but "Select all" took in the page's labels and hidden
 dialogs (now only terminal text, the Copy view and fields are selectable). Logo (concept A, terminal
-green) added in every format and wired into the page, manifest and README.
+green) added in every format and wired into the page, manifest and README. Owner: the header logo was only
+shown with no terminal open (the page restores the last terminal, so it was never seen); now always shown.
 
 ## 2026-11-25: third review round of `4c383fb` and its fixes
 
