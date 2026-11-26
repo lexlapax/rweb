@@ -1,7 +1,22 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: Zig idiom pass on main locally, after round five; not pushed).
+Last updated: 2026-11-26 (laptop-mac: 0.1.1 at 1908e25 pushed and deployed on all four hosts through setup-repo).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-26: pushed and deployed
+
+- `main` at `1908e25` is pushed (owner's word). Archives from `tools/release.sh 1908e25` on laptop-mac
+  (`zig-out/release/0.1.1/`, with `BUILDINFO`); the earlier 0.1.1 archives are kept in
+  `zig-out/release/0.1.1-d1cf9218d72a/`.
+- Deployed through setup-repo on laptop-mac, desktop-mac, linux-box and gateway-box (its pin `c47dfaf`, its action
+  record `2026-11-26-rweb-1908e25-fleet.md`): before the pin, the new binary was run on each host with
+  that host's real settings on a throwaway socket or port and started without a refusal; after the apply,
+  each host's page answered through Serve from another node. The deployments still start rweb with the
+  earlier option form, not `rweb tailscale`.
+- **Not verified:** the owner's phone on this build; the upload change in a browser.
+- **Next:** the external security scan and readiness review of `1908e25`; then the items listed under
+  round five and the Zig idiom pass below. The changelog is not dated and nothing is tagged: this is not
+  the 0.1.1 release commit.
 
 ## 2026-11-26: Zig idiom pass (owner: "did you follow the Zig ethos")
 
@@ -57,8 +72,7 @@ owner's decisions are in [docs/PLAN.md](docs/PLAN.md) ("Owner's decisions (2026-
 - **Not verified:** the owner's phone; `rweb tailscale` on Linux through Serve (needs `sudo tailscale
   serve`); typing into the form in iOS Safari (automation cannot tap there); the deployed hosts against
   the new refusals. `tools/release.sh` not run.
-- **State:** merged to `main` locally, not pushed (owner, 2026-11-26: another reviewer goes through the
-  work next). The deployed services still run the previous build.
+- **State then:** merged to `main` locally, not pushed. Pushed and deployed later the same day (above).
 - **Next:** the owner's other review; before upgrading a host, check it against the new refusals
   (group-writable folders above rweb's files, token length 32, local disks), and consider moving the
   deployments to `rweb tailscale`; the deferred Zig idiom items (typed JSON in the Rex client, release
