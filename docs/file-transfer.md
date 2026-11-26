@@ -30,9 +30,11 @@ into requesting**:
    upload folder is set. These asks count against the 8-per-second heavy-request cap.
 2. The bridge answers with a **token**: 128 random bits, valid 30 seconds (on a clock that keeps counting
    while the machine sleeps), good for one request, of one kind (a download token cannot start an upload
-   and the reverse), and tied to the page that asked. An upload token works only while that page may still
-   write to that terminal: it is withdrawn when the page turns read-only or closes, and refused (403) if the
-   page has moved to another terminal, both when the upload arrives and again before its path is pasted. The page then requests `GET /xfer/<token>`
+   and the reverse), and tied to the page and terminal view generation (`view_gen`) that asked. An upload
+   token works only while that page may still write to that exact terminal view: it is withdrawn immediately
+   when the page turns read-only, closes, or leaves the terminal (404), so switching away and back cannot
+   revive an earlier view's token; if a race still reaches the upload handler or finishes after a view change,
+   it is refused (403) before saving or saved without pasting (`"pasted": false`). The page then requests `GET /xfer/<token>`
    or `PUT /xfer/<token>`. Those pass the same access check as any request; a `PUT` also needs a matching
    `Origin`, as a WebSocket does, so another site's page cannot send one. The token is compared in constant
    time, and the request log never prints it (`/xfer/(token)`).
@@ -51,7 +53,7 @@ into requesting**:
 | Filling the disk or memory | Size announced up front and checked against the limit and against `Content-Length`; a download aborts past the limit; uploads stream in 64 KiB pieces; an incomplete or mismatching upload is deleted. 4 running, 16 waiting; a transfer takes a running slot before its token is used, so a busy bridge does not waste a token. |
 | A transfer that stalls | No bytes for 30 seconds, either way, and the connection is cut (a partial upload is deleted), so a stuck phone cannot hold a running slot. |
 | A read-only viewer | Refused at the first step. |
-| The path typed into a terminal the page has left | The upload's token is for one page and one terminal, and the page's request for it names the terminal the files were chosen for (refused for any other). When the upload ends, the check that the page is still there, may write and still shows that terminal, and the queueing of the path, are one step under the page's lock; the path goes through the terminal's own input queue, in order with typing. A page that has switched, gone or turned read-only while the bytes were arriving is refused (403) and nothing is saved; one that does so in the last moment, after the file is named, gets the file and no paste (`"pasted": false`). The download picker's requests (`ls`, `dl`) name the terminal the picker was opened for and are refused for any other. |
+| The path typed into a terminal the page has left | The upload's token is for one page, one terminal and one view generation (`view_gen`), and the page's request for it names the terminal the files were chosen for (refused for any other). Leaving the terminal revokes pending upload tokens immediately (404), so switching away and back cannot revive an earlier view's token. When the upload ends, the check that the page is still there, may write and still shows that exact terminal view, and the queueing of the path, are one step under the page's lock; the path goes through the terminal's own input queue, in order with typing. A page that switches, leaves or turns read-only before or while the bytes arrive gets 404/403 and nothing is saved; one that does so in the last moment, after the file is named, gets the file and no paste (`"pasted": false`). The download picker's requests (`ls`, `dl`) name the terminal the picker was opened for and are refused for any other, closing the picker on stale view changes. |
 | Many tokens held open | Capped at 16, and at 4 per browser so one page cannot block the others; expired ones are swept. A download Rex has begun but nobody fetched ends when Rex's own ticket expires (Rex has no call to cancel it). |
 | Who sees what moved | The bridge logs each transfer with its file name and size: that is the owner's record. On Linux the user journal can be read by the `adm`, `systemd-journal` and `wheel` groups. |
 
@@ -77,7 +79,7 @@ into requesting**:
   over-limit file refused; read-only viewers refused; directory listing; upload lands only in the folder
   under a safe, new name with the path pasted; refusal of a foreign Origin, no Origin, wrong size, reuse,
   oversize announcement, and a download token used for an upload; an upload token after its page turned
-  read-only (404) or left the terminal (403, no file made); an upload folder whose path was renamed away and
+  read-only or left the terminal (404, no file made; reopening the same terminal does not revive it); an upload folder whose path was renamed away and
   replaced by another folder or a link (the upload still lands in the original); a stalled upload cut and its
   partial file removed; a busy bridge keeping the token.
 - Live (real Rex): download round trip and listing. Live (real Chrome and Rex, release build, throwaway

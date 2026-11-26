@@ -144,9 +144,9 @@ and Rex has answered. A loopback port is held on `127.0.0.1` and on `[::1]`, wit
 `localhost` cannot lead to another account's listener. While rweb runs it asks Tailscale for the
 machine's own addresses again every minute (every 15 seconds after a failed try), so the rule that
 refuses requests from the machine itself follows a changed address. Each try has ten seconds in all;
-`tailscale` is killed past that. If no try has succeeded for two and a half minutes (of time the machine was awake), the list may be out
+`tailscale` and its process group are killed past that (`proc.zig`). If no try has succeeded for two and a half minutes (on the boot clock, which keeps counting while the machine sleeps; after a wake the refresh runs within a few seconds), the list may be out
 of date, and rweb refuses requests until Tailscale answers again; this is judged at each request, so it
-holds even if the asking itself were stuck. A change of address is seen within about a minute.
+holds even if the asking itself were stuck. A change of address is seen within about a minute; already-open WebSocket connections are judged at upgrade time rather than cut mid-connection.
 
 Before a request is read, it holds one of a few pending slots. When they are all taken, the oldest
 connection that has not sent a request yet is dropped for the new one: idle connections from a local
@@ -265,7 +265,7 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 | Path | What it is |
 | --- | --- |
 | `src/rex/` | Rex client library: `ws.zig` (WebSocket over a unix socket), `control.zig` (hello, revisions, calls, events, reconnect), `api.zig` (typed calls), `data.zig` and `rex1.zig` (output streams), `mirror.zig` (libghostty-vt terminal), `input.zig` (ordered input), `transfer.zig` (downloads), `wire.zig` (handshake parsers), `fake.zig` (a fake Rex for tests) |
-| `src/bridge/` | The program: `main.zig` (start-up, `--version`), `cli.zig` (commands and options), `layout.zig` (the two commands' defaults, the files they make, the next step they print), `access.zig` (who may talk to it), `server.zig` (HTTP and WebSocket), `protocol.zig` (browser protocol), `hub.zig` (sessions, terminals, viewers), `xfer.zig` (file transfer, and the checks and explanations for files and folders), `assets.zig` (embedded page) |
+| `src/bridge/` | The program: `main.zig` (start-up, `--version`), `cli.zig` (commands and options), `layout.zig` (the two commands' defaults, the files they make, the next step they print), `access.zig` (who may talk to it), `server.zig` (HTTP and WebSocket), `protocol.zig` (browser protocol), `hub.zig` (sessions, terminals, viewers), `xfer.zig` (file transfer, and the checks and explanations for files and folders), `proc.zig` (bounded child-process runner for `tailscale`), `assets.zig` (embedded page) |
 | `src/bridge/web/` | The page: `index.html`, `app.js`, `app.css`, `keys.js` (pure key and touch logic, tested with Node), `wterm-shim.js`, `diag.js`, `manifest.webmanifest`; `login.html`, `login.js`, `login.css` (the token form); `icons/` holds the favicons and app icons; `vendor/` holds xterm.js and wterm with their licences and checksums |
 | `src/fuzz.zig` | Fuzz targets for every parser that reads outside bytes (`zig build fuzz --fuzz`) |
 | `tests/web/` | Tests for the page's logic (`zig build web-test`) |

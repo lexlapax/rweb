@@ -1,36 +1,63 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: round six, the fixes for the scan and readiness review of 1908e25; local, not pushed, not deployed).
+Last updated: 2026-11-26 (laptop-mac: round six follow-up review and fixes merged to `main` and pushed; verified on macOS, Linux, Chrome, iOS Simulator and Android Emulator; not yet deployed).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
-## 2026-11-26: round six (fixed locally; not pushed, not deployed)
+## 2026-11-26: round six + follow-up hardening (pushed on `main`; not yet deployed)
 
 Record: [docs/security-review-2026-11-26-round6.md](docs/security-review-2026-11-26-round6.md) (tally,
-fixes by mechanism, tests, checks, what is not verified).
+fixes by mechanism, follow-up review of `449812a`, tests, checks, what is not verified).
 
-- **Inputs on `1908e25`:** a scan (Medium: a paste could reach another terminal; Low: reused Zig cache in
-  `release.sh`) and readiness reviews (two blockers in the same day's upload and `tailscale` changes; a
-  conditional Medium on stale own addresses; two Lows). All seven real; five more variants found.
-- **Changed:** `src/bridge/proc.zig` (new: one deadline for a child's output and exit, SIGKILL past it);
-  uploads through `.rweb-partial/` with a lock per part file, flushed before named, path pasted through
-  the input queue (`Hub.pasteUpload`); `paste`, `fit`, `term_action`, `ul`, `ls`, `dl` name their terminal
-  and the hub refuses another (`Hub.forTerminal`; the page holds the view, `keys.js` `holdView`); requests
-  refused when Tailscale has not confirmed the own addresses for 150 s; `release.sh` empties its base
-  (only one it made) and builds with a new cache.
-- **Protocol change:** a page left open from an earlier build is told to reload when it pastes, resizes,
+- **Inputs on `1908e25` (committed as `449812a`):** a scan (Medium: a paste could
+  reach another terminal; Low: reused Zig cache in `release.sh`) and readiness reviews (two blockers in
+  the same day's upload and `tailscale` changes; a conditional Medium on stale own addresses; two Lows).
+  All seven real; five more variants found.
+- **Follow-up audit of `449812a` (fixed and merged on `main`):**
+  1. Own-address staleness switched from `Clock.awake` to `Clock.boot` + 5 s wait slices so suspend counts
+     toward the 150 s limit and wake triggers a prompt refresh; documented that already-open WebSockets
+     are checked at upgrade time rather than severed mid-connection.
+  2. Upload, Copy/Clip, modal and `viewGen` gaps: `Viewer.view_gen` + `Entry.view_gen` + `xfers.revokeViewerUploads`
+     on `unsubscribe` (A → B → A cannot revive upload tokens or paste mid-flight uploads); `Hub.handleTransfer`
+     no longer locks `api_mu` for `.ul`; `app.js` binds file picking (`xf.pick`), queued uploads (`stillView`),
+     Copy/clipboard replies (`copyPendingView`), and `ls` replies to the active view, aborts in-flight upload XHR
+     and bumps `viewGen` on reconnect/disconnect, closes `#xferdlg` on `ls`/`dl` `stale`/`reload`, guards
+     `dialogResult` against re-entry, aligns Reset post-dialog checks, and `keys.js` `pasteRefusal` measures
+     exact JSON-encoded ID lengths.
+  3. `xfer.sweepUploadParts` handles `DT_UNKNOWN` directory entries (via `statAt` + `f.stat` kind check).
+  4. `server.syncToDisk` on macOS checks `errno` on `F_FULLFSYNC` (retries `EINTR`, falls back to `fsync`
+     only for unsupported-filesystem errors, fails immediately on `EIO`/`ENOSPC`/`EDQUOT`/permission errors).
+  5. `proc.run` spawns the child in its own process group (`.pgid = 0`), kills `-pid` + `pid` past the
+     deadline (preventing grandchild hangs), and calls `readers.checkAnyError()` in the read loop.
+  6. `tools/release.sh` refuses unrecognized non-empty folders before `chmod 0700`, strips extended ACLs
+     (`chmod -N` / `setfacl -b`), and fails if `+` ACL markers remain.
+- **Protocol change:** a page left open from before `449812a` is told to reload when it pastes, resizes,
   resets, uploads or opens the file picker.
 - **Upgrade notes:** remove an old `/tmp/rweb-release` once before the next `release.sh`; a host whose
-  Tailscale stops answering for 150 s now refuses requests until it answers.
-- **Checks run:** macOS `zig build test` 400/411 (11 skipped), the same in `ReleaseSafe`, web 44/44; Linux
-  `ReleaseSafe` with the live Rex 408/411 (3 skipped), without it 11 skipped, web 44/44; release-base test
-  on both; `release.sh` dry run; live in desktop Chrome on a loopback test bridge (paste with a delayed
-  clipboard, upload, shared-folder sweep, download picker). An independent review of the fixes, its
-  findings fixed in the same commit.
-- **Not verified:** the owner's phone, the simulators, Serve with this build, two bridges uploading at
-  once, a power cut.
-- **Next:** the owner hands this to the reviewers or the implementer; then the live test before the push
-  (setup-repo pin, simulators through Serve from another node), the push on the owner's word, and the
-  0.1.1 release commit. The deployed hosts still run `1908e25`.
+  Tailscale stops answering for 150 s (including sleep) now refuses requests until it answers.
+- **Checks run on the follow-up commit:**
+  - macOS (`laptop-mac`, Apple silicon, Zig 0.17.1): `zig fmt --check src build.zig` clean; `zig build test`
+    Debug 401/412 (11 skipped, 0 failed) and `ReleaseSafe` 401/412 (11 skipped, 0 failed); `zig build web-test`
+    44/44; `tools/release-base.test.sh` 7 ok, 1 skipped (root-only), including macOS ACL strip.
+  - Linux (`linux-box`, x86-64, Zig 0.17.1, live Rex `0.1.0-preview.22`, commit `a086db17`, API revision 19):
+    `zig fmt --check` clean; `REX_SOCKET=… zig build test -Doptimize=ReleaseSafe` 409/412 (3 skipped, 0 failed);
+    `zig build web-test` 44/44; `tools/release-base.test.sh` 6 ok, 1 skipped (root-only). Scratch copy removed;
+    `rex ls` unchanged.
+  - Live — Android Emulator (`setup-repo_pixel_api37` / `emulator-5554` on `linux-box`, Chrome via ADB+CDP against
+    Linux `ReleaseSafe` bridge on `127.0.0.1` + throwaway `rweb-test-r6-emu` 2-terminal session): token form
+    sign-in, terminal render, delayed paste A → B and A → B → A dropped (verified via `rex capture` of both
+    blocks), staying paste delivered, Reset & Fit dropped on `viewGen` change, Download picker stale close,
+    Upload e2e (0600, `.rweb-partial/` empty, quoted path pasted), Upload A → B → A dropped, late Copy text
+    suppressed on switch, Reconnect `viewGen` bump, 0 console errors.
+  - Live — Desktop Chrome (`laptop-mac`, macOS `ReleaseSafe` bridge on `127.0.0.1` + throwaway `rweb-test-r6`):
+    token form sign-in, live shell render, Reset & Fit modals, Download picker listing, 0 console errors
+    (JS monkey-patch checks blocked by MCP approval timeout; covered in Android Emulator Chrome).
+  - Live — iOS Simulator (`Setup-repo iPhone` on `laptop-mac`, Mobile Safari against the same macOS bridge):
+    loaded `/s/<id>/`, served page + wterm/WASM assets, connected over WebSocket (green dot), rendered UI.
+  - All throwaway sessions, bridges, emulator instance, and temp folders cleaned up afterwards.
+- **Not verified:** the owner's physical phone, `rweb tailscale` through Serve with this build, real host
+  sleep/wake with live Tailscale, two concurrent bridges uploading at once, a real power cut.
+- **Next:** build archives with `tools/release.sh`, deploy through `setup-repo` with Serve testing from
+  another node, then tag 0.1.1 on the owner's word. Deployed hosts still run `1908e25`.
 
 ## 2026-11-26: pushed and deployed
 

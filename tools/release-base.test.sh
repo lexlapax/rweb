@@ -37,11 +37,29 @@ ln -s "$t/elsewhere" "$t/used/0000000000000000000000000000000000000000"
 ln "$t/elsewhere/keep" "$t/used/zig-cache/hard"
 if run "$t/used" && [ "$(ls -A "$t/used")" = .rweb-release-base ] && [ -f "$t/elsewhere/keep" ] && [ "$(mode_of "$t/used")" = 700 ]; then echo "ok: a used folder of ours is emptied, and what its links led to is kept"; else echo "FAIL: used folder: $(cat "$t/out"); left: $(ls -A "$t/used")"; fail=1; fi
 
-# A folder with files in it that release.sh did not make is refused, and keeps them.
-mkdir "$t/mine"
+# A folder with files in it that release.sh did not make is refused, and keeps both its files and its mode.
+mkdir -m 0755 "$t/mine"
 : > "$t/mine/thesis.txt"
 expect_refused "$t/mine" "a folder with files that release.sh did not make"
 [ -f "$t/mine/thesis.txt" ] || { echo "FAIL: a file in a folder release.sh did not make was removed"; fail=1; }
+[ "$(mode_of "$t/mine")" = 755 ] || { echo "FAIL: a folder release.sh refused had its mode changed to $(mode_of "$t/mine")"; fail=1; }
+
+# On macOS an extended ACL on an existing folder is stripped (chmod 0700 alone would leave it).
+if [ "$(uname -s)" = Darwin ]; then
+  mkdir -m 0700 "$t/withacl"
+  if chmod +a "everyone allow add_file" "$t/withacl" 2>/dev/null; then
+    if run "$t/withacl" && [ "$(mode_of "$t/withacl")" = 700 ]; then
+      case "$(ls -ld "$t/withacl" | awk '{print $1}')" in
+        *+*) echo "FAIL: ACL remained on $t/withacl"; fail=1 ;;
+        *) echo "ok: a macOS extended ACL on an existing folder is stripped" ;;
+      esac
+    else
+      echo "FAIL: macOS ACL folder: $(cat "$t/out")"; fail=1
+    fi
+  else
+    echo "skip: macOS ACL test (filesystem rejected chmod +a)"
+  fi
+fi
 
 # A folder owned by another user cannot be made without root; when run as root, check it.
 if [ "$(id -u)" = 0 ]; then

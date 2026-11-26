@@ -331,7 +331,7 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(2);
         };
         try own.appendSlice(arena, facts.addresses);
-        own_read_ms = nowMs(io);
+        own_read_ms = bootNowMs(io);
         if (facts.owner) |o| owner = o;
         if (facts.dns_name) |n| {
             try hosts.append(arena, n);
@@ -433,18 +433,31 @@ pub fn main(init: std.process.Init) !void {
                 },
             }
         }
-        io.sleep(.fromSeconds(if (refresh_failed) own_address_retry_s else own_address_refresh_s), .awake) catch return;
+        const wait_ms: i64 = @as(i64, if (refresh_failed) own_address_retry_s else own_address_refresh_s) * 1000;
+        waitUntilBoot(io, bootNowMs(io) + wait_ms) catch return;
     }
 }
 
 /// This node's addresses are read from Tailscale this often, and this often after a failed read.
 const own_address_refresh_s = 60;
 const own_address_retry_s = 15;
-/// A list not confirmed for this long is not trusted (`server.Options.own_address_max_age_ms`): two
-/// refreshes may be missed (each a minute apart and up to `tailscale_timeout_ms` long), the third not.
+/// A list not confirmed for this long (boot clock, sleep included) is not trusted
+/// (`server.Options.own_address_max_age_ms`): after one missed refresh the loop retries every 15 s
+/// (~4 tries before 150 s), and waking from a long sleep refuses requests until the prompt refresh
+/// confirms the list.
 const own_address_max_age_ms = 150_000;
 comptime {
     std.debug.assert(own_address_max_age_ms > 2 * (own_address_refresh_s * 1000 + tailscale_timeout_ms));
+}
+
+/// Wait until the boot clock reaches `target_ms`, waking in short slices so a machine sleep (during
+/// which the awake clock stops) triggers the next refresh promptly after waking.
+fn waitUntilBoot(io: Io, target_ms: i64) Io.Cancelable!void {
+    while (true) {
+        const left = target_ms - bootNowMs(io);
+        if (left <= 0) return;
+        try io.sleep(.fromMilliseconds(@min(left, 5_000)), .awake);
+    }
 }
 
 /// Where rweb listens, for its startup line.
@@ -542,6 +555,10 @@ pub const Backoff = struct {
 
 fn nowMs(io: Io) i64 {
     return Io.Clock.awake.now(io).toMilliseconds();
+}
+
+fn bootNowMs(io: Io) i64 {
+    return Io.Clock.boot.now(io).toMilliseconds();
 }
 
 /// What Tailscale told about this node.

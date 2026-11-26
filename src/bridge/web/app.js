@@ -162,7 +162,7 @@ function sendPaste(text, held) {
   if (held !== undefined && !stillView(held)) { notice(VIEW_CHANGED); return; }
   if (!canType()) { if (state.current) notice(whyNot()); return; }
   const view = held || holdView();
-  const tooLong = K.pasteRefusal(d);
+  const tooLong = K.pasteRefusal(d, view);
   if (tooLong) { notice(tooLong); return; }
   if (soft.on) softReset();
   if (/[\r\n]/.test(d)) {
@@ -402,7 +402,9 @@ function connect() {
   stopRetry();
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}ws${location.search}`);
   state.ws = ws; ws.binaryType = 'arraybuffer';
-  state.opened = false; forgetPaste();         // a new connection shows nothing until it says `opened`
+  // A new connection invalidates anything that was waiting on the previous one (paste, dialogs,
+  // copy/clip replies, an upload waiting for its token).
+  state.opened = false; state.viewGen++; forgetPaste(); copyPendingView = null; clearActiveUpload();
   const mine = () => state.ws === ws;          // a socket we abandoned must not act
   // Token mode: nothing is sent (see `send`) and nothing received is used until the first message
   // passed keys.js `looksLikeRweb`.
@@ -418,7 +420,7 @@ function connect() {
   };
   ws.onclose = () => {
     if (!mine()) return;
-    link.healthy = false; renderStatus();
+    link.healthy = false; clearActiveUpload(); renderStatus();
     dropped(state.retry);
   };
   ws.onmessage = ev => {
@@ -477,14 +479,20 @@ function handleMessage(m) {
     case 'closed': if (K.aboutTerm(m, state.current)) showEmpty('That terminal was closed.'); break;
     case 'notice': notice(m.msg); break;
     case 'error': onError(m); break;
-    case 'text': openCopy(m.text, m.truncated); break;
+    case 'text': {
+      const v = copyPendingView; copyPendingView = null;
+      if (ready() && stillView(v)) openCopy(m.text, m.truncated);
+      break;
+    }
     case 'clip': {
+      const v = copyPendingView; copyPendingView = null;
+      if (!ready() || !stillView(v)) break;
       // A program chose this text: shown and copied without control characters, and labelled as its.
       const t = typeof m.text === 'string' ? K.cleanClip(m.text) : '';
       if (t) openCopy(t, false, true); else notice('Nothing has been copied by a program in this terminal yet.');
       break;
     }
-    case 'ls': renderDir(m); break;
+    case 'ls': if (ready() && stillView(xf.view)) renderDir(m); break;
     case 'xfer': onXfer(m); break;
     case 'pong': break;
   }
@@ -508,8 +516,13 @@ function onError(m) {
     case 'rate':                                     // an older bridge: it could be any of these
       ulRefused(msg, true); state.pendingNew = null; lastFit = ''; $('xf-list').setAttribute('aria-busy', 'false');
       notice(`Refused: ${msg}`); return;
-    case 'ls': $('xf-list').setAttribute('aria-busy', 'false'); xfNote(`Cannot list that folder: ${msg}`); return;
-    case 'dl': xfNote(`Cannot download: ${msg}`); notice(`Cannot download: ${msg}`); return;
+    case 'ls':
+      $('xf-list').setAttribute('aria-busy', 'false');
+      if (m.code === 'stale' || m.code === 'reload') { if ($('xferdlg').open) $('xferdlg').close(); break; }
+      xfNote(`Cannot list that folder: ${msg}`); return;
+    case 'dl':
+      if (m.code === 'stale' || m.code === 'reload') { if ($('xferdlg').open) $('xferdlg').close(); break; }
+      xfNote(`Cannot download: ${msg}`); notice(`Cannot download: ${msg}`); return;
     case 'ul': ulRefused(m.code === 'stale' ? 'the terminal on screen changed' : msg, m.rate === true); return;
     case 'new_terminal': state.pendingNew = null; break;
     case 'fit': lastFit = ''; break;                 // the next layout may ask again
@@ -561,8 +574,9 @@ function forgetLast(t) { if (t && sameTerm(LS.get('last', null), t)) LS.set('las
 
 function showEmpty(text) { forgetLast(state.current); clearView(text); }
 function clearView(text) {
-  state.info = null; renderInfo(); forgetPaste(); stopRestore();
+  state.info = null; renderInfo(); forgetPaste(); stopRestore(); copyPendingView = null;
   state.current = null; state.opened = false; state.exited = null; state.viewGen++;
+  dropForeignUploads();
   $('stage').hidden = true; $('keys').hidden = true; $('empty').hidden = false; $('empty').textContent = text;
   renderAll(); updateControls(); renderStatus();
 }
@@ -686,7 +700,8 @@ function openBlock(session, block, restoring) {
   lastFit = '';
   if (restoring) startRestore(); else stopRestore();
   state.current = {session, block}; state.opened = false; state.exited = null; state.viewGen++; LS.set('last', state.current);
-  forgetPaste();
+  forgetPaste(); copyPendingView = null;
+  dropForeignUploads();
   term.reset(); clearLatched(); softReset();
   send({t: 'open', session, block});
   // On a wide screen typing goes to the terminal at once (on a phone this would pop up the keyboard):
@@ -746,18 +761,19 @@ function item(pop, text, on, id) { const b = el('button', '', text); b.setAttrib
 
 $('more').onclick = () => openPop($('more'), pop => {
   item(pop, 'Copy text…', () => { closePop(); requestCopy(); }, 'pop-copy').disabled = !ready();
-  const clip = item(pop, 'Text copied in the terminal…', () => { closePop(); try { term.blur(); } catch {} send({t: 'clip'}); }, 'pop-clip');
+  const clip = item(pop, 'Text copied in the terminal…', () => { closePop(); copyPendingView = holdView(); try { term.blur(); } catch {} send({t: 'clip'}); }, 'pop-clip');
   clip.disabled = !ready(); clip.title = 'Shows the last text a program such as vim or tmux copied inside the terminal, so you can copy it to your phone';
   clip.append(el('small', 'hint', 'What vim, tmux or similar last copied'));
   item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !ready() || state.observe;
   if (state.canDownload) item(pop, 'Download a file…', () => { closePop(); openFiles(); }, 'pop-dl').disabled = !ready() || state.observe;
-  if (state.canUpload) item(pop, 'Upload files…', () => { closePop(); xf.pick = state.current ? {session: state.current.session, block: state.current.block} : null; $('upfile').click(); }, 'pop-ul').disabled = !ready() || state.observe;
+  if (state.canUpload) item(pop, 'Upload files…', () => { closePop(); xf.pick = holdView(); $('upfile').click(); }, 'pop-ul').disabled = !ready() || state.observe;
   item(pop, 'Clear screen', () => { closePop(); if (ready()) send({t: 'term_action', action: 'clear', session: state.current.session, block: state.current.block}); }).disabled = !ready() || state.observe;
   item(pop, 'Reset terminal…', async () => {
     closePop();
     const held = holdView();                         // the terminal the question is about
     if (!await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'})) return;
-    if (!stillView(held) || !ready()) { notice(VIEW_CHANGED); return; }
+    if (!stillView(held)) { notice(VIEW_CHANGED); return; }
+    if (!canType() || !ready()) { notice(whyNot()); return; }
     send({t: 'term_action', action: 'reset', session: held.session, block: held.block});
   }).disabled = !ready() || state.observe;
   const sz = el('div', 'sizer'); sz.append(el('span', '', 'Text size'));
@@ -800,6 +816,7 @@ $('tabsel').onclick = () => openPop($('tabsel'), pop => {
 
 // ---- dialogs (in the page, so nothing depends on the browser's own pop-ups) ----
 function dialogResult(dlg, setup) {
+  if (dlg.open) return Promise.resolve(null);        // already showing another question
   return new Promise(resolve => {
     let value = null;
     const done = v => { value = v; if (dlg.open) dlg.close(); };
@@ -833,7 +850,8 @@ async function confirmAction({title, message, ok}) {
 }
 
 // ---- copy and paste ----
-function requestCopy() { try { term.blur(); } catch {} send({t: 'text'}); }
+let copyPendingView = null;
+function requestCopy() { copyPendingView = holdView(); try { term.blur(); } catch {} send({t: 'text'}); }
 let copyFull = '', copyLines = [], copySel = null, copyNative = false;
 function copyToClipboard(text) {
   // The clipboard API needs a secure page and a user action; the old way is the fallback.
@@ -1014,6 +1032,22 @@ function setDebug(on) {
   addEventListener('error', e => dbgSend({ev: 'jserror', msg: String(e.message), line: e.lineno, col: e.colno}));
 }
 
+// ---- file transfer state (declared before connect() runs) ----
+const xf = {dir: '', home: '', entries: [], hidden: LS.get('showHidden', false), queue: [], current: null, xhr: null, pick: null, view: null};
+function clearActiveUpload() {
+  if (xf.xhr) { const x = xf.xhr; xf.xhr = null; try { x.abort(); } catch {} }
+  xf.current = null;
+}
+function dropForeignUploads() {
+  if (!xf.queue.length) return false;
+  const keep = [], drop = [];
+  for (const u of xf.queue) (u && stillView(u.view) ? keep : drop).push(u);
+  if (!drop.length) return false;
+  xf.queue = keep;
+  notice('Upload stopped: you switched terminals');
+  return true;
+}
+
 // Test hooks: what the terminal shows, for automated checks.
 window.rweb = {
   term, state, soft,
@@ -1029,9 +1063,8 @@ if (startupNote) notice(startupNote);
 // Only offered when the bridge was started with it on. A download is asked for over the socket; the
 // answer is a one-time address the page opens as an ordinary download. An upload sends the file in
 // one request to a one-time address; the bridge saves it in its upload folder and pastes the path.
-// Each queued upload is {file, term}: `term` is the terminal shown when the files were chosen (`pick`,
-// set when Upload is chosen from the menu), and the file goes to that terminal or nowhere (H6).
-const xf = {dir: '', home: '', entries: [], hidden: LS.get('showHidden', false), queue: [], current: null, pick: null, view: null};
+// Each queued upload is {file, term, view}: `view` is the view shown when the files were chosen
+// (`pick`, set when Upload is chosen from the menu), and the file goes to that view or nowhere (H6).
 
 function fmtSize(n) {
   if (!Number.isFinite(n)) return '';
@@ -1105,25 +1138,29 @@ function onXfer(m) {
     notice(`Downloading ${m.name} (${fmtSize(m.size)})`);
     if ($('xferdlg').open) { $('xferdlg').close(); }
   } else if (m.kind === 'upload' && xf.current) {
-    // The token is good only for the terminal it was asked for; the page has switched since.
-    if (!sameTerm(xf.current.term, state.current)) { xf.current = null; return pumpUploads(true); }
+    // The token is good only for the view of the terminal it was asked for; the page has switched since.
+    if (!stillView(xf.current.view)) { xf.current = null; return pumpUploads(true); }
     putFile(xf.current.file, m.token);
   }
 }
 
 $('upfile').onchange = e => {
-  const term = xf.pick || (state.current && {session: state.current.session, block: state.current.block});
+  const view = xf.pick || holdView();
   xf.pick = null;
-  if (term) for (const file of e.target.files) xf.queue.push({file, term});
+  const files = [...e.target.files];
   e.target.value = '';
+  if (!files.length) return;
+  if (!stillView(view)) { notice(VIEW_CHANGED); return; }
+  for (const file of files) xf.queue.push({file, term: {session: view.session, block: view.block}, view});
   pumpUploads();
 };
 // `stopped`: an upload was already dropped for another terminal (say so even if none is queued).
 function pumpUploads(stopped) {
   if (xf.current) return;
-  if (xf.queue.length && canType()) {
-    const p = K.partitionUploads(xf.queue, state.current);
-    if (p.drop.length) { xf.queue = p.keep; stopped = true; }
+  if (xf.queue.length) {
+    const keep = [], drop = [];
+    for (const u of xf.queue) (u && stillView(u.view) ? keep : drop).push(u);
+    if (drop.length) { xf.queue = keep; stopped = true; }
   }
   if (stopped) notice('Upload stopped: you switched terminals');
   if (!xf.queue.length || !canType()) return;
@@ -1145,15 +1182,17 @@ function ulRefused(msg, rate) {
 ulRefused.tries = new WeakMap();
 function putFile(file, token) {
   const req = new XMLHttpRequest();
+  xf.xhr = req;
   req.open('PUT', 'xfer/' + token);
   req.upload.onprogress = ev => { if (ev.lengthComputable) notice(`Uploading ${file.name} ${Math.round(100 * ev.loaded / ev.total)}%`); };
-  const done = msg => { notice(msg); xf.current = null; pumpUploads(); };
+  const done = msg => { if (xf.xhr === req) xf.xhr = null; notice(msg); xf.current = null; pumpUploads(); };
   req.onload = () => {
     if (req.status !== 200) return done(`Upload of ${file.name} failed (${req.status})`);
     let name = file.name, pasted = true; try { const r = JSON.parse(req.responseText); name = r.name || name; pasted = r.pasted !== false; } catch {}
     done(pasted ? `Uploaded ${name}: its path is at the prompt` : `Uploaded ${name} to the upload folder; its path was not typed (this page no longer writes to that terminal)`);
   };
   req.onerror = () => done(`Upload of ${file.name} failed`);
+  req.onabort = () => { if (xf.xhr === req) xf.xhr = null; };
   req.send(file);
 }
 }

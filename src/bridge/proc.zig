@@ -39,6 +39,9 @@ pub fn run(gpa: Allocator, io: Io, options: Options) Error!Result {
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
+        // Own process group (`pgid = 0` -> child's own PID), so killing `-pid` stops any
+        // descendants a wrapper script left holding the pipes open.
+        .pgid = 0,
     });
     defer end(&child, io);
 
@@ -53,6 +56,7 @@ pub fn run(gpa: Allocator, io: Io, options: Options) Error!Result {
             error.EndOfStream => break,
             error.Timeout, error.Canceled, error.ConcurrencyUnavailable => |other| return other,
         };
+        try readers.checkAnyError();
         if (readers.reader(0).buffered().len > options.output_max or readers.reader(1).buffered().len > options.output_max) return error.StreamTooLong;
     }
     try readers.checkAnyError();
@@ -92,10 +96,12 @@ fn waitUntil(child: *std.process.Child, io: Io, end_ms: i64) error{ Timeout, Wai
     }
 }
 
-/// Leave nothing behind: a child that is still there is killed and reaped, and the pipes are closed.
+/// Leave nothing behind: a child that is still there is killed (with its process group, so
+/// descendants of a wrapper script do not outlive it) and reaped, and the pipes are closed.
 fn end(child: *std.process.Child, io: Io) void {
     if (child.id) |pid| {
         // SIGKILL cannot be caught or ignored, so the wait that follows ends.
+        _ = std.c.kill(-pid, .KILL);
         _ = std.c.kill(pid, .KILL);
         var status: c_int = undefined;
         while (std.c.waitpid(pid, &status, 0) < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) {}
@@ -157,6 +163,29 @@ test "run: a program that ignores SIGTERM is cut at the deadline" {
 
 test "run: a program that keeps printing a little is cut at the deadline, not at each silence" {
     try expectCut("while :; do printf x; sleep 0.05; done");
+}
+
+test "run: a wrapper script's hung grandchild is killed with its process group at the deadline" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", arena_state.allocator());
+    const pid_path = try std.fs.path.join(arena_state.allocator(), &.{ root, "child.pid" });
+    const script = try arena_state.allocator().print("sleep 30 & echo $! > '{s}'; wait", .{pid_path});
+    try expectCut(script);
+    const raw = try tmp.dir.readFileAlloc(testing.io, "child.pid", arena_state.allocator(), .limited(64));
+    const gpid = try std.fmt.parseInt(std.c.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
+    // Give the kernel a brief moment to clear the killed grandchild from the process table.
+    var dead = false;
+    for (0..50) |_| {
+        if (std.c.kill(gpid, @fromBackingInt(@intCast(0))) != 0 and std.c._errno().* == @backingInt(std.c.E.SRCH)) {
+            dead = true;
+            break;
+        }
+        try testing.io.sleep(.fromMilliseconds(10), .awake);
+    }
+    try testing.expect(dead);
 }
 
 test "run: a program that prints more than the limit is stopped" {

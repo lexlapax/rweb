@@ -196,13 +196,15 @@
   }
   // The bridge takes at most PASTE_MAX_BYTES of text in one paste, in a message of at most
   // MESSAGE_MAX_BYTES; a larger message would close the connection. Returns the notice to show
-  // instead of sending, or null when the paste fits.
+  // instead of sending, or null when the paste fits. When `target` ({session, block}) is given,
+  // its exact JSON-encoded size is checked (JSON escaping can expand characters up to 6x).
   const PASTE_MAX_BYTES = 32 * 1024, MESSAGE_MAX_BYTES = 64 * 1024, ID_MAX_BYTES = 200;
-  function pasteRefusal(d) {
+  function pasteRefusal(d, target) {
     const bytes = utf8Length(d);
     if (bytes > PASTE_MAX_BYTES) return `Too long to paste: ${Math.ceil(bytes / 1024)} KB; the limit is ${PASTE_MAX_BYTES / 1024} KB`;
-    // With the longest names a terminal can have: the message says which terminal the paste is for.
-    if (utf8Length(JSON.stringify({t: 'paste', d: String(d), force: true, session: 'x'.repeat(ID_MAX_BYTES), block: 'x'.repeat(ID_MAX_BYTES)})) > MESSAGE_MAX_BYTES)
+    const session = target ? String(target.session) : 'x'.repeat(ID_MAX_BYTES);
+    const block = target ? String(target.block) : 'x'.repeat(ID_MAX_BYTES);
+    if (utf8Length(JSON.stringify({t: 'paste', d: String(d), force: true, session, block})) > MESSAGE_MAX_BYTES)
       return `Too long to paste: its control characters make it more than ${MESSAGE_MAX_BYTES / 1024} KB to send`;
     return null;
   }

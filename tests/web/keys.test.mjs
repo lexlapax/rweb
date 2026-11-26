@@ -539,4 +539,8 @@ test('a paste that fits still fits with its terminal named', () => {
   assert.equal(K.pasteRefusal(d), null);
   const msg = JSON.stringify({t: 'paste', d, force: true, session: 's'.repeat(200), block: 'b'.repeat(200)});
   assert.ok(K.utf8Length(msg) <= K.MESSAGE_MAX_BYTES);
+  // With a target whose ids expand under JSON escaping, the exact message size is checked.
+  const exact = '\x01'.repeat(10700);
+  assert.equal(K.pasteRefusal(exact, {session: 's1', block: 'b1'}), null);
+  assert.notEqual(K.pasteRefusal(exact, {session: '\x01'.repeat(200), block: '\x01'.repeat(200)}), null);
 });

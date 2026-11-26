@@ -34,16 +34,21 @@ the same question was then asked of the neighbours (the variants, V1 to V5).
 ## Fixes, by mechanism
 
 **What is asked of a terminal goes to that terminal or nowhere (S1, V1, V2).** The page keeps a count of
-views (`state.viewGen`, raised each time it shows another terminal, or none). Anything that waits before
+views (`state.viewGen`, raised each time it shows another terminal, shows none, or reconnects). Anything that waits before
 it is sent is held with the view it was asked in (`keys.js` `holdView`) and sent only if that view is
 still on screen (`stillView`): a paste after the clipboard or the Paste box, the multi-line question,
-Reset, Fit. A switch away and back is another view; what was asked before it is dropped with a notice.
-The download picker is held the same way: it is for the terminal it was opened on and closes, unsent, if
-another is on screen when something in it is asked. Queued uploads follow their terminal, not the view
-(`partitionUploads`, as before). Second line, in the bridge: `paste`, `fit`, `term_action`, `ul`, `ls`
+Reset, Fit, file uploads (held from when "Upload files…" is chosen), and pending Copy/clipboard replies (`text`, `clip`).
+A switch away and back is another view; what was asked before it is dropped with a notice.
+The download picker is held the same way: it is for the terminal it was opened on, ignores late `ls` replies
+for an earlier view, and closes, unsent, if another is on screen when something in it is asked or when the bridge
+refuses `ls`/`dl` as `stale`/`reload`. Queued uploads follow the view they were chosen in (`stillView`), not just
+the terminal identity, and an in-flight upload XHR is aborted on disconnect so reconnecting never wedges the queue.
+Second line, in the bridge: `paste`, `fit`, `term_action`, `ul`, `ls`
 and `dl` name their terminal (`session`, `block`; `protocol.Target`), and the hub does them only if that is the terminal it has open for the page
 (`Hub.forTerminal`): `code: stale` otherwise. A message that names none is refused with `code: reload`
-(a page left open from an earlier rweb; the page says to reload). Typed input (`in`, `key`) is sent in the
+(a page left open from an earlier rweb; the page says to reload). Upload tokens are also stamped with the viewer's
+view generation (`Viewer.view_gen`) and revoked immediately when the viewer leaves a terminal (`unsubscribe`), so
+switching away and back to the same terminal cannot revive a token or paste a mid-flight upload. Typed input (`in`, `key`) is sent in the
 same turn as the key press and stays as it was: the bridge handles one page's messages in order.
 
 **An unfinished upload is rweb's own, locked while written (R1, R5).** Part files live in `.rweb-partial/`
@@ -51,41 +56,48 @@ inside the upload folder: made 0700, opened once at startup without following a 
 upload folder itself. A part file's name is 32 random hex digits and `.part`; it is created exclusively
 and held under `flock` until it is closed (`xfer.createUploadPart`; on macOS the lock is taken in the
 `open`, on Linux right after it, and a file removed in between is noticed by its link count and made
-again). The startup sweep removes only regular files of that exact name that it can lock: what a stopped
-rweb left, never an upload another rweb is writing, and nothing in the upload folder itself. Before the
-file is named it is flushed (`F_FULLFSYNC` on macOS, `fsync` elsewhere); it is named by a hard link from
-the part folder into the upload folder, and the upload folder is flushed before the page is told it
+again). The startup sweep removes only regular files of that exact name that it can lock (including on
+filesystems whose directory entries report `DT_UNKNOWN`, where `statAt` and `fstat` verify a regular file
+without following links): what a stopped rweb left, never an upload another rweb is writing, and nothing in
+the upload folder itself. Before the file is named it is flushed (`F_FULLFSYNC` on macOS, falling back to
+`fsync` only when the filesystem reports `F_FULLFSYNC` unsupported and failing immediately on `EIO`,
+`ENOSPC`, `EDQUOT` or permission errors; `fsync` elsewhere); it is named by a hard link from
+the part folder into the upload folder, and the upload folder is flushed too before the page is told it
 worked (if that fails, the name is taken back and the upload reported failed).
 
 **The path is pasted in one step with its check, in the terminal's input order (R4, V5).**
-`Hub.pasteUpload` checks, under the page's own lock, that it is still there, may write and still shows
-that terminal, and queues the paste in the terminal's input queue before releasing the lock. The reply
+`Hub.pasteUpload` checks, under the page's own lock, that it is still there, may write, and still shows
+that exact terminal view (`view_gen`), and queues the paste in the terminal's input queue before releasing the lock. The reply
 says `pasted: false` when it was not, and the page says the file was saved and its path not typed. That
-is the last moment only: a page that switches, leaves or turns read-only while the bytes are arriving is
-refused as before (403) and nothing is saved.
+is the last moment only: a page that leaves the terminal or turns read-only before the `PUT` starts has its
+upload tokens revoked (404); a page that changes while the bytes are arriving is refused (403) and nothing is saved.
 
 **One deadline for a child's output and its exit (R2, V3).** `src/bridge/proc.zig` replaces
-`std.process.run` for `tailscale`: one end time for reading both pipes and for the exit, which is asked
-for with `waitpid(WNOHANG)` until then; a child still there is sent SIGKILL and reaped. The child is
+`std.process.run` for `tailscale`: the child runs in its own process group (`.pgid = 0`), with one end time
+for reading both pipes (checking read errors in the loop) and for the exit, which is asked for with
+`waitpid(WNOHANG)` until then; a child still there has its process group (`-pid`) and itself sent `SIGKILL`
+and reaped, so grandchild processes cannot outlive the deadline or keep pipes open. The child is
 killed only while it is unreaped, so no other process can get the signal.
 
 **A list that has not been confirmed is not trusted (R3, V4).** The server records when the own
 addresses were last confirmed (when they were read at startup, before the wait for Rex, and at each
-refresh that Tailscale answered with a usable list). When they are read from Tailscale and that is more than 150 seconds ago, every request the rule
+refresh that Tailscale answered with a usable list), measured on the **boot clock** (`Io.Clock.boot`), which
+keeps advancing while the machine sleeps. When they are read from Tailscale and that is more than 150 seconds ago, every request the rule
 would judge is refused (`own_addresses_stale`), until Tailscale answers. It is judged at each request,
-from the clock, so it holds if the refresh loop itself were stuck. The loop now refreshes at once when
-serving begins, every minute after, and every 15 seconds after a failure. Not with a list the owner gave
-(`--own-address` without detection) or `--allow-own-address`. **Left as a documented limit:** an address
-change is seen at the next refresh, so for up to about a minute a request from the new address is judged
-by the old list. Closing it would mean asking Tailscale on every request. The age is counted in time the
-machine was awake; after a wake the next refresh comes within the same minute.
+from the clock, so it holds if the refresh loop itself were stuck. The loop refreshes at once when
+serving begins, every minute after, and every 15 seconds after a failure, waiting in 5-second slices against
+the boot-clock target so a wake from sleep triggers a refresh promptly. Not with a list the owner gave
+(`--own-address` without detection) or `--allow-own-address`. **Left as documented limits:** an address
+change is seen at the next refresh (up to about a minute), and already-open WebSocket connections are checked
+at upgrade time rather than severed mid-connection on an address change or staleness.
 
-**Nothing found in the release folder is used (S2).** After the base folder is found ours, not a link,
-and made 0700, everything in it is removed, and the source and the Zig cache are made new by the run
-(and removed at its end). A run now fetches the pinned dependencies and compiles everything each time.
-Only a folder `release.sh` made (it leaves a marker file) or an empty one is emptied; another folder with
-files in it is refused, so a folder named by mistake loses nothing. An old `/tmp/rweb-release` from
-before this change has no marker: remove it once. Two runs at once in one base are not supported.
+**Nothing found in the release folder is used (S2).** After the base folder is found ours and not a link,
+an unrecognized non-empty folder is refused *before* its mode or ACLs are modified, so a folder named by mistake
+loses nothing and keeps its permissions. For a folder `release.sh` made (marked with `.rweb-release-base`) or
+an empty one, `release.sh` sets `0700`, strips extended ACLs (`chmod -N` on macOS, `setfacl -b` on Linux,
+failing if any ACL marker `+` remains), removes everything inside, and makes the source and Zig cache new
+each run (removing them at its end). An old `/tmp/rweb-release` from before this change has no marker:
+remove it once. Two runs at once in one base are not supported.
 
 ## The internal review of these fixes
 
@@ -162,9 +174,92 @@ On the final tree, 2026-11-26, Zig 0.17.1 on both machines.
   - The download picker: listed the terminal's folder and started a download; opened again and the view
     changed under it, the next request was not sent and the picker closed.
 
-**Not verified:** the owner's phone; the Android emulator and the iOS Simulator (the page's Paste,
+**Not verified (on `449812a`):** the owner's phone; the Android emulator and the iOS Simulator (the page's Paste,
 Reset, Fit and upload paths were driven in desktop Chrome only, the clipboard's delay by replacing
 `navigator.clipboard.readText` in the page); a real upload in progress in one bridge while another starts
 (covered by the unit test of the lock, not run with two processes); a real power cut; `rweb tailscale`
 through Serve with this build; a stale own-address list on a live node (unit and server tests only). The
 simulator and Serve runs belong to the live test before the push, as in rounds 4 and 5.
+
+## Follow-up review of `449812a` and fixes
+
+A follow-up audit of `449812a` against its hypothesis, variants, code and remediations found seven remaining
+gaps, all fixed in the follow-up commit on `main`:
+
+1. **Own-address staleness paused during suspend (`server.zig`, `main.zig`).** `Io.Clock.awake` stops
+   counting while the host sleeps, so a machine sleeping across a Tailscale IP change woke with a "fresh"
+   address list and slept the rest of its 60-second timer before refreshing. Switched freshness tracking to
+   `Io.Clock.boot` and changed the refresh wait loop (`waitUntilBoot`) to sleep in 5-second slices so a wake
+   from suspend triggers a refresh promptly. Also documented that already-open WebSockets are judged at upgrade
+   time rather than cut mid-connection.
+2. **Upload A → B → A view reuse, client upload/copy/ls view leaks, and `api_mu` serialization (`hub.zig`,
+   `xfer.zig`, `server.zig`, `app.js`, `keys.js`).**
+   - `Viewer` now tracks a monotonic `view_gen` (bumped in `claimLocked` and `unsubscribe`) stamped onto each
+     upload token (`Entry.view_gen`), and `unsubscribe` revokes the viewer's pending upload tokens immediately
+     (`xfers.revokeViewerUploads`, returning 404). Switching A → B → A can no longer revive a token or allow
+     `pasteUpload` to paste a mid-flight upload into a reopened terminal.
+   - `Hub.handleTransfer` moved `h.api_mu` inside `.ls`/`.dl` after `forTerminal`, so `.ul` (which makes no
+     Rex call) no longer stalls behind slow directory listings.
+   - `app.js`: bound file picking (`xf.pick = holdView()`) from menu click to `#upfile.onchange`; changed
+     `pumpUploads` and `dropForeignUploads` to require `stillView(u.view)` rather than terminal ID alone;
+     bumped `state.viewGen`, cleared `copyPendingView`, and aborted any in-flight upload XHR (`clearActiveUpload`)
+     on `connect()` / `ws.onclose` so a drop mid-upload cannot wedge the queue; gated `text`, `clip` and `ls`
+     replies on `ready() && stillView(...)`; closed `#xferdlg` on `ls`/`dl` `stale`/`reload` errors; aligned
+     Reset terminal's post-dialog checks (`stillView` + `canType() && ready()`); prevented `dialogResult`
+     re-entry while `dlg.open`; updated `keys.js` `pasteRefusal` to measure exact JSON-escaped `session`/`block`
+     lengths.
+3. **`sweepUploadParts` skipped `DT_UNKNOWN` entries (`xfer.zig`).** On Linux filesystems that return
+   `DT_UNKNOWN` from `getdents64` (e.g., XFS without `ftype`, overlayfs, FUSE/tmpfs variants), leftover part
+   files were never swept. Extracted `sweepPartEntry`, accepting `.file` and `.unknown` and verifying regular
+   files via `statAt` (`S_IFREG`) and `f.stat(io).kind == .file` on the opened descriptor (still never following
+   symlinks or removing directories or locked files).
+4. **macOS `F_FULLFSYNC` fell back to `fsync` on `EIO` (`server.zig`).** `syncToDisk` now inspects `errno`
+   from `fcntl(F_FULLFSYNC)`: retries `EINTR`, falls back to `fsync` only on `OPNOTSUPP`, `INVAL`, `NOTTY`,
+   `NODEV`, or `NOSYS`, and fails immediately on `EIO`, `ENOSPC`, `EDQUOT`, `ACCES`, `PERM`, `ROFS` or
+   unexpected errors.
+5. **`proc.run` left grandchild processes alive and deferred read-error checks (`proc.zig`).** Children now
+   run in their own process group (`.pgid = 0`), `end()` kills `-pid` as well as `pid` so grandchildren holding
+   stdout/stderr open are terminated at the deadline, and `readers.checkAnyError()` runs inside the read loop.
+6. **`tools/release.sh` mutated unrecognized folders before refusing and left ACLs intact.** Moved the
+   unrecognized non-empty folder check ahead of `chmod 0700`, added ACL stripping (`chmod -N` on macOS,
+   `setfacl -b` on Linux), and failed if an extended ACL (`+`) remains.
+
+### Checks run on the follow-up commit (2026-11-26, Zig 0.17.1)
+
+- **macOS (`laptop-mac`, Apple silicon):** `zig fmt --check src build.zig` clean; `zig build test` Debug
+  401 passed, 11 skipped, 0 failed (rex 114/122, bridge 218/220, fuzz 69/70); `zig build test -Doptimize=ReleaseSafe`
+  401 passed, 11 skipped, 0 failed (332/342 + 69/70 cached fuzz); `zig build web-test` 44/44;
+  `sh tools/release-base.test.sh` 7 ok, 1 skipped (root-only), including macOS extended ACL stripping and
+  mode preservation on refused folders.
+- **Linux (`linux-box`, x86-64; live Rex `0.1.0-preview.22`, commit `a086db17`, API revision 19; scratch copy
+  removed afterwards):** `zig fmt --check src build.zig` clean; `REX_SOCKET=/run/user/1000/rex/server.sock
+  zig build test -Doptimize=ReleaseSafe` 409 passed, 3 skipped, 0 failed (rex 121/122, bridge 218/220, fuzz
+  70/70 cached); `zig build web-test` 44/44; `sh tools/release-base.test.sh` 6 ok, 1 skipped (root-only).
+  `rex ls` unchanged before and after.
+- **Live — Android Emulator (`setup-repo_pixel_api37` / `emulator-5554` on `linux-box`, Chrome driven over ADB +
+  CDP against Linux `ReleaseSafe` bridge on `127.0.0.1`, throwaway `rweb-test-r6-emu` 2-terminal session, all
+  removed afterwards):**
+  - Token form sign-in and redirect to `/s/<id>/`; live terminal render; 0 console errors.
+  - Delayed clipboard paste dropped on A → B and on A → B → A (`Not sent: the terminal on screen changed`),
+    and delivered when staying on A (`RWEB_ANDR_OK`), verified via `rex capture` of both blocks.
+  - Reset terminal and Fit terminal dialogs dropped after `viewGen` change (`Not sent: the terminal on screen changed`).
+  - Download picker listed `dl-sample.txt` and closed on stale view change without starting a download.
+  - Upload end-to-end with hostile name (`andr-r6; $(id).txt`) saved `0600` as `andr-r6_ _(id).txt` with
+    `.rweb-partial/` empty and quoted path pasted into the prompt.
+  - Two-file upload queued with immediate A → B → A switch dropped (`Upload stopped: you switched terminals`),
+    neither file written.
+  - Late Copy text (`text`) reply after switching terminals suppressed (`#copydlg` stayed closed).
+  - Reconnect bumped `viewGen` and restored the open terminal cleanly.
+- **Live — Desktop Chrome (`laptop-mac`, macOS `ReleaseSafe` bridge on `127.0.0.1`, throwaway `rweb-test-r6`
+  2-terminal session, all removed afterwards):** token form sign-in and `/s/<id>/` redirect, live shell render,
+  Reset and Fit confirmation modals, Download picker listing, 0 console errors. (JS monkey-patching checks in
+  desktop Chrome were blocked by an MCP tool approval timeout; those cases were verified live in Android
+  Emulator Chrome above.)
+- **Live — iOS Simulator (`Setup-repo iPhone` on `laptop-mac`, Mobile Safari against the same macOS `ReleaseSafe`
+  bridge):** loaded `/s/<id>/`, served all page/wterm/WASM assets, connected over WebSocket (green status
+  indicator), rendered the session prompt (`Pick a terminal from the list.`). (Simulator automation cannot tap
+  inside Mobile Safari.)
+
+**Still not verified:** the owner's physical phone (real soft keyboard, touch hardware, Tailscale app);
+`rweb tailscale` through Serve from another tailnet node with this build; real host sleep/wake with live
+Tailscale; two concurrent bridges uploading to the same folder; a real power cut.

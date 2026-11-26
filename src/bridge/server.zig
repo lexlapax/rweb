@@ -267,16 +267,39 @@ const no_store = [_]std.http.Header{.{ .name = "cache-control", .value = "no-sto
 pub const max_messages_per_second: u32 = 200;
 
 /// Flush a file or folder to the disk itself. On macOS `fsync` stops at the drive's own cache, so the
-/// full flush is asked for first (not every file system has it; then `fsync` is what there is).
+/// full flush is asked for first (only when the filesystem does not support it do we fall back to
+/// `fsync`; an I/O, space, quota or permission error fails at once).
 fn syncToDisk(io: Io, f: Io.File) Io.File.SyncError!void {
     if (comptime builtin.os.tag.isDarwin()) {
-        if (std.c.fcntl(f.handle, std.c.F.FULLFSYNC, @as(c_int, 0)) == 0) return;
+        while (true) {
+            if (std.c.fcntl(f.handle, std.c.F.FULLFSYNC, @as(c_int, 0)) == 0) return;
+            switch (std.c._errno().*) {
+                @backingInt(std.c.E.INTR) => continue,
+                @backingInt(std.c.E.OPNOTSUPP),
+                @backingInt(std.c.E.INVAL),
+                @backingInt(std.c.E.NOTTY),
+                @backingInt(std.c.E.NODEV),
+                @backingInt(std.c.E.NOSYS),
+                => break,
+                @backingInt(std.c.E.IO) => return error.InputOutput,
+                @backingInt(std.c.E.NOSPC) => return error.NoSpaceLeft,
+                @backingInt(std.c.E.DQUOT) => return error.DiskQuota,
+                @backingInt(std.c.E.ACCES), @backingInt(std.c.E.PERM), @backingInt(std.c.E.ROFS) => return error.AccessDenied,
+                else => return error.Unexpected,
+            }
+        }
     }
     return f.sync(io);
 }
 
 fn nowMs(io: Io) i64 {
     return Io.Clock.awake.now(io).toMilliseconds();
+}
+
+/// The boot clock keeps counting while the machine sleeps, so an own-address list cannot stay
+/// "fresh" across a suspend (during which Tailscale may have changed addresses or stopped).
+fn bootNowMs(io: Io) i64 {
+    return Io.Clock.boot.now(io).toMilliseconds();
 }
 
 /// A request target is printable ASCII without spaces (RFC 9112): anything else is refused before
@@ -450,7 +473,7 @@ pub const Server = struct {
             .sock_dir = b.sock_dir,
             .sock_name = b.sock_name,
             .sock_id = b.sock_id,
-            .own_checked_ms = .init(opts.own_addresses_read_ms orelse nowMs(io)),
+            .own_checked_ms = .init(opts.own_addresses_read_ms orelse bootNowMs(io)),
         };
         if (opts.access.token) |t| s.token_prefix = tokenPrefix(&s.token_prefix_buf, t);
         s.accept_task = try io.concurrent(acceptLoop, .{ s, &s.listener });
@@ -516,11 +539,11 @@ pub const Server = struct {
             all.append(arena, a) catch return .failed;
         }
         if (all.items.len == now.len) {
-            s.own_checked_ms.store(nowMs(s.io), .release);
+            s.own_checked_ms.store(bootNowMs(s.io), .release);
             return .unchanged;
         }
         s.setOwnAddresses(all.items) catch return .failed;
-        s.own_checked_ms.store(nowMs(s.io), .release);
+        s.own_checked_ms.store(bootNowMs(s.io), .release);
         for (all.items[now.len..]) |a| log.info("a new address of this node, {s}: requests from it are refused from now on (the earlier ones still are)", .{a});
         return .added;
     }
@@ -541,10 +564,10 @@ pub const Server = struct {
     }
 
     /// Whether the own addresses, read from Tailscale while running, have gone unconfirmed for longer
-    /// than `Options.own_address_max_age_ms`.
+    /// than `Options.own_address_max_age_ms` (boot clock, so machine sleep counts against the age).
     pub fn ownAddressesStale(s: *Server) bool {
         const max_age = s.opts.own_address_max_age_ms orelse return false;
-        return nowMs(s.io) - s.own_checked_ms.load(.acquire) > max_age;
+        return bootNowMs(s.io) - s.own_checked_ms.load(.acquire) > max_age;
     }
 
     pub fn stop(s: *Server) void {
@@ -1130,10 +1153,10 @@ pub const Server = struct {
         defer s.hub.xfers.release();
         var entry = s.hub.xfers.take(xtoken, .upload) orelse return refuseXfer(req, .not_found, "not found\n");
         defer entry.deinit(s.gpa);
-        // The page that asked must still be allowed to write to that terminal (it may have turned
-        // read-only, moved to another terminal, or gone): checked now, and again before the path is
-        // pasted.
-        if (!s.hub.mayUpload(entry.viewer_id, entry.session_id, entry.block_id)) return refuseXfer(req, .forbidden, "this page can no longer write to that terminal\n");
+        // The page that asked must still be allowed to write to that view of the terminal (it may
+        // have turned read-only, moved away — even if it later came back — or gone): checked now,
+        // and again before the path is pasted.
+        if (!s.hub.mayUpload(entry.viewer_id, entry.session_id, entry.block_id, entry.view_gen)) return refuseXfer(req, .forbidden, "this page can no longer write to that terminal\n");
 
         const len = req.head.content_length orelse return refuseXfer(req, .length_required, "length required\n");
         if (len != entry.size) return refuseXfer(req, .bad_request, "the size is not what was announced\n");
@@ -1168,7 +1191,7 @@ pub const Server = struct {
                 progress.touch(s.io);
             }
         }
-        if (!s.hub.mayUpload(entry.viewer_id, entry.session_id, entry.block_id)) return refuseXfer(req, .forbidden, "this page can no longer write to that terminal\n");
+        if (!s.hub.mayUpload(entry.viewer_id, entry.session_id, entry.block_id, entry.view_gen)) return refuseXfer(req, .forbidden, "this page can no longer write to that terminal\n");
         // On disk before it is named: after a power cut, a file under its real name has all its bytes.
         syncToDisk(s.io, f) catch return refuseXfer(req, .internal_server_error, "cannot save the file\n");
         // Its real name: one that is safe, and that replaces nothing ("a.txt", "a (1).txt", ...). A hard
@@ -1217,7 +1240,7 @@ pub const Server = struct {
         defer s.gpa.free(typed);
         // Checked and queued in one step, in the terminal's own input order (`Hub.pasteUpload`): a page
         // that has switched terminals, gone or turned read-only since gets the file but no paste.
-        const pasted = s.hub.pasteUpload(entry.viewer_id, entry.session_id, entry.block_id, typed);
+        const pasted = s.hub.pasteUpload(entry.viewer_id, entry.session_id, entry.block_id, entry.view_gen, typed);
         if (!pasted) log.info("upload: the path was not pasted: the page no longer writes to that terminal", .{});
 
         const reply = try std.json.Stringify.valueAlloc(s.gpa, .{ .ok = true, .name = final, .path = full, .pasted = pasted }, .{});
@@ -2878,7 +2901,7 @@ test "server: an upload token stops working once its page turns read-only or lea
     defer freeHttp(r1);
     try testing.expectEqual(@as(u16, 404), r1.status);
 
-    // Left the terminal after asking: refused, and no file is made.
+    // Left the terminal after asking: the token is gone, and no file is made.
     try sendJson(o.c, "{{\"t\":\"observe\",\"on\":false}}", .{});
     testing.allocator.free(try textWith(o.c, "\"observe\":false"));
     try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"b.txt\",\"size\":3,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
@@ -2891,8 +2914,23 @@ test "server: an upload token stops working once its page turns read-only or lea
     testing.allocator.free(try textWith(o.c, "\"pong\""));
     const r2 = try put(o.rig, url2, "Origin: http://localhost\r\n", "two");
     defer freeHttp(r2);
-    try testing.expectEqual(@as(u16, 403), r2.status);
-    for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
+    try testing.expectEqual(@as(u16, 404), r2.status);
+
+    // Reopening the same terminal does not revive an earlier view's upload token.
+    try sendJson(o.c, "{{\"t\":\"open\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
+    try waitText(o.c, "\"t\":\"opened\"");
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"c.txt\",\"size\":3,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
+    const m3 = try textWith(o.c, "\"kind\":\"upload\"");
+    defer testing.allocator.free(m3);
+    const url3 = try testing.allocator.print("/xfer/{s}", .{try tokenIn(m3)});
+    defer testing.allocator.free(url3);
+    try sendJson(o.c, "{{\"t\":\"close_view\"}}", .{});
+    try sendJson(o.c, "{{\"t\":\"open\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
+    try waitText(o.c, "\"t\":\"opened\"");
+    const r3 = try put(o.rig, url3, "Origin: http://localhost\r\n", "thr");
+    defer freeHttp(r3);
+    try testing.expectEqual(@as(u16, 404), r3.status);
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| {
         const path = try testing.allocator.print("{s}/{s}", .{ dir, name });
         defer testing.allocator.free(path);
         try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, path, .{}));
@@ -3460,8 +3498,8 @@ test "server: own addresses Tailscale has not confirmed for too long refuse requ
     const fine = try get(rig, "/", elsewhere);
     freeHttp(fine);
     try testing.expectEqual(@as(u16, 200), fine.status);
-    // Too long ago (as when the refresh hangs, or Tailscale stops answering): refused, from anywhere.
-    rig.srv.own_checked_ms.store(nowMs(testing.io) - 60_001, .release);
+    // Too long ago (as when the refresh hangs, Tailscale stops answering, or the machine slept): refused, from anywhere.
+    rig.srv.own_checked_ms.store(bootNowMs(testing.io) - 60_001, .release);
     try expectRefusedWith(rig, elsewhere, .own_addresses_stale);
     // A failed or unusable answer confirms nothing.
     try testing.expectEqual(Server.Refresh.failed, rig.srv.refreshOwnAddresses(error.TailscaleFailed));

@@ -60,8 +60,11 @@ pub const Entry = struct {
     /// Upload: where to paste the new file's path.
     session_id: []u8 = &.{},
     block_id: []u8 = &.{},
-    /// The viewer that asked (`Hub.mayUpload` checks it is still allowed when the token is used).
+    /// The viewer that asked (`Hub.mayUpload` checks it is still allowed when the token is used),
+    /// and the view generation of that terminal when the token was issued (so switching away and
+    /// back invalidates an upload started before the switch).
     viewer_id: u64 = 0,
+    view_gen: u64 = 0,
 
     pub fn deinit(e: *Entry, gpa: Allocator) void {
         gpa.free(e.name);
@@ -144,6 +147,20 @@ pub const Registry = struct {
         var i: usize = 0;
         while (i < r.items.items.len) {
             if (r.items.items[i].viewer_id == id) {
+                var e = r.items.swapRemove(i);
+                e.deinit(r.gpa);
+            } else i += 1;
+        }
+    }
+
+    /// Forget every waiting upload token issued to viewer `id` (it left its terminal). Downloads
+    /// already started from the picker keep their token.
+    pub fn revokeViewerUploads(r: *Registry, id: u64) void {
+        r.mu.lockUncancelable(r.io);
+        defer r.mu.unlock(r.io);
+        var i: usize = 0;
+        while (i < r.items.items.len) {
+            if (r.items.items[i].viewer_id == id and r.items.items[i].kind == .upload) {
                 var e = r.items.swapRemove(i);
                 e.deinit(r.gpa);
             } else i += 1;
@@ -1514,19 +1531,33 @@ pub fn createUploadPart(io: Io, parts: Io.Dir) error{CreateFailed}!UploadPart {
 /// Remove part files a stopped or crashed rweb left in the folder for unfinished uploads. Only names
 /// of a part file's exact shape, only regular files, and only those nobody holds locked: an upload in
 /// progress in another rweb that uses the same upload folder keeps its lock (`createUploadPart`) and
-/// is left alone, while a process that died released its lock when it did. Returns how many were
-/// removed.
+/// is left alone, while a process that died released its lock when it did. Filesystems whose
+/// directory entries report `.unknown` (`DT_UNKNOWN`) fall back to `statAt` so leftovers are still
+/// removed without opening non-regular files. Returns how many were removed.
 pub fn sweepUploadParts(io: Io, parts: Io.Dir) usize {
     var n: usize = 0;
     var it = parts.iterate();
     while (it.next(io) catch null) |e| {
-        if (e.kind != .file or !isUploadPartName(e.name)) continue;
-        const f = parts.openFile(io, e.name, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false, .lock = .exclusive, .lock_nonblocking = true }) catch continue; // locked: being written
-        defer f.close(io);
-        parts.deleteFile(io, e.name) catch continue;
-        n += 1;
+        if (sweepPartEntry(io, parts, e.name, e.kind)) n += 1;
     }
     return n;
+}
+
+/// Try to remove one candidate entry `name` (with directory-entry `kind`) in `parts`; true if
+/// removed. Separated so tests can cover `DT_UNKNOWN` (`.unknown`) directly.
+fn sweepPartEntry(io: Io, parts: Io.Dir, name: []const u8, kind: Io.File.Kind) bool {
+    if (!isUploadPartName(name)) return false;
+    if (kind != .file and kind != .unknown) return false;
+    if (kind == .unknown) {
+        const st = statAt(parts.handle, name) catch return false;
+        if (st.mode & S_IFMT != S_IFREG) return false;
+    }
+    const f = parts.openFile(io, name, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false, .lock = .exclusive, .lock_nonblocking = true }) catch return false; // locked: being written
+    defer f.close(io);
+    const fst = f.stat(io) catch return false;
+    if (fst.kind != .file) return false;
+    parts.deleteFile(io, name) catch return false;
+    return true;
 }
 
 pub fn openUploadDir(arena: Allocator, io: Io, path: []const u8, problem: *Problem) OpenError!UploadDir {
@@ -3075,6 +3106,23 @@ test "sweepUploadParts removes only unlocked part files from the folder for unfi
     live.file.close(testing.io);
     try testing.expectEqual(@as(usize, 1), sweepUploadParts(testing.io, d));
     try testing.expectError(error.FileNotFound, d.statFile(testing.io, &name_buf, .{}));
+    // Filesystems that report DT_UNKNOWN (.unknown): regular unlocked part files are still swept,
+    // while symlinks, directories and locked part files are left alone.
+    const unk_file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.part";
+    const unk_link = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.part";
+    const unk_dir = "cccccccccccccccccccccccccccccccc.part";
+    (try d.createFile(testing.io, unk_file, .{})).close(testing.io);
+    try d.symLink(testing.io, "report.pdf", unk_link, .{});
+    try d.createDir(testing.io, unk_dir, .default_dir);
+    var unk_live = try createUploadPart(testing.io, d);
+    defer unk_live.remove(testing.io, d);
+    try testing.expect(sweepPartEntry(testing.io, d, unk_file, .unknown));
+    try testing.expectError(error.FileNotFound, d.statFile(testing.io, unk_file, .{}));
+    try testing.expect(!sweepPartEntry(testing.io, d, unk_link, .unknown));
+    try testing.expect(!sweepPartEntry(testing.io, d, unk_dir, .unknown));
+    try testing.expect(!sweepPartEntry(testing.io, d, unk_live.name(), .unknown));
+    _ = try d.statFile(testing.io, unk_dir, .{});
+    _ = try d.statFile(testing.io, unk_live.name(), .{});
 }
 
 test "createUploadPart: a private, locked file under a part name; remove takes it away" {

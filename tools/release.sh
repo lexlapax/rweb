@@ -34,20 +34,32 @@ made=0
 [ -L "$base" ] && die "$base is a symbolic link; remove it and run again"
 [ -d "$base" ] || die "$base is not a directory; remove it and run again"
 [ "$(owner_of "$base")" = "$(id -u)" ] || die "$base belongs to another user; remove it (as that user or root) and run again"
-# Ours and not a link: closing it is safe.
+# Check the marker before touching the folder's permissions or contents, so a folder of yours named
+# by mistake is neither modified nor emptied.
+if [ "$made" = 0 ] && [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+  if [ ! -r "$base" ] || [ -n "$(ls -A "$base" 2>/dev/null || echo unreadable)" ]; then
+    die "$base has files in it and was not made by release.sh, which would empty it. If it is an old release folder, remove it (rm -rf '$base') and run again"
+  fi
+fi
+# Ours and not a link: closing it is safe. Strip any ACL too (`chmod 0700` on macOS leaves extended
+# ACLs in place, so another user granted write there would keep it during the build).
 chmod 0700 "$base"
+if [ "$(uname -s)" = Darwin ]; then
+  chmod -N "$base" 2>/dev/null || true
+elif command -v setfacl >/dev/null 2>&1; then
+  setfacl -b "$base" 2>/dev/null || true
+fi
 [ "$(mode_of "$base")" = 700 ] || die "$base could not be made private (mode $(mode_of "$base"))"
+case "$(ls -ld "$base" | awk '{print $1}')" in
+  *+*) die "$base still has an access control list; remove it and run again" ;;
+esac
 # Closed from here on, but it may have been open before (made by hand, or by something else): a Zig
 # cache found in it could hold another user's file, a link, or a hard link to some file of ours, and
 # the build would use it. Owners and modes cannot show all of that, so nothing found is kept. The
 # source and the cache stay at their fixed paths all the same: the build embeds paths, and archives of
 # one commit must stay byte-identical. `rm` removes a link, never what it leads to; something of
 # another user's that cannot be removed stops the run.
-# Only a folder release.sh made (it leaves a marker) is emptied, so a folder of yours named by mistake
-# loses nothing. Two runs at once in one base would remove each other's work: run one at a time.
-if [ "$made" = 0 ] && [ ! -e "$marker" ] && [ ! -L "$marker" ] && [ -n "$(ls -A "$base")" ]; then
-  die "$base has files in it and was not made by release.sh, which would empty it. If it is an old release folder, remove it (rm -rf '$base') and run again"
-fi
+# Two runs at once in one base would remove each other's work: run one at a time.
 find "$base" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
 [ -z "$(ls -A "$base")" ] || die "$base could not be emptied (see above); remove it, as its owner or root, and run again"
 : > "$marker"

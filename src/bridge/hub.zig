@@ -107,6 +107,9 @@ pub const Viewer = struct {
     /// The terminal being viewed. Set and cleared holding both `Hub.mu` and `mu`, so either lock
     /// reads it. While set, the viewer holds one of the terminal's references.
     term: ?*Terminal = null,
+    /// Raised each time `term` is set or cleared (guarded by `mu`), so an upload started before
+    /// switching away from a terminal cannot finish or paste even if the viewer switches back.
+    view_gen: u64 = 0,
     /// The `closed` frame for `term`, made when the viewer was pointed at it (guarded by `mu`). With
     /// the frame slot every queueing keeps free (see `reserveLocked`), telling a viewer that its
     /// terminal went never needs memory: the page must not go on showing a terminal that is gone.
@@ -308,6 +311,12 @@ pub const Viewer = struct {
         v.mu.lockUncancelable(v.hub.io);
         defer v.mu.unlock(v.hub.io);
         return v.closed;
+    }
+
+    pub fn viewGen(v: *Viewer) u64 {
+        v.mu.lockUncancelable(v.hub.io);
+        defer v.mu.unlock(v.hub.io);
+        return v.view_gen;
     }
 
     pub fn requestRedraw(v: *Viewer) void {
@@ -642,17 +651,18 @@ pub const Hub = struct {
         }, .{ .emit_null_optional_fields = false });
     }
 
-    /// Whether an upload token issued to viewer `viewer_id` for this terminal may still be used: the
-    /// viewer is still here, may write, and still looks at that terminal. Checked when the upload
-    /// arrives and again before its path is pasted. Do not call holding `api_mu`.
-    pub fn mayUpload(h: *Hub, viewer_id: u64, session_id: []const u8, block_id: []const u8) bool {
+    /// Whether an upload token issued to viewer `viewer_id` for view `view_gen` of this terminal may
+    /// still be used: the viewer is still here, may write, and is still in that same view of that
+    /// terminal (switching away and back raises `view_gen`). Checked when the upload arrives and
+    /// again before its path is pasted. Do not call holding `api_mu`.
+    pub fn mayUpload(h: *Hub, viewer_id: u64, session_id: []const u8, block_id: []const u8, view_gen: u64) bool {
         if (h.cfg.observe_only) return false;
         h.mu.lockUncancelable(h.io);
         defer h.mu.unlock(h.io);
         for (h.viewers.items) |v| if (v.id == viewer_id) {
             v.mu.lockUncancelable(h.io);
             defer v.mu.unlock(h.io);
-            if (v.closed or v.observe) return false;
+            if (v.closed or v.observe or v.view_gen != view_gen) return false;
             const t = v.term orelse return false;
             return std.mem.eql(u8, t.session_id, session_id) and std.mem.eql(u8, t.block_id, block_id);
         };
@@ -660,12 +670,12 @@ pub const Hub = struct {
     }
 
     /// Paste an uploaded file's path into the terminal its token was issued for, if viewer
-    /// `viewer_id` is still here, may write, and still looks at that terminal. The check and the
-    /// queueing are one step under the viewer's lock, and the paste goes into the terminal's own
-    /// input queue: it is ordered against that page's switching terminals, turning read-only or
-    /// leaving exactly as its typing is, and against the typing itself. False: not pasted. Do not
-    /// call holding `api_mu`.
-    pub fn pasteUpload(h: *Hub, viewer_id: u64, session_id: []const u8, block_id: []const u8, text: []const u8) bool {
+    /// `viewer_id` is still here, may write, and is still in view `view_gen` of that terminal. The
+    /// check and the queueing are one step under the viewer's lock, and the paste goes into the
+    /// terminal's own input queue: it is ordered against that page's switching terminals, turning
+    /// read-only or leaving exactly as its typing is, and against the typing itself. False: not
+    /// pasted. Do not call holding `api_mu`.
+    pub fn pasteUpload(h: *Hub, viewer_id: u64, session_id: []const u8, block_id: []const u8, view_gen: u64, text: []const u8) bool {
         if (h.cfg.observe_only) return false;
         const body = std.json.Stringify.valueAlloc(h.gpa, .{ .text = text }, .{}) catch return false;
         defer h.gpa.free(body);
@@ -674,7 +684,7 @@ pub const Hub = struct {
         for (h.viewers.items) |v| if (v.id == viewer_id) {
             v.mu.lockUncancelable(h.io);
             defer v.mu.unlock(h.io);
-            if (v.closed or v.observe) return false;
+            if (v.closed or v.observe or v.view_gen != view_gen) return false;
             const t = v.term orelse return false;
             if (!std.mem.eql(u8, t.session_id, session_id) or !std.mem.eql(u8, t.block_id, block_id)) return false;
             // Only queues (the terminal's input worker makes the Rex call), so nothing waits here.
@@ -836,12 +846,12 @@ pub const Hub = struct {
         const term = h.pin(v) orelse return h.refuse(v, what, "no terminal open");
         defer h.unpin(term);
 
-        h.api_mu.lockUncancelable(h.io);
-        defer h.api_mu.unlock(h.io);
         switch (msg) {
             .ls => |l| {
                 if (!h.forTerminal(v, what, term, l.at)) return;
                 const path = l.path;
+                h.api_mu.lockUncancelable(h.io);
+                defer h.api_mu.unlock(h.io);
                 var d = h.api.listDir(term.session_id, term.block_id, path) catch |e| return h.fail(v, what, e);
                 defer d.deinit();
                 const Out = struct { n: []const u8, d: bool };
@@ -856,6 +866,8 @@ pub const Hub = struct {
                 if (!h.forTerminal(v, what, term, d.at)) return;
                 const path = d.path;
                 const ref = rex.transfer.newRef(h.io, "download:");
+                h.api_mu.lockUncancelable(h.io);
+                defer h.api_mu.unlock(h.io);
                 var t_info = h.api.downloadBegin(term.session_id, term.block_id, &ref, path) catch |e| {
                     return h.refuse(v, what, if (h.api.last_error) |le| le else @errorName(e));
                 };
@@ -877,6 +889,12 @@ pub const Hub = struct {
                     var buf: [96]u8 = undefined;
                     return h.refuse(v, what, std.fmt.bufPrint(&buf, "too large: the limit is {d} MB", .{h.cfg.transfer.max_bytes / (1024 * 1024)}) catch "too large");
                 }
+                const view_gen = blk: {
+                    v.mu.lockUncancelable(h.io);
+                    defer v.mu.unlock(h.io);
+                    if (v.term != term) return h.refuse(v, what, "the page showed another terminal when this was asked");
+                    break :blk v.view_gen;
+                };
                 const name = h.gpa.dupe(u8, u.name) catch return;
                 const sid = h.gpa.dupe(u8, term.session_id) catch return h.gpa.free(name);
                 const bid = h.gpa.dupe(u8, term.block_id) catch {
@@ -884,7 +902,7 @@ pub const Hub = struct {
                     return h.gpa.free(sid);
                 };
                 // `add` owns the strings from here, on success or failure.
-                const token = h.xfers.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = u.size, .session_id = sid, .block_id = bid, .viewer_id = v.id }) catch return h.refuse(v, what, "too many transfers waiting");
+                const token = h.xfers.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = u.size, .session_id = sid, .block_id = bid, .viewer_id = v.id, .view_gen = view_gen }) catch return h.refuse(v, what, "too many transfers waiting");
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "upload", .token = token, .size = u.size }, .{}) catch return;
                 defer h.gpa.free(out);
                 v.pushText(out);
@@ -1123,6 +1141,7 @@ pub const Hub = struct {
         v.closed_frame = closed;
         t.refs += 2;
         v.term = t;
+        v.view_gen +%= 1;
         v.history_lines = h.cfg.history_lines;
     }
 
@@ -1358,14 +1377,19 @@ pub const Hub = struct {
         };
     }
 
-    /// Stop viewing; the last reference to go closes the terminal.
+    /// Stop viewing; the last reference to go closes the terminal. Also revokes waiting upload
+    /// tokens for this viewer so leaving a terminal invalidates uploads started before the switch.
     fn unsubscribe(h: *Hub, v: *Viewer) void {
         h.mu.lockUncancelable(h.io);
         v.mu.lockUncancelable(h.io);
         const got = v.term;
         v.term = null;
+        v.view_gen +%= 1;
         v.mu.unlock(h.io);
-        const t = got orelse return h.mu.unlock(h.io);
+        const t = got orelse {
+            h.mu.unlock(h.io);
+            return;
+        };
         t.vmu.lockUncancelable(h.io);
         for (t.viewers.items, 0..) |x, i| if (x == v) {
             _ = t.viewers.swapRemove(i);
@@ -1374,6 +1398,7 @@ pub const Hub = struct {
         t.vmu.unlock(h.io);
         const dead = h.unrefLocked(t);
         h.mu.unlock(h.io);
+        h.xfers.revokeViewerUploads(v.id);
         if (dead) h.destroyTerminal(t);
     }
 
@@ -2262,32 +2287,40 @@ test "hub: management calls racing the first open of new sessions do not deadloc
     managing.await(testing.io);
 }
 
-test "hub: an upload token is good only while its viewer may write to that terminal" {
+test "hub: an upload token is good only while its viewer stays in that view of that terminal" {
     const hs = try Harness.init(.{});
     defer hs.deinit();
     const v = try hs.openViewer();
     (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
-    try testing.expect(hs.hub.mayUpload(v.id, hs.session_id, hs.block_id));
-    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, "block:other"));
-    try testing.expect(!hs.hub.mayUpload(v.id + 100, hs.session_id, hs.block_id));
+    const gen = v.viewGen();
+    try testing.expect(hs.hub.mayUpload(v.id, hs.session_id, hs.block_id, gen));
+    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, "block:other", gen));
+    try testing.expect(!hs.hub.mayUpload(v.id + 100, hs.session_id, hs.block_id, gen));
     hs.hub.handle(v, .{ .observe = true });
-    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, hs.block_id));
+    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, hs.block_id, gen));
     hs.hub.handle(v, .{ .observe = false });
     hs.hub.handle(v, .{ .close_view = {} });
-    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, hs.block_id));
+    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, hs.block_id, gen));
+    // Switching away and back to the same terminal is a new view: the earlier upload is still refused.
+    hs.hub.handle(v, .{ .open = .{ .session = hs.session_id, .block = hs.block_id } });
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, hs.block_id, gen));
+    try testing.expect(hs.hub.mayUpload(v.id, hs.session_id, hs.block_id, v.viewGen()));
     const id = v.id;
+    const gen2 = v.viewGen();
     hs.hub.removeViewer(v);
-    try testing.expect(!hs.hub.mayUpload(id, hs.session_id, hs.block_id));
+    try testing.expect(!hs.hub.mayUpload(id, hs.session_id, hs.block_id, gen2));
 }
 
-test "hub: an upload's path is pasted in the terminal's input order, and only while its viewer may write there" {
+test "hub: an upload's path is pasted in the terminal's input order, and only while its viewer stays in that view" {
     const hs = try Harness.init(.{});
     defer hs.deinit();
     const v = try hs.openViewer();
     (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    const gen = v.viewGen();
     // Between two pieces of typing it arrives between them: it went through the same queue.
     hs.hub.handle(v, .{ .in = "one-" });
-    try testing.expect(hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, "'/up/a.txt' "));
+    try testing.expect(hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, gen, "'/up/a.txt' "));
     hs.hub.handle(v, .{ .in = "-two" });
     var seen: std.ArrayList(u8) = .empty;
     defer seen.deinit(testing.allocator);
@@ -2298,17 +2331,21 @@ test "hub: an upload's path is pasted in the terminal's input order, and only wh
         if (f.binary) try seen.appendSlice(testing.allocator, f.data);
     }
     try testing.expect(std.mem.indexOf(u8, seen.items, "one-'/up/a.txt' -two") != null);
-    // Another terminal, another viewer, read-only, no terminal, gone: refused, and nothing is queued.
-    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, "block:other", "x"));
-    try testing.expect(!hs.hub.pasteUpload(v.id + 100, hs.session_id, hs.block_id, "x"));
+    // Another terminal, another viewer, read-only, no terminal, away-and-back, gone: refused.
+    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, "block:other", gen, "x"));
+    try testing.expect(!hs.hub.pasteUpload(v.id + 100, hs.session_id, hs.block_id, gen, "x"));
     hs.hub.handle(v, .{ .observe = true });
-    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, "x"));
+    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, gen, "x"));
     hs.hub.handle(v, .{ .observe = false });
     hs.hub.handle(v, .{ .close_view = {} });
-    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, "x"));
+    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, gen, "x"));
+    hs.hub.handle(v, .{ .open = .{ .session = hs.session_id, .block = hs.block_id } });
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, gen, "x"));
     const id = v.id;
+    const gen2 = v.viewGen();
     hs.hub.removeViewer(v);
-    try testing.expect(!hs.hub.pasteUpload(id, hs.session_id, hs.block_id, "x"));
+    try testing.expect(!hs.hub.pasteUpload(id, hs.session_id, hs.block_id, gen2, "x"));
 }
 
 test "hub: opening, sizing and terminal actions count against the heavy-request limit" {
