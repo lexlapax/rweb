@@ -104,3 +104,42 @@ Also added at the owner's request: "About this project" in the README, and `CONT
 - NFS and SMB permissions on the server side are not visible to these checks (documented).
 - A redraw whose visible screen alone exceeds 16 MiB fails (`RedrawTooLarge`) rather than sending part of
   it; it takes a very large screen full of styles or links.
+
+## Live test before the push (2026-11-26)
+
+At the owner's request, release builds made with `tools/release.sh` were deployed through setup-repo (a
+pin committed in a worktree, carried to linux-box in a bundle, not pushed) on laptop-mac (macOS) and
+linux-box (Linux), and tested through Tailscale Serve from other machines before anything was pushed.
+
+- Both started with their live configuration (Tailscale identity, file transfer, upload folder, the
+  macOS backend secret, the Linux unix socket) and passed the new folder, ACL, mount and `tailscale`
+  checks.
+- Desktop Chrome on laptop-mac against linux-box: typing; a paste of `’ € ß`, Cyrillic, emoji and CJK
+  arrived whole; a two-line paste into zsh went as one block; a two-line paste into plain `sh` asked
+  first and ran both lines after confirming; rapid terminal switching never sent typing to a terminal
+  not on screen.
+- Android emulator (Chrome, Gboard) on linux-box against laptop-mac: page, drawer, typing through the soft
+  keyboard, the key bar's ^C and End; Copy view "Copy selected" and long-press Copy reached the system
+  clipboard; menu Paste worked once Chrome's clipboard permission was given; "Select all" now copies
+  terminal text only.
+- iOS Simulator (Mobile Safari, iOS 27.2) on laptop-mac against linux-box: page, connection, the logo,
+  favicon, touch icon and manifest. Taps and long presses could not be driven there (Apple's WebDriver
+  session started, but neither of its tap methods reached the page); the owner's phone covered them.
+- The owner's phone (Android, Chrome) on both hosts: the logo, End, long-press Copy, menu Copy and Paste,
+  Select all and the multi-line question all worked after the fixes below.
+
+Found and fixed during the live test, each in its own commit and redeployed:
+
+- Keystrokes typed right after switching terminals were lost: the page held input until the bridge
+  confirmed the switch (round 3), and on desktop focus stayed on the clicked tab until then (as in 0.1.0).
+  Input is now sent at once (the bridge keeps a page's messages in order) and the terminal takes focus
+  when a switch starts on wide screens.
+- The key bar's Paste acted on first touch, so on the owner's phone a press on End beside it opened the
+  paste dialog; it now acts on a completed tap that ends on it.
+- Android's "Select all" took in the page's buttons, labels and hidden dialogs; only terminal text, the
+  Copy view and fields can now be selected.
+- The header logo showed only with no terminal open, which the page rarely is; it is now always shown.
+- `tools/release.sh` (and the other tools scripts) were not executable in Git although the docs run them
+  that way.
+
+Deployed and tested last: `d1cf921`.

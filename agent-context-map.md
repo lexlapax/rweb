@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: logo added; fourth review round and its fixes; live test pending). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
+Last updated: 2026-11-26 (laptop-mac: fourth review round, live-tested on laptop-mac and linux-box; push pending the owner). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## 2026-11-26: logo
@@ -51,6 +51,11 @@ Paste (after Chrome's clipboard permission) work, but "Select all" took in the p
 dialogs (now only terminal text, the Copy view and fields are selectable). Logo (concept A, terminal
 green) added in every format and wired into the page, manifest and README. Owner: the header logo was only
 shown with no terminal open (the page restores the last terminal, so it was never seen); now always shown.
+Owner confirmed on their phone (both hosts): logo, End, copy and paste, Select all, the multi-line question.
+Live record: docs/security-review-2026-11-25-round4.md, "Live test before the push". Deployed: d1cf921 on
+laptop-mac and linux-box (setup-repo pin commits local on both, unpushed). **Next:** the owner's word to merge
+and push rweb and setup-repo; then the 0.1.1 release commit (date the changelog), archives, tag and private
+release; desktop-mac and gateway-box still run 0.1.0.
 
 ## 2026-11-25: third review round of `4c383fb` and its fixes
 
