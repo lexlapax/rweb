@@ -1,7 +1,21 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: `main` at `f43ae8e` pushed; release archives built from it; not deployed).
+Last updated: 2026-11-26 (laptop-mac: 0.1.1 at `f43ae8e` deployed on all four hosts through setup-repo; checked through Serve).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-26: `f43ae8e` deployed
+
+- Deployed through setup-repo on laptop-mac, desktop-mac, linux-box and gateway-box (its pin `a9451b7`, its action
+  record `2026-11-26-rweb-f43ae8e-fleet.md`): a preflight of the new binary with each host's real
+  settings, then the apply; each page answers through Serve from another node, linux-box refuses its own
+  address, no host logs the stale-address warning. `rweb-0.1.1-1908e25eab91` is kept on each for rollback.
+- In desktop Chrome through Serve to linux-box, a throwaway `rweb-test-serve` session (removed): a paste
+  whose clipboard answered late was dropped after a switch and arrived without one; an upload was saved
+  and its path typed, nothing left in `.rweb-partial/`.
+- **Not verified:** the owner's phone on this build; the simulators through Serve; a host's sleep and wake.
+- **Next:** the owner's phone check (a page left open from `1908e25` asks to be reloaded); then, on the
+  owner's word, the 0.1.1 release commit (date the changelog), tag and private release. The archives in
+  `zig-out/release/0.1.1/` are of `f43ae8e`; a release commit changes the commit, so they are rebuilt then.
 
 ## 2026-11-26: round six + follow-up hardening (pushed on `main`; not yet deployed)
 
