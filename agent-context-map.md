@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: 0.1.1 at `f43ae8e` deployed on all four hosts through setup-repo; checked through Serve).
+Last updated: 2026-11-26 (laptop-mac: `f43ae8e` on all four hosts, tested through Serve in desktop Chrome, Android emulator Chrome and iOS Simulator Safari; the owner's phone next).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 ## 2026-11-26: `f43ae8e` deployed
@@ -12,7 +12,19 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 - In desktop Chrome through Serve to linux-box, a throwaway `rweb-test-serve` session (removed): a paste
   whose clipboard answered late was dropped after a switch and arrived without one; an upload was saved
   and its path typed, nothing left in `.rweb-partial/`.
-- **Not verified:** the owner's phone on this build; the simulators through Serve; a host's sleep and wake.
+- **Browsers through Serve, after a forced re-apply and restart on every host (all four run `f43ae8e`,
+  restarted 14:17):** one scripted run of 16 checks per browser and host, each from another node, with a
+  throwaway two-terminal `rweb-test-` session, and Rex's own capture of both terminals read afterwards:
+  desktop Chrome (laptop-mac) against linux-box, gateway-box and desktop-mac; Android emulator Chrome
+  (linux-box) against laptop-mac and gateway-box; iOS Simulator Mobile Safari (laptop-mac, safaridriver)
+  against linux-box and desktop-mac. 7 of 7 runs passed every check, no page errors. The checks: a late
+  paste dropped after a switch and after away-and-back, delivered when staying; Reset answered after a
+  switch not sent; upload saved and its path typed, nothing left in `.rweb-partial/`; picker lists and
+  closes after a switch; Copy view; View only blocks a paste; reconnect reopens the same terminal. The
+  clipboard delay was made by replacing `navigator.clipboard.readText` in the page; taps were the page's
+  own `click()`, not touch. Sessions, uploads, safaridriver and the emulator removed or stopped.
+- **Not verified:** the owner's phone on this build (real soft keyboard, real clipboard, touch); a
+  host's sleep and wake.
 - **Next:** the owner's phone check (a page left open from `1908e25` asks to be reloaded); then, on the
   owner's word, the 0.1.1 release commit (date the changelog), tag and private release. The archives in
   `zig-out/release/0.1.1/` are of `f43ae8e`; a release commit changes the commit, so they are rebuilt then.
