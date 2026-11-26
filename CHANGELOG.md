@@ -26,8 +26,10 @@ the Rex API revisions it speaks.
 - When every pending connection slot is taken, the oldest connection that has not sent a request is
   dropped for the new one, so idle local connections cannot lock the owner out.
 - Malformed `tailscale status --json` is an error at startup, never a crash.
-- `tools/release.sh` refuses a release folder that is a link or another user's, and makes its own
-  private (`0700`) before building in it.
+- `tools/release.sh` refuses a release folder that is a link or another user's, makes its own private
+  (`0700`) before building in it, and keeps nothing found in it: the source and the Zig cache are made
+  new by every run. A folder with files in it that an earlier `release.sh` did not make is refused
+  (remove an old `/tmp/rweb-release` once).
 - The page has a logo: a favicon, home-screen icons for iOS and Android with a web app manifest (added to
   a home screen, it opens without the browser's bars), and the logo at the left of the header. Sources
   and rules: `assets/logo/`.
@@ -176,10 +178,27 @@ From the fifth review (details: `docs/security-review-2026-11-26-round5.md`, in 
 - Behind a token, rweb answers only for `127.0.0.1`, `localhost` and `[::1]` unless `--allow-host` says
   otherwise, and refuses a token that arrives from another website, even a right one (a link on another
   site cannot sign you in; type or bookmark the address).
-- An upload is written under a temporary name (`.rweb-upload-….part`) and gets its real name only when it
-  is complete; if rweb is stopped in the middle, the next start removes what was left.
-- rweb gives `tailscale` ten seconds to answer and reads at most 1 MiB from it, so a hung `tailscale`
-  cannot stall the check of this machine's own addresses.
+- An upload is written in a folder of rweb's own inside the upload folder (`.rweb-partial/`), flushed to
+  disk, and only then given its real name in the upload folder, so a stop, a crash or a power cut never
+  leaves a file there that looks whole and is not. If rweb is stopped in the middle, the next start
+  removes what was left. An unfinished upload stays locked while it is written: a second rweb using the
+  same upload folder leaves it alone when it starts. Nothing outside `.rweb-partial/` is ever removed.
+- An uploaded file's path is typed into the terminal through the same queue as your typing, and only if
+  the page is still on that terminal and may still write when the upload ends. If you switch terminals
+  or turn on "View only" while a file is on its way, the upload is refused and nothing is saved; in the
+  last moment, when the file is already saved, the page says its path was not typed.
+- A paste, "Reset terminal", "Fit terminal to this window", an upload and the download picker go to the
+  terminal that was on screen when you asked, or nowhere. Before, a paste that waited for the clipboard (the browser may ask
+  first) or for the Paste box could go to another terminal if the view changed meanwhile. These messages
+  now name their terminal and the bridge refuses one for any other. A page left open from an earlier
+  rweb is told to reload.
+- rweb gives `tailscale` ten seconds in all, for its answer and its exit, and reads at most 1 MiB from
+  it; past that it is killed. A `tailscale` that hangs, keeps printing, closes its output and stays, or
+  ignores being asked to stop cannot stall the check of this machine's own addresses.
+- If Tailscale has not confirmed this machine's addresses for two and a half minutes of running time,
+  rweb refuses requests until it does: an address the machine may have gained meanwhile cannot slip
+  past the rule that refuses requests from the machine itself. Not with `--own-address` alone (a list
+  you gave does not go out of date) or `--allow-own-address`.
 - Wrong tokens are limited: after 10 in a minute, wrong tokens get 429 until the minute ends. A right
   token is never refused, and a web page on another site cannot use up the allowance.
 - **Upgrade note:** a token must be at least 32 characters (0.1.0 accepted 16), in a token file and with

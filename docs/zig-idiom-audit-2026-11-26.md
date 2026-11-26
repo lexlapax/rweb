@@ -146,6 +146,11 @@ fails the listener; the two `allocPrintSentinel` calls use `Allocator.printSenti
 `tools/release.sh` runs the tests in `ReleaseSafe`, the mode it packs (item 2). A stop signal in the
 middle of an upload no longer leaves a file that looks whole: uploads are written to a part file, named
 when complete, and leftover part files are removed at the next start (a later commit).
+Two of these were not enough as first made, and were redone in round 6
+([security-review-2026-11-26-round6.md](security-review-2026-11-26-round6.md)): the `tailscale` deadline
+was `std.process.run`'s, which restarts with every read and does not cover the exit (now
+`src/bridge/proc.zig`, one deadline for all of it); and the removal of leftover part files could take
+an upload in progress in another rweb (now a folder of rweb's own and a lock on each part file).
 The text below is the finding as made, before those fixes.
 
 None is a way in, a crash from peer input, or unbounded memory. In order of weight:

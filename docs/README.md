@@ -19,7 +19,7 @@
 
 ## How it was reviewed
 
-Before the first release: a security review of the design, then five rounds on the release candidate,
+Before the first release: a security review of the design, then six rounds on the release candidate,
 each with an external static security scan, a release-readiness review and an internal adversarial
 review in several parts. Every finding was checked against the code, and every fix has a test. Before
 each release the candidate is run live on macOS and Linux and tested from the simulators and a phone;
@@ -36,6 +36,9 @@ the round's document records those runs.
 - [Round 5](security-review-2026-11-26-round5.md): readiness, rescan and an internal review by variant
   (endpoints, lookups, documented procedures); the command line redesigned around `rweb tailscale` and
   `rweb ssh`; a second pass over that new code and a Zig idiom audit.
+- [Round 6](security-review-2026-11-26-round6.md): readiness and rescan of the round-5 fixes and the
+  upload and `tailscale` changes made after them; fixed by one question, what can change while something
+  waits.
 - [Zig idiom audit](zig-idiom-audit-2026-11-26.md): the code against Zig's own practice, a 38-item
   checklist, what was changed and what is left for after 0.1.1.
 

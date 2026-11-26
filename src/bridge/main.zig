@@ -13,6 +13,7 @@ pub const xfer = @import("xfer.zig");
 pub const server = @import("server.zig");
 pub const cli = @import("cli.zig");
 pub const layout = @import("layout.zig");
+pub const proc = @import("proc.zig");
 const build_options = @import("build_options");
 
 /// What `rweb --version` prints: the version, the commit, how it was built, and what it works with.
@@ -255,8 +256,10 @@ pub fn main(init: std.process.Init) !void {
             var up_problem: xfer.Problem = .{};
             const up = xfer.openUploadDir(arena, io, dir, &up_problem) catch |e| refuseFile("the upload folder", dir, e, &up_problem, .{ .item_option = "--upload-dir" });
             transfer.upload_dir_handle = up.dir;
-            const swept = xfer.sweepUploadParts(io, up.dir);
-            if (swept > 0) std.debug.print("rweb: removed {d} unfinished upload(s) left in the upload folder\n", .{swept});
+            transfer.upload_parts_handle = up.parts;
+            // Only what no running rweb holds: another rweb may be using the same folder.
+            const swept = xfer.sweepUploadParts(io, up.parts);
+            if (swept > 0) say("rweb: removed {d} unfinished upload(s) an earlier rweb left behind\n", .{swept});
             transfer.upload_dir = dir;
             // What is pasted and shown: the folder's real path, as it was when it was opened.
             transfer.upload_dir_real = up.real_path;
@@ -268,6 +271,7 @@ pub fn main(init: std.process.Init) !void {
         });
     }
     defer if (transfer.upload_dir_handle) |d| d.close(io);
+    defer if (transfer.upload_parts_handle) |d| d.close(io);
     var hub_cfg: hub.Config = .{ .observe_only = parsed.observe_only, .history_lines = parsed.history_lines, .transfer = transfer };
     // The page may send its debug messages only when the bridge logs them (`--debug-input`).
     hub_cfg.debug_input = parsed.debug_input;
@@ -314,6 +318,8 @@ pub fn main(init: std.process.Init) !void {
     if (token != null and owner == null and !parsed.owner_from_tailscale and hosts.items.len == 0)
         try hosts.appendSlice(arena, try layout.tokenHosts(arena, if (bound.listen == .tcp_loopback) bound.port else null));
     var dns_name: ?[]const u8 = null;
+    // When Tailscale last told us this node's addresses: the list's age is counted from here.
+    var own_read_ms: ?i64 = null;
     if (parsed.detect_own_addresses or parsed.owner_from_tailscale) {
         var backoff: Backoff = .{};
         const facts = discoverTailscale(gpa, arena, io, ts, parsed.detect_own_addresses, parsed.owner_from_tailscale, &backoff) catch |e| {
@@ -325,6 +331,7 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(2);
         };
         try own.appendSlice(arena, facts.addresses);
+        own_read_ms = nowMs(io);
         if (facts.owner) |o| owner = o;
         if (facts.dns_name) |n| {
             try hosts.append(arena, n);
@@ -381,6 +388,8 @@ pub fn main(init: std.process.Init) !void {
         .debug_input = parsed.debug_input,
         .backend_secret = backend_secret,
         .lab = parsed.lab,
+        .own_address_max_age_ms = if (parsed.detect_own_addresses and !parsed.allow_own_address) own_address_max_age_ms else null,
+        .own_addresses_read_ms = own_read_ms,
         .access = .{
             .owner = owner,
             .token = token,
@@ -400,25 +409,42 @@ pub fn main(init: std.process.Init) !void {
     say("rweb: serving (Rex at {s})\n", .{link.socket});
 
     // Serve until the process is stopped; meanwhile keep this node's own addresses current, so a
-    // request from a new address of this machine is refused too.
+    // request from a new address of this machine is refused too. The first check is made at once (the
+    // wait for Rex may have been long), then one a minute, sooner after a failure. The server itself
+    // refuses requests once the list has gone unconfirmed for `own_address_max_age_ms`, whatever this
+    // loop is doing.
+    if (!parsed.detect_own_addresses) {
+        while (true) io.sleep(.fromSeconds(3600), .awake) catch return;
+    }
     var refresh_failed = false;
     while (true) {
-        io.sleep(.fromSeconds(if (parsed.detect_own_addresses) 60 else 3600), .awake) catch return;
-        if (!parsed.detect_own_addresses) continue;
-        var attempt = std.heap.ArenaAllocator.init(gpa);
-        defer attempt.deinit();
-        switch (srv.refreshOwnAddresses(tailscaleAddresses(attempt.allocator(), io, ts))) {
-            .added => {
-                say("rweb: this node has a new Tailscale address; requests from it are refused from now on, as from the earlier ones\n", .{});
-                refresh_failed = false;
-            },
-            .unchanged => refresh_failed = false,
-            .failed, .invalid => {
-                if (!refresh_failed) say("rweb: cannot read this node's Tailscale addresses now (Tailscale is down or signed out); keeping the last ones and asking again every minute\n", .{});
-                refresh_failed = true;
-            },
+        {
+            var attempt = std.heap.ArenaAllocator.init(gpa);
+            defer attempt.deinit();
+            switch (srv.refreshOwnAddresses(tailscaleAddresses(attempt.allocator(), io, ts))) {
+                .added => {
+                    say("rweb: this node has a new Tailscale address; requests from it are refused from now on, as from the earlier ones\n", .{});
+                    refresh_failed = false;
+                },
+                .unchanged => refresh_failed = false,
+                .failed, .invalid => {
+                    if (!refresh_failed) say("rweb: cannot read this node's Tailscale addresses now (Tailscale is down or signed out); keeping the last ones and asking again every {d} seconds. If it stays so for {d} seconds, requests are refused until Tailscale answers\n", .{ own_address_retry_s, own_address_max_age_ms / 1000 });
+                    refresh_failed = true;
+                },
+            }
         }
+        io.sleep(.fromSeconds(if (refresh_failed) own_address_retry_s else own_address_refresh_s), .awake) catch return;
     }
+}
+
+/// This node's addresses are read from Tailscale this often, and this often after a failed read.
+const own_address_refresh_s = 60;
+const own_address_retry_s = 15;
+/// A list not confirmed for this long is not trusted (`server.Options.own_address_max_age_ms`): two
+/// refreshes may be missed (each a minute apart and up to `tailscale_timeout_ms` long), the third not.
+const own_address_max_age_ms = 150_000;
+comptime {
+    std.debug.assert(own_address_max_age_ms > 2 * (own_address_refresh_s * 1000 + tailscale_timeout_ms));
 }
 
 /// Where rweb listens, for its startup line.
@@ -720,15 +746,12 @@ fn tailscaleProgram(arena: std.mem.Allocator, io: Io, given: ?[]const u8) []cons
     std.process.exit(2);
 }
 
-/// Runs `tailscale` with a deadline and a cap on what it may print: a hung or babbling `tailscale` must
-/// not stall the own-address refresh or grow memory. A timeout is a failed call like any other.
-fn runTailscale(arena: std.mem.Allocator, io: Io, argv: []const []const u8) !std.process.RunResult {
-    return std.process.run(arena, io, .{
-        .argv = argv,
-        .stdout_limit = .limited(tailscale_output_max),
-        .stderr_limit = .limited(tailscale_output_max),
-        .timeout = .{ .duration = .{ .raw = .fromMilliseconds(tailscale_timeout_ms), .clock = .awake } },
-    });
+/// Runs `tailscale` with one deadline for its output and its exit together, and a cap on what it may
+/// print (`proc.run`): a `tailscale` that hangs, babbles, or closes its output and stays must not stall
+/// the own-address refresh or grow memory. Past the deadline it is killed; that is a failed call like
+/// any other.
+fn runTailscale(arena: std.mem.Allocator, io: Io, argv: []const []const u8) !proc.Result {
+    return proc.run(arena, io, .{ .argv = argv, .timeout_ms = tailscale_timeout_ms, .output_max = tailscale_output_max });
 }
 const tailscale_output_max = 1 << 20;
 const tailscale_timeout_ms = 10_000;
@@ -1145,4 +1168,5 @@ test {
     _ = server;
     _ = cli;
     _ = layout;
+    _ = proc;
 }

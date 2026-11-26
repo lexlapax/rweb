@@ -659,6 +659,31 @@ pub const Hub = struct {
         return false;
     }
 
+    /// Paste an uploaded file's path into the terminal its token was issued for, if viewer
+    /// `viewer_id` is still here, may write, and still looks at that terminal. The check and the
+    /// queueing are one step under the viewer's lock, and the paste goes into the terminal's own
+    /// input queue: it is ordered against that page's switching terminals, turning read-only or
+    /// leaving exactly as its typing is, and against the typing itself. False: not pasted. Do not
+    /// call holding `api_mu`.
+    pub fn pasteUpload(h: *Hub, viewer_id: u64, session_id: []const u8, block_id: []const u8, text: []const u8) bool {
+        if (h.cfg.observe_only) return false;
+        const body = std.json.Stringify.valueAlloc(h.gpa, .{ .text = text }, .{}) catch return false;
+        defer h.gpa.free(body);
+        h.mu.lockUncancelable(h.io);
+        defer h.mu.unlock(h.io);
+        for (h.viewers.items) |v| if (v.id == viewer_id) {
+            v.mu.lockUncancelable(h.io);
+            defer v.mu.unlock(h.io);
+            if (v.closed or v.observe) return false;
+            const t = v.term orelse return false;
+            if (!std.mem.eql(u8, t.session_id, session_id) or !std.mem.eql(u8, t.block_id, block_id)) return false;
+            // Only queues (the terminal's input worker makes the Rex call), so nothing waits here.
+            t.input.blockEvent("paste", body) catch return false;
+            return true;
+        };
+        return false;
+    }
+
     // ---- commands from a browser ----
 
     /// At most this many requests a second from one browser that make Rex or the mirror work
@@ -763,9 +788,10 @@ pub const Hub = struct {
                 if (h.isObserving(v)) return h.refuse(v, "term_action", "read-only");
                 const term = h.pin(v) orelse return h.refuse(v, "term_action", "no terminal open");
                 defer h.unpin(term);
+                if (!h.forTerminal(v, "term_action", term, act.at)) return;
                 h.api_mu.lockUncancelable(h.io);
                 defer h.api_mu.unlock(h.io);
-                h.api.termAction(term.session_id, term.block_id, @tagName(act)) catch |e| h.fail(v, "term_action", e);
+                h.api.termAction(term.session_id, term.block_id, @tagName(act.action)) catch |e| h.fail(v, "term_action", e);
             },
             .tree => h.sendTree(v),
             // A refusal names the terminal it was for, so a page that has moved on can ignore it, and
@@ -813,7 +839,9 @@ pub const Hub = struct {
         h.api_mu.lockUncancelable(h.io);
         defer h.api_mu.unlock(h.io);
         switch (msg) {
-            .ls => |path| {
+            .ls => |l| {
+                if (!h.forTerminal(v, what, term, l.at)) return;
+                const path = l.path;
                 var d = h.api.listDir(term.session_id, term.block_id, path) catch |e| return h.fail(v, what, e);
                 defer d.deinit();
                 const Out = struct { n: []const u8, d: bool };
@@ -824,7 +852,9 @@ pub const Hub = struct {
                 defer h.gpa.free(out);
                 v.pushText(out);
             },
-            .dl => |path| {
+            .dl => |d| {
+                if (!h.forTerminal(v, what, term, d.at)) return;
+                const path = d.path;
                 const ref = rex.transfer.newRef(h.io, "download:");
                 var t_info = h.api.downloadBegin(term.session_id, term.block_id, &ref, path) catch |e| {
                     return h.refuse(v, what, if (h.api.last_error) |le| le else @errorName(e));
@@ -842,6 +872,7 @@ pub const Hub = struct {
             },
             .ul => |u| {
                 if (h.cfg.transfer.upload_dir == null) return h.refuse(v, what, "uploads are off on this bridge");
+                if (!h.forTerminal(v, what, term, u.at)) return;
                 if (u.size > h.cfg.transfer.max_bytes) {
                     var buf: [96]u8 = undefined;
                     return h.refuse(v, what, std.fmt.bufPrint(&buf, "too large: the limit is {d} MB", .{h.cfg.transfer.max_bytes / (1024 * 1024)}) catch "too large");
@@ -920,6 +951,24 @@ pub const Hub = struct {
         v.pushText(text);
     }
 
+    /// Whether a message that names its terminal (`protocol.Target`) is for `term`, the one this
+    /// viewer has open. What the page sends after a wait (the clipboard, a question, an upload's turn)
+    /// was asked of the terminal on screen then; if the page shows another by the time it is sent, it
+    /// must reach neither. The page checks that itself; this is the second line. Refused and answered
+    /// here when not: `stale` for another terminal, `reload` for a page that names none (one an
+    /// earlier rweb served, which could not make the promise).
+    fn forTerminal(h: *Hub, v: *Viewer, what: []const u8, term: *const Terminal, at: ?protocol.Target) bool {
+        const code: []const u8, const msg: []const u8 = blk: {
+            const t = at orelse break :blk .{ "reload", "this page is from an earlier rweb: reload it" };
+            if (std.mem.eql(u8, t.session, term.session_id) and std.mem.eql(u8, t.block, term.block_id)) return true;
+            break :blk .{ "stale", "the page showed another terminal when this was asked" };
+        };
+        const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = what, .code = code, .msg = msg }, .{}) catch return false;
+        defer h.gpa.free(text);
+        v.pushText(text);
+        return false;
+    }
+
     fn isObserving(h: *Hub, v: *Viewer) bool {
         v.mu.lockUncancelable(h.io);
         defer v.mu.unlock(h.io);
@@ -933,6 +982,7 @@ pub const Hub = struct {
         switch (msg) {
             .in => |d| term.input.writeText(d) catch |e| h.fail(v, "in", e),
             .paste => |p| {
+                if (!h.forTerminal(v, "paste", term, p.at)) return;
                 // ESC and C1 never go through: a pasted "end of paste" would type the rest. The page
                 // removes them too; this is the second line.
                 const clean = cleanPaste(h.gpa, p.text) catch |e| return h.fail(v, "paste", e);
@@ -956,6 +1006,7 @@ pub const Hub = struct {
             },
             .key => |k| term.input.key(k) catch |e| h.fail(v, "key", e),
             .fit => |f| {
+                if (!h.forTerminal(v, "fit", term, f.at)) return;
                 // Only on request: take the block, then ask for the size.
                 h.api_mu.lockUncancelable(h.io);
                 defer h.api_mu.unlock(h.io);
@@ -1727,6 +1778,11 @@ const Harness = struct {
     session_id: []const u8,
     block_id: []const u8,
 
+    /// The harness's terminal, as a message names it.
+    fn at(hs: Harness) protocol.Target {
+        return .{ .session = hs.session_id, .block = hs.block_id };
+    }
+
     fn init(cfg: Config) !Harness {
         return initAlloc(testing.allocator, cfg);
     }
@@ -1899,7 +1955,7 @@ test "hub: observe mode refuses input, resize and management" {
     hs.hub.handle(v, .{ .observe = true });
     hs.hub.handle(v, .{ .in = "hi-there\n" });
     (try waitFrame(v, isError)).?.deinit(testing.allocator);
-    hs.hub.handle(v, .{ .fit = .{ .cols = 100, .rows = 30 } });
+    hs.hub.handle(v, .{ .fit = .{ .cols = 100, .rows = 30, .at = hs.at() } });
     (try waitFrame(v, isError)).?.deinit(testing.allocator);
     hs.hub.handle(v, .{ .new_session = "x" });
     (try waitFrame(v, isError)).?.deinit(testing.allocator);
@@ -1935,7 +1991,7 @@ test "hub: fit takes ownership and resizes, and every viewer gets a fresh redraw
     const b = try hs.openViewer();
     defer hs.hub.removeViewer(b);
     for ([_]*Viewer{ a, b }) |v| (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
-    hs.hub.handle(a, .{ .fit = .{ .cols = 100, .rows = 30 } });
+    hs.hub.handle(a, .{ .fit = .{ .cols = 100, .rows = 30, .at = hs.at() } });
     for ([_]*Viewer{ a, b }) |v| {
         (try waitFrame(v, isBig)).?.deinit(testing.allocator);
         (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
@@ -2224,13 +2280,44 @@ test "hub: an upload token is good only while its viewer may write to that termi
     try testing.expect(!hs.hub.mayUpload(id, hs.session_id, hs.block_id));
 }
 
+test "hub: an upload's path is pasted in the terminal's input order, and only while its viewer may write there" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    // Between two pieces of typing it arrives between them: it went through the same queue.
+    hs.hub.handle(v, .{ .in = "one-" });
+    try testing.expect(hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, "'/up/a.txt' "));
+    hs.hub.handle(v, .{ .in = "-two" });
+    var seen: std.ArrayList(u8) = .empty;
+    defer seen.deinit(testing.allocator);
+    var tries: u32 = 0;
+    while (std.mem.indexOf(u8, seen.items, "one-'/up/a.txt' -two") == null and tries < 200) : (tries += 1) {
+        const f = (try v.next(20)) orelse continue;
+        defer f.deinit(testing.allocator);
+        if (f.binary) try seen.appendSlice(testing.allocator, f.data);
+    }
+    try testing.expect(std.mem.indexOf(u8, seen.items, "one-'/up/a.txt' -two") != null);
+    // Another terminal, another viewer, read-only, no terminal, gone: refused, and nothing is queued.
+    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, "block:other", "x"));
+    try testing.expect(!hs.hub.pasteUpload(v.id + 100, hs.session_id, hs.block_id, "x"));
+    hs.hub.handle(v, .{ .observe = true });
+    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, "x"));
+    hs.hub.handle(v, .{ .observe = false });
+    hs.hub.handle(v, .{ .close_view = {} });
+    try testing.expect(!hs.hub.pasteUpload(v.id, hs.session_id, hs.block_id, "x"));
+    const id = v.id;
+    hs.hub.removeViewer(v);
+    try testing.expect(!hs.hub.pasteUpload(id, hs.session_id, hs.block_id, "x"));
+}
+
 test "hub: opening, sizing and terminal actions count against the heavy-request limit" {
     const hs = try Harness.init(.{});
     defer hs.deinit();
     const v = try hs.openViewer();
     defer hs.hub.removeViewer(v);
     (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
-    for (0..Hub.max_heavy_per_second + 2) |_| hs.hub.handle(v, .{ .fit = .{ .cols = 90, .rows = 30 } });
+    for (0..Hub.max_heavy_per_second + 2) |_| hs.hub.handle(v, .{ .fit = .{ .cols = 90, .rows = 30, .at = hs.at() } });
     var refused = false;
     var tries: u32 = 0;
     while (!refused and tries < 200) : (tries += 1) {
@@ -2291,8 +2378,8 @@ test "hub: reads and work have separate allowances, so a tab switch's info polls
     defer hs.hub.removeViewer(v);
     for (0..Hub.max_reads_per_second) |_| try testing.expect(hs.hub.allowRate(v, .{ .tree = {} }));
     try testing.expect(!hs.hub.allowRate(v, .{ .tree = {} }));
-    for (0..Hub.max_heavy_per_second) |_| try testing.expect(hs.hub.allowRate(v, .{ .fit = .{ .cols = 80, .rows = 24 } }));
-    try testing.expect(!hs.hub.allowRate(v, .{ .fit = .{ .cols = 80, .rows = 24 } }));
+    for (0..Hub.max_heavy_per_second) |_| try testing.expect(hs.hub.allowRate(v, .{ .fit = .{ .cols = 80, .rows = 24, .at = hs.at() } }));
+    try testing.expect(!hs.hub.allowRate(v, .{ .fit = .{ .cols = 80, .rows = 24, .at = hs.at() } }));
     try testing.expect(hs.hub.allowRate(v, .{ .ping = {} }));
 }
 
@@ -2397,17 +2484,63 @@ test "hub: a multi-line paste needs confirming when the program has no bracketed
     const v = try hs.openViewer();
     defer hs.hub.removeViewer(v);
     (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
-    hs.hub.handle(v, .{ .paste = .{ .text = "one\ntwo" } });
+    hs.hub.handle(v, .{ .paste = .{ .text = "one\ntwo", .at = hs.at() } });
     const asked = (try waitFrame(v, isError)).?;
     defer asked.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, asked.data, "confirm_multiline") != null);
-    hs.hub.handle(v, .{ .paste = .{ .text = "line-a\x1b[201~line-b\xc2\x9b\nnext", .force = true } });
+    hs.hub.handle(v, .{ .paste = .{ .text = "line-a\x1b[201~line-b\xc2\x9b\nnext", .force = true, .at = hs.at() } });
     (try waitFrame(v, hasText("line-a[201~line-b\nnext"))).?.deinit(testing.allocator);
     // Once the program turns bracketed paste on, no confirmation is needed.
     try hs.f.feed(hs.block_id, "\x1b[?2004h");
     try testing.io.sleep(.fromMilliseconds(50), .awake);
-    hs.hub.handle(v, .{ .paste = .{ .text = "three\nfour" } });
+    hs.hub.handle(v, .{ .paste = .{ .text = "three\nfour", .at = hs.at() } });
     (try waitFrame(v, hasText("three\nfour"))).?.deinit(testing.allocator);
+}
+
+test "hub: a paste, a resize, a terminal action, an upload or a file request for another terminal than the one open is refused" {
+    const hs = try Harness.init(.{ .transfer = .{ .enabled = true, .upload_dir = "/nonexistent" } });
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    const other: protocol.Target = .{ .session = hs.session_id, .block = "block:other" };
+    const elsewhere: protocol.Target = .{ .session = "session:other", .block = hs.block_id };
+    // Asked of another terminal (the page switched while the clipboard or a question was pending).
+    // (Few enough of the counted kinds to stay inside one second's allowance.)
+    const msgs = [_]protocol.Msg{
+        .{ .paste = .{ .text = "SECRET-CLIPBOARD", .force = true, .at = other } },
+        .{ .paste = .{ .text = "SECRET-CLIPBOARD", .force = true, .at = elsewhere } },
+        .{ .fit = .{ .cols = 91, .rows = 31, .at = other } },
+        .{ .term_action = .{ .action = .reset, .at = elsewhere } },
+        .{ .ul = .{ .name = "a.txt", .size = 1, .at = other } },
+        .{ .ls = .{ .path = "/", .at = elsewhere } },
+        .{ .dl = .{ .path = "/etc/hosts", .at = other } },
+    };
+    for (msgs) |m| {
+        hs.hub.handle(v, m);
+        const f = (try waitFrame(v, isError)) orelse return error.TestUnexpectedResult;
+        defer f.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(u8, f.data, "\"code\":\"stale\"") != null);
+    }
+    // Naming none (a page an earlier rweb served): refused too, with what to do.
+    hs.hub.handle(v, .{ .paste = .{ .text = "SECRET-CLIPBOARD" } });
+    const reload = (try waitFrame(v, isError)) orelse return error.TestUnexpectedResult;
+    defer reload.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, reload.data, "\"code\":\"reload\"") != null);
+    // None of it reached the terminal, and no upload token was issued; the terminal that is open
+    // takes the same paste when it is named.
+    hs.hub.handle(v, .{ .paste = .{ .text = "for-this-one", .at = hs.at() } });
+    var seen: std.ArrayList(u8) = .empty;
+    defer seen.deinit(testing.allocator);
+    var tries: u32 = 0;
+    while (std.mem.indexOf(u8, seen.items, "for-this-one") == null and tries < 200) : (tries += 1) {
+        const f = (try v.next(20)) orelse continue;
+        defer f.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(u8, f.data, "\"t\":\"xfer\"") == null);
+        if (f.binary) try seen.appendSlice(testing.allocator, f.data);
+    }
+    try testing.expect(std.mem.indexOf(u8, seen.items, "for-this-one") != null);
+    try testing.expect(std.mem.indexOf(u8, seen.items, "SECRET-CLIPBOARD") == null);
 }
 
 test "hub: cleanPaste removes ESC and C1 and keeps every other character whole" {

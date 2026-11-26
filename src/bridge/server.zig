@@ -201,6 +201,14 @@ pub const Options = struct {
     /// past them every wrong one gets 429 until the window ends, so a token cannot be guessed online
     /// at any useful rate (it is all one budget: every local account reaches a loopback port from the
     /// same address). A right token always gets in (see `TokenLimiter`).
+    /// With own addresses read from Tailscale while running: how long the list may go without being
+    /// confirmed (`refreshOwnAddresses`) before requests are refused until it is again. The time is
+    /// judged at each request, so a refresh that hangs or stops closes the door by itself. Null: the
+    /// list is the owner's own (`--own-address`) and never goes out of date.
+    own_address_max_age_ms: ?i64 = null,
+    /// When the own addresses in `access` were read from Tailscale (the server may start long after:
+    /// the wait for Rex). Null: now.
+    own_addresses_read_ms: ?i64 = null,
     max_token_failures: u32 = 10,
     token_window_ms: u32 = 60_000,
     /// Log what browsers send, typed text included. For keyboard testing only.
@@ -257,6 +265,15 @@ const no_store = [_]std.http.Header{.{ .name = "cache-control", .value = "no-sto
 
 /// Messages one browser may send in any one-second window; one more and it is cut off.
 pub const max_messages_per_second: u32 = 200;
+
+/// Flush a file or folder to the disk itself. On macOS `fsync` stops at the drive's own cache, so the
+/// full flush is asked for first (not every file system has it; then `fsync` is what there is).
+fn syncToDisk(io: Io, f: Io.File) Io.File.SyncError!void {
+    if (comptime builtin.os.tag.isDarwin()) {
+        if (std.c.fcntl(f.handle, std.c.F.FULLFSYNC, @as(c_int, 0)) == 0) return;
+    }
+    return f.sync(io);
+}
 
 fn nowMs(io: Io) i64 {
     return Io.Clock.awake.now(io).toMilliseconds();
@@ -381,6 +398,11 @@ pub const Server = struct {
     access_mu: Io.Mutex = .init,
     /// The own-address list `setOwnAddresses` made (ours to free), if any.
     own_owned: ?[][]u8 = null,
+    /// When the own addresses were last confirmed: at start, and at each refresh that Tailscale
+    /// answered with a usable list (see `Options.own_address_max_age_ms`).
+    own_checked_ms: std.atomic.Value(i64) = .init(0),
+    /// Whether the last request found the list out of date, to log the change once each way.
+    own_stale_logged: std.atomic.Value(bool) = .init(false),
     /// Failed token checks in the current window (see `Options.max_token_failures`).
     limiter: TokenLimiter = .{},
     /// Accepted connections that have not sent a request head yet, oldest first (under `conns_mu`).
@@ -428,6 +450,7 @@ pub const Server = struct {
             .sock_dir = b.sock_dir,
             .sock_name = b.sock_name,
             .sock_id = b.sock_id,
+            .own_checked_ms = .init(opts.own_addresses_read_ms orelse nowMs(io)),
         };
         if (opts.access.token) |t| s.token_prefix = tokenPrefix(&s.token_prefix_buf, t);
         s.accept_task = try io.concurrent(acceptLoop, .{ s, &s.listener });
@@ -475,11 +498,13 @@ pub const Server = struct {
     /// One refresh of the own addresses from what was `fetched`: addresses not yet on the list are
     /// added (each logged), and none is ever taken off while rweb runs, so a request from an address
     /// this node had a minute ago is still refused. A failed fetch, an empty list or one with
-    /// something that is not an address changes nothing.
+    /// something that is not an address changes nothing, and does not count as confirming the list:
+    /// only a usable answer that is on the list afterwards does (`own_checked_ms`).
     pub fn refreshOwnAddresses(s: *Server, fetched: anyerror![]const []const u8) Refresh {
         const list = fetched catch return .failed;
         if (list.len == 0) return .invalid;
         for (list) |a| if (!access.isAddress(a)) return .invalid;
+
         var arena_state = std.heap.ArenaAllocator.init(s.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -490,16 +515,36 @@ pub const Server = struct {
             if (containsAddress(all.items, a)) continue;
             all.append(arena, a) catch return .failed;
         }
-        if (all.items.len == now.len) return .unchanged;
+        if (all.items.len == now.len) {
+            s.own_checked_ms.store(nowMs(s.io), .release);
+            return .unchanged;
+        }
         s.setOwnAddresses(all.items) catch return .failed;
+        s.own_checked_ms.store(nowMs(s.io), .release);
         for (all.items[now.len..]) |a| log.info("a new address of this node, {s}: requests from it are refused from now on (the earlier ones still are)", .{a});
         return .added;
     }
 
     fn decideAllButToken(s: *Server, request: access.Request) access.Decision {
+        const stale = s.ownAddressesStale();
+        if (stale != s.own_stale_logged.swap(stale, .acq_rel)) {
+            if (stale)
+                log.warn("this node's Tailscale addresses have not been confirmed for over {d} s: requests are refused until Tailscale answers again", .{@divTrunc(s.opts.own_address_max_age_ms.?, 1000)})
+            else
+                log.info("this node's Tailscale addresses are confirmed again: requests are judged as usual", .{});
+        }
         s.access_mu.lockUncancelable(s.io);
         defer s.access_mu.unlock(s.io);
-        return access.decideAllButToken(s.opts.access, request);
+        var cfg = s.opts.access;
+        cfg.own_addresses_stale = stale;
+        return access.decideAllButToken(cfg, request);
+    }
+
+    /// Whether the own addresses, read from Tailscale while running, have gone unconfirmed for longer
+    /// than `Options.own_address_max_age_ms`.
+    pub fn ownAddressesStale(s: *Server) bool {
+        const max_age = s.opts.own_address_max_age_ms orelse return false;
+        return nowMs(s.io) - s.own_checked_ms.load(.acquire) > max_age;
     }
 
     pub fn stop(s: *Server) void {
@@ -1080,6 +1125,7 @@ pub const Server = struct {
         // could later lead elsewhere).
         const dir_path = s.hub.cfg.transfer.upload_dir_real orelse s.hub.cfg.transfer.upload_dir orelse return refuseXfer(req, .not_found, "not found\n");
         const dir = s.hub.cfg.transfer.upload_dir_handle orelse return refuseXfer(req, .not_found, "not found\n");
+        const parts = s.hub.cfg.transfer.upload_parts_handle orelse return refuseXfer(req, .not_found, "not found\n");
         if (!s.hub.xfers.acquire()) return refuseXfer(req, .too_many_requests, "too many transfers\n");
         defer s.hub.xfers.release();
         var entry = s.hub.xfers.take(xtoken, .upload) orelse return refuseXfer(req, .not_found, "not found\n");
@@ -1093,37 +1139,38 @@ pub const Server = struct {
         if (len != entry.size) return refuseXfer(req, .bad_request, "the size is not what was announced\n");
         if (len > s.hub.cfg.transfer.max_bytes) return refuseXfer(req, .payload_too_large, "too large\n");
 
-        // The bytes go into a part file first, and it gets its real name only when all of them are in:
-        // a stop, a crash or a power cut in the middle leaves a `.rweb-upload-*.part`, never a file that
-        // looks whole (the next start removes leftover part files: `xfer.sweepUploadParts`).
-        var part_buf: [xfer.upload_part_prefix.len + 32 + xfer.upload_part_suffix.len + 1]u8 = undefined;
-        var raw: [16]u8 = undefined;
-        s.io.randomSecure(&raw) catch return refuseXfer(req, .internal_server_error, "cannot create the file\n");
-        const part = std.fmt.bufPrintSentinel(&part_buf, "{s}{x}{s}", .{ xfer.upload_part_prefix, &raw, xfer.upload_part_suffix }, 0) catch unreachable; // the buffer is sized for it
-        const f = dir.createFile(s.io, part, .{ .exclusive = true, .permissions = @fromBackingInt(@intCast(0o600)) }) catch
-            return refuseXfer(req, .internal_server_error, "cannot create the file\n");
-        defer {
-            f.close(s.io);
-            dir.deleteFile(s.io, part) catch {}; // the part file never stays: done, it has its real name too
-        }
+        // The bytes go into a part file first, in rweb's own folder for unfinished uploads, and the
+        // file gets its real name only when all of them are in and on disk: a stop, a crash or a
+        // power cut in the middle never leaves a file that looks whole in the upload folder. The part
+        // file stays locked while this writes it, so a starting rweb that shares the folder leaves it
+        // alone and removes only what a stopped one left (`xfer.sweepUploadParts`).
+        var part = xfer.createUploadPart(s.io, parts) catch return refuseXfer(req, .internal_server_error, "cannot create the file\n");
+        defer part.remove(s.io, parts); // the part file never stays: done, the file has its real name too
+        const f = part.file;
 
-        // The body, exactly `len` bytes, each read within `transfer_idle_ms` of the last.
-        var progress: Progress = .{ .last_ms = .init(nowMs(s.io)) };
-        var dog = s.io.concurrent(progressWatchdog, .{ s, &progress, conn, null }) catch return refuseXfer(req, .service_unavailable, "busy\n");
-        defer dog.cancel(s.io);
-        var body_buf: [16 * 1024]u8 = undefined;
-        const reader = try req.readerExpectContinue(&body_buf);
-        var chunk: [64 * 1024]u8 = undefined;
-        var left: u64 = len;
-        while (left > 0) {
-            const want: usize = @intCast(@min(left, chunk.len));
-            const n = reader.readSliceShort(chunk[0..want]) catch return error.UploadFailed;
-            if (n == 0) return error.UploadFailed; // the browser stopped early
-            f.writeStreamingAll(s.io, chunk[0..n]) catch return error.UploadFailed;
-            left -= n;
-            progress.touch(s.io);
+        // The body, exactly `len` bytes, each read within `transfer_idle_ms` of the last. The watchdog
+        // is for the browser's silences only: it ends with the body, so a slow flush to disk below
+        // is not taken for one.
+        {
+            var progress: Progress = .{ .last_ms = .init(nowMs(s.io)) };
+            var dog = s.io.concurrent(progressWatchdog, .{ s, &progress, conn, null }) catch return refuseXfer(req, .service_unavailable, "busy\n");
+            defer dog.cancel(s.io);
+            var body_buf: [16 * 1024]u8 = undefined;
+            const reader = try req.readerExpectContinue(&body_buf);
+            var chunk: [64 * 1024]u8 = undefined;
+            var left: u64 = len;
+            while (left > 0) {
+                const want: usize = @intCast(@min(left, chunk.len));
+                const n = reader.readSliceShort(chunk[0..want]) catch return error.UploadFailed;
+                if (n == 0) return error.UploadFailed; // the browser stopped early
+                f.writeStreamingAll(s.io, chunk[0..n]) catch return error.UploadFailed;
+                left -= n;
+                progress.touch(s.io);
+            }
         }
         if (!s.hub.mayUpload(entry.viewer_id, entry.session_id, entry.block_id)) return refuseXfer(req, .forbidden, "this page can no longer write to that terminal\n");
+        // On disk before it is named: after a power cut, a file under its real name has all its bytes.
+        syncToDisk(s.io, f) catch return refuseXfer(req, .internal_server_error, "cannot save the file\n");
         // Its real name: one that is safe, and that replaces nothing ("a.txt", "a (1).txt", ...). A hard
         // link fails if the name exists, so nothing is ever replaced, even by a racing upload.
         var nb: [128]u8 = undefined;
@@ -1140,13 +1187,24 @@ pub const Server = struct {
                 std.fmt.bufPrintSentinel(&name_buf, "{s}", .{safe}, 0)
             else
                 std.fmt.bufPrintSentinel(&name_buf, "{s} ({d}){s}", .{ stem, attempt, ext }, 0)) catch return refuseXfer(req, .internal_server_error, "name\n");
-            if (std.c.linkat(dir.handle, part, dir.handle, final, 0) == 0) {
+            if (std.c.linkat(parts.handle, part.name(), dir.handle, final, 0) == 0) {
                 named = true;
                 break;
             }
-            if (std.c._errno().* != @backingInt(std.c.E.EXIST)) return refuseXfer(req, .internal_server_error, "cannot create the file\n");
+            const errno = std.c._errno().*;
+            if (errno != @backingInt(std.c.E.EXIST)) {
+                log.info("upload: the finished file could not be named in the upload folder (errno {d})", .{errno});
+                return refuseXfer(req, .internal_server_error, "cannot create the file\n");
+            }
         }
         if (!named) return refuseXfer(req, .internal_server_error, "no free name\n");
+        // The name is on disk too before success is reported. If that cannot be done the name is
+        // taken back and the page is told the upload failed. (Past this point the file stays whatever
+        // happens to the reply: it is whole and durable.)
+        syncToDisk(s.io, .{ .handle = dir.handle, .flags = .{ .nonblocking = false } }) catch {
+            dir.deleteFile(s.io, final) catch {}; // best effort: the failure is reported either way
+            return refuseXfer(req, .internal_server_error, "cannot save the file\n");
+        };
         log.info("upload done: {s} {d} bytes", .{ final, len });
 
         // Tell the terminal where it is: the quoted path, as if pasted (no Enter).
@@ -1157,12 +1215,12 @@ pub const Server = struct {
         // A space after it, so that several uploads paste as separate words, not one glued together.
         const typed = try s.gpa.print("{s} ", .{quoted});
         defer s.gpa.free(typed);
-        s.hub.api_mu.lockUncancelable(s.io);
-        const pasted = s.hub.api.paste(entry.session_id, entry.block_id, typed);
-        s.hub.api_mu.unlock(s.io);
-        pasted catch |e| log.info("upload: the path could not be pasted: {t}", .{e});
+        // Checked and queued in one step, in the terminal's own input order (`Hub.pasteUpload`): a page
+        // that has switched terminals, gone or turned read-only since gets the file but no paste.
+        const pasted = s.hub.pasteUpload(entry.viewer_id, entry.session_id, entry.block_id, typed);
+        if (!pasted) log.info("upload: the path was not pasted: the page no longer writes to that terminal", .{});
 
-        const reply = try std.json.Stringify.valueAlloc(s.gpa, .{ .ok = true, .name = final, .path = full }, .{});
+        const reply = try std.json.Stringify.valueAlloc(s.gpa, .{ .ok = true, .name = final, .path = full, .pasted = pasted }, .{});
         defer s.gpa.free(reply);
         try req.respond(reply, .{ .keep_alive = false, .extra_headers = &(security_headers ++ no_store ++ [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }}) });
     }
@@ -1889,7 +1947,7 @@ test "server: observe-only never writes, resizes or changes anything, over the w
     try waitText(c, "\"t\":\"opened\"");
     try sendJson(c, "{{\"t\":\"in\",\"d\":\"nope\"}}", .{});
     try waitText(c, "read-only");
-    try sendJson(c, "{{\"t\":\"fit\",\"cols\":100,\"rows\":30}}", .{});
+    try sendJson(c, "{{\"t\":\"fit\",\"cols\":100,\"rows\":30,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ rig.session_id, rig.block_id });
     try waitText(c, "read-only");
     try sendJson(c, "{{\"t\":\"destroy_session\",\"session\":\"{s}\"}}", .{rig.session_id});
     try waitText(c, "read-only");
@@ -2473,7 +2531,7 @@ fn tmpDir(buf: []u8) ![]const u8 {
 
 /// A new upload folder under /tmp, made and opened as the bridge does at startup. The caller closes
 /// `dir` and removes `path`.
-const UploadDir = struct { path: []const u8, dir: Io.Dir };
+const UploadDir = struct { path: []const u8, dir: Io.Dir, parts: Io.Dir };
 
 fn uploadDir(buf: []u8) !UploadDir {
     var rnd: [4]u8 = undefined;
@@ -2482,7 +2540,8 @@ fn uploadDir(buf: []u8) !UploadDir {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var problem: xfer.Problem = .{};
-    return .{ .path = path, .dir = (try xfer.openUploadDir(arena.allocator(), testing.io, path, &problem)).dir };
+    const up = try xfer.openUploadDir(arena.allocator(), testing.io, path, &problem);
+    return .{ .path = path, .dir = up.dir, .parts = up.parts };
 }
 
 const Opened = struct { rig: Rig, c: *rex.ws.Conn };
@@ -2516,10 +2575,10 @@ test "server: file transfer is off by default, and says so" {
     const o = try openRig(.{});
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
-    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"/etc/hosts\"}}", .{});
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"/etc/hosts\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     const e = try textWith(o.c, "file transfer is off");
     testing.allocator.free(e);
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a\",\"size\":1}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a\",\"size\":1,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     testing.allocator.free(try textWith(o.c, "file transfer is off"));
     // And its address answers nothing.
     const h = try getT(o.rig, "/xfer/00000000000000000000000000000000", "");
@@ -2553,7 +2612,7 @@ test "server: a download goes through a one-time token and nothing else" {
         try testing.expectEqual(@as(u16, 404), h.status);
     }
 
-    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\"}}", .{path});
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ path, o.rig.session_id, o.rig.block_id });
     const msg = try textWith(o.c, "\"t\":\"xfer\"");
     defer testing.allocator.free(msg);
     try testing.expect(std.mem.indexOf(u8, msg, "\"kind\":\"download\"") != null);
@@ -2611,9 +2670,9 @@ test "server: a download of a missing file, or one over the size limit, is refus
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
     try o.rig.f.setFilesRoot(dir); // the fake serves only this folder
-    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}/nope\"}}", .{dir});
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}/nope\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ dir, o.rig.session_id, o.rig.block_id });
     testing.allocator.free(try textWith(o.c, "\"for\":\"dl\""));
-    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\"}}", .{big});
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ big, o.rig.session_id, o.rig.block_id });
     const e = try textWith(o.c, "too large");
     testing.allocator.free(e);
 }
@@ -2622,9 +2681,9 @@ test "server: observe-only viewers cannot start a transfer" {
     const o = try openRig(.{ .observe_only = true, .transfer = .{ .enabled = true } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
-    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"/etc/hosts\"}}", .{});
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"/etc/hosts\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     testing.allocator.free(try textWith(o.c, "read-only"));
-    try sendJson(o.c, "{{\"t\":\"ls\",\"path\":\"/\"}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ls\",\"path\":\"/\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     testing.allocator.free(try textWith(o.c, "read-only"));
 }
 
@@ -2642,7 +2701,7 @@ test "server: a directory listing for the picker" {
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
     try o.rig.f.setFilesRoot(dir); // the fake serves only this folder
-    try sendJson(o.c, "{{\"t\":\"ls\",\"path\":\"{s}\"}}", .{dir});
+    try sendJson(o.c, "{{\"t\":\"ls\",\"path\":\"{s}\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ dir, o.rig.session_id, o.rig.block_id });
     const m = try textWith(o.c, "\"t\":\"ls\"");
     defer testing.allocator.free(m);
     try testing.expect(std.mem.indexOf(u8, m, "\"n\":\"a.txt\",\"d\":false") != null);
@@ -2656,16 +2715,17 @@ test "server: an upload lands only in the upload folder, under a safe new name, 
     const dir = up.path;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
     defer up.dir.close(testing.io);
+    defer up.parts.close(testing.io);
     // What is pasted and returned is the folder's real path (on macOS `/tmp` is a link).
     const real = try Io.Dir.cwd().realPathFileAlloc(testing.io, dir, testing.allocator);
     defer testing.allocator.free(real);
-    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_real = real, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_real = real, .upload_dir_handle = up.dir, .upload_parts_handle = up.parts, .max_bytes = 1 << 20 } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
     const content = "hello from a phone\nsecond line\n";
 
     // A hostile name: path parts and shell characters.
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"../../etc/evil;rm -rf ~.txt\",\"size\":{d}}}", .{content.len});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"../../etc/evil;rm -rf ~.txt\",\"size\":{d},\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ content.len, o.rig.session_id, o.rig.block_id });
     const msg = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(msg);
     const url = try testing.allocator.print("/xfer/{s}", .{try tokenIn(msg)});
@@ -2685,6 +2745,11 @@ test "server: an upload lands only in the upload folder, under a safe new name, 
     const saved_real = try testing.allocator.print("{s}/evil_rm -rf _.txt", .{real});
     defer testing.allocator.free(saved_real);
     try testing.expect(std.mem.indexOf(u8, r.body, saved_real) != null);
+    try testing.expect(std.mem.indexOf(u8, r.body, "\"pasted\":true") != null);
+    // Written in the folder for unfinished uploads, and nothing is left there.
+    try testing.expectEqual(@as(usize, 0), countParts(up.parts));
+    var staged = up.parts.iterate();
+    try testing.expect((try staged.next(testing.io)) == null);
     // Nothing escaped into the folders above it.
     try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, "/tmp/etc/evil;rm -rf ~.txt", .{}));
 
@@ -2694,7 +2759,7 @@ test "server: an upload lands only in the upload folder, under a safe new name, 
     try waitBinary(o.c, quoted);
 
     // The same name again does not replace it.
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"evil;rm -rf ~.txt\",\"size\":3}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"evil;rm -rf ~.txt\",\"size\":3,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     const msg2 = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(msg2);
     const url2 = try testing.allocator.print("/xfer/{s}", .{try tokenIn(msg2)});
@@ -2718,16 +2783,17 @@ test "server: an upload is refused without the page's Origin, with the wrong siz
     const dir = up.path;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
     defer up.dir.close(testing.io);
-    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_handle = up.dir, .max_bytes = 1000 } });
+    defer up.parts.close(testing.io);
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_handle = up.dir, .upload_parts_handle = up.parts, .max_bytes = 1000 } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
 
     // Too big, said at the first step.
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"big\",\"size\":5000}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"big\",\"size\":5000,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     testing.allocator.free(try textWith(o.c, "too large"));
 
     // Another site's page (a cross-site PUT carries its own Origin): 403 and the token is not spent.
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":4}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":4,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     const m = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(m);
     const url = try testing.allocator.print("/xfer/{s}", .{try tokenIn(m)});
@@ -2754,7 +2820,7 @@ test "server: an upload is refused without the page's Origin, with the wrong siz
     const served = try testing.allocator.print("{s}/served.txt", .{o.rig.f.files_root.?});
     defer testing.allocator.free(served);
     (try Io.Dir.cwd().createFile(testing.io, served, .{})).close(testing.io);
-    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\"}}", .{served});
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ served, o.rig.session_id, o.rig.block_id });
     const d = try textWith(o.c, "\"kind\":\"download\"");
     defer testing.allocator.free(d);
     const durl = try testing.allocator.print("/xfer/{s}", .{try tokenIn(d)});
@@ -2795,12 +2861,13 @@ test "server: an upload token stops working once its page turns read-only or lea
     const dir = up.path;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
     defer up.dir.close(testing.io);
-    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
+    defer up.parts.close(testing.io);
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_handle = up.dir, .upload_parts_handle = up.parts, .max_bytes = 1 << 20 } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
 
     // Read-only after asking: the token is gone.
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":3}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":3,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     const m1 = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(m1);
     const url1 = try testing.allocator.print("/xfer/{s}", .{try tokenIn(m1)});
@@ -2814,7 +2881,7 @@ test "server: an upload token stops working once its page turns read-only or lea
     // Left the terminal after asking: refused, and no file is made.
     try sendJson(o.c, "{{\"t\":\"observe\",\"on\":false}}", .{});
     testing.allocator.free(try textWith(o.c, "\"observe\":false"));
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"b.txt\",\"size\":3}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"b.txt\",\"size\":3,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     const m2 = try textWith(o.c, "\"kind\":\"upload\"");
     defer testing.allocator.free(m2);
     const url2 = try testing.allocator.print("/xfer/{s}", .{try tokenIn(m2)});
@@ -2836,13 +2903,14 @@ test "server: an upload goes into the folder opened at startup, whatever replace
     var db: [64]u8 = undefined;
     const up = try uploadDir(&db);
     defer up.dir.close(testing.io);
+    defer up.parts.close(testing.io);
     const a = testing.allocator;
     const moved = try a.print("{s}.moved", .{up.path});
     defer a.free(moved);
     const elsewhere = try a.print("{s}.elsewhere", .{up.path});
     defer a.free(elsewhere);
     defer for ([_][]const u8{ up.path, moved, elsewhere }) |p| Io.Dir.cwd().deleteTree(testing.io, p) catch {};
-    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .upload_parts_handle = up.parts, .max_bytes = 1 << 20 } });
     defer o.rig.deinit();
     defer o.c.deinit(a);
 
@@ -2855,7 +2923,7 @@ test "server: an upload goes into the folder opened at startup, whatever replace
             try Io.Dir.cwd().deleteTree(testing.io, up.path);
             try Io.Dir.cwd().symLink(testing.io, elsewhere, up.path, .{});
         }
-        try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"{s}\",\"size\":2}}", .{name});
+        try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"{s}\",\"size\":2,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ name, o.rig.session_id, o.rig.block_id });
         const msg = try textWith(o.c, "\"kind\":\"upload\"");
         defer a.free(msg);
         const url = try a.print("/xfer/{s}", .{try tokenIn(msg)});
@@ -2877,11 +2945,12 @@ test "server: an upload goes into the folder opened at startup, whatever replace
     }
 }
 
-fn countParts(dir: Io.Dir) usize {
+/// Part files in the folder for unfinished uploads.
+fn countParts(parts: Io.Dir) usize {
     var n: usize = 0;
-    var it = dir.iterate();
+    var it = parts.iterate();
     while (it.next(testing.io) catch null) |e| {
-        if (std.mem.startsWith(u8, e.name, xfer.upload_part_prefix)) n += 1;
+        if (xfer.isUploadPartName(e.name)) n += 1;
     }
     return n;
 }
@@ -2891,11 +2960,12 @@ test "server: an upload that stops sending is cut, and its partial file removed"
     const up = try uploadDir(&db);
     defer Io.Dir.cwd().deleteTree(testing.io, up.path) catch {};
     defer up.dir.close(testing.io);
+    defer up.parts.close(testing.io);
     const a = testing.allocator;
-    const o = try openRigExtra(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } }, .{ .transfer_idle_ms = 300 });
+    const o = try openRigExtra(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .upload_parts_handle = up.parts, .max_bytes = 1 << 20 } }, .{ .transfer_idle_ms = 300 });
     defer o.rig.deinit();
     defer o.c.deinit(a);
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"stall.bin\",\"size\":100}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"stall.bin\",\"size\":100,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     const msg = try textWith(o.c, "\"kind\":\"upload\"");
     defer a.free(msg);
     // Ten of the hundred bytes announced, then nothing.
@@ -2914,7 +2984,7 @@ test "server: an upload that stops sending is cut, and its partial file removed"
     defer a.free(partial);
     var saw_part = false;
     for (0..100) |_| {
-        if (countParts(up.dir) == 1) {
+        if (countParts(up.parts) == 1) {
             saw_part = true;
             break;
         }
@@ -2928,10 +2998,10 @@ test "server: an upload that stops sending is cut, and its partial file removed"
     try testing.expect(nowMs(testing.io) - t0 < 5_000);
     // The part file goes as the handler unwinds, and the real name was never made.
     for (0..100) |_| {
-        if (countParts(up.dir) == 0) break;
+        if (countParts(up.parts) == 0) break;
         try testing.io.sleep(.fromMilliseconds(10), .awake);
     }
-    try testing.expectEqual(@as(usize, 0), countParts(up.dir));
+    try testing.expectEqual(@as(usize, 0), countParts(up.parts));
     var gone = false;
     for (0..100) |_| {
         if (Io.Dir.cwd().statFile(testing.io, partial, .{})) |_| {} else |_| {
@@ -3019,11 +3089,12 @@ test "server: a busy bridge does not use up a transfer token" {
     const up = try uploadDir(&db);
     defer Io.Dir.cwd().deleteTree(testing.io, up.path) catch {};
     defer up.dir.close(testing.io);
+    defer up.parts.close(testing.io);
     const a = testing.allocator;
-    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .upload_parts_handle = up.parts, .max_bytes = 1 << 20 } });
     defer o.rig.deinit();
     defer o.c.deinit(a);
-    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"later.txt\",\"size\":2}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"later.txt\",\"size\":2,\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ o.rig.session_id, o.rig.block_id });
     const msg = try textWith(o.c, "\"kind\":\"upload\"");
     defer a.free(msg);
     const url = try a.print("/xfer/{s}", .{try tokenIn(msg)});
@@ -3376,4 +3447,30 @@ test "server: a refresh only ever adds own addresses, and keeps them when it fai
     defer arena_state.deinit();
     const now = try rig.srv.ownAddresses(arena_state.allocator());
     try testing.expect(access.sameAddressList(now, &.{ "100.64.0.5", "100.64.0.77", "fd7a:115c:a1e0::77" }));
+}
+
+test "server: own addresses Tailscale has not confirmed for too long refuse requests until it answers" {
+    const rig = try Rig.init(.{}, owner_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    const elsewhere = "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.9\r\n";
+    // A list the owner gave never goes out of date.
+    try testing.expect(!rig.srv.ownAddressesStale());
+    // Read from Tailscale: fine while it was confirmed within the limit (at start, here).
+    rig.srv.opts.own_address_max_age_ms = 60_000;
+    const fine = try get(rig, "/", elsewhere);
+    freeHttp(fine);
+    try testing.expectEqual(@as(u16, 200), fine.status);
+    // Too long ago (as when the refresh hangs, or Tailscale stops answering): refused, from anywhere.
+    rig.srv.own_checked_ms.store(nowMs(testing.io) - 60_001, .release);
+    try expectRefusedWith(rig, elsewhere, .own_addresses_stale);
+    // A failed or unusable answer confirms nothing.
+    try testing.expectEqual(Server.Refresh.failed, rig.srv.refreshOwnAddresses(error.TailscaleFailed));
+    try testing.expectEqual(Server.Refresh.invalid, rig.srv.refreshOwnAddresses(&.{}));
+    try expectRefusedWith(rig, elsewhere, .own_addresses_stale);
+    // Tailscale answers: judged as usual again, the new address included.
+    try testing.expectEqual(Server.Refresh.added, rig.srv.refreshOwnAddresses(&.{ "100.64.0.5", "100.64.0.77" }));
+    const again = try get(rig, "/", elsewhere);
+    freeHttp(again);
+    try testing.expectEqual(@as(u16, 200), again.status);
+    try expectRefusedWith(rig, "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.77\r\n", .own_address);
 }

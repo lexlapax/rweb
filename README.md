@@ -113,13 +113,14 @@ change, and it bounds what every browser and Rex can make it hold in memory. Des
 [docs/security-hardening-2026-11-23.md](docs/security-hardening-2026-11-23.md) (in the source repository).
 
 **How it was reviewed.** Before its first release, rweb went through a security review of its design
-and then five rounds of review on its release candidate. Each round had three independent parts: an
+and then six rounds of review on its release candidate. Each round had three independent parts: an
 external static security scan of the whole repository; a release-readiness review (builds, the test
 suite, the release archives, the docs against the code); and an internal adversarial review in several
 parts, each reviewer reading the code without the others' conclusions. In the first four rounds the
 internal review was split by area (request handling and authentication, the Rex client, concurrency, the
 page and tooling); the fifth followed each earlier finding across every endpoint, platform and documented
-procedure, and led to the two setup commands, `rweb tailscale` and `rweb ssh`. Every finding was checked
+procedure, and led to the two setup commands, `rweb tailscale` and `rweb ssh`; the sixth looked at what
+can change while something waits (a paste, an upload, a child process, a list that ages). Every finding was checked
 against the code before anything was changed, and each fix has a test. Over the first four rounds that
 came to more than 120 findings, among them a deadlock, use-after-free races, a paste that could escape
 bracketed paste, memory a program in a terminal could grow without bound, and trust in file paths that
@@ -129,7 +130,8 @@ a phone; those runs are recorded in the round's document. Each round's record li
 their verdicts, fixes and tests: [round 1](docs/release-review-2026-11-25.md),
 [round 2](docs/security-review-2026-11-25-round2.md), [round 3](docs/security-review-2026-11-25-round3.md),
 [round 4 and its live test](docs/security-review-2026-11-25-round4.md),
-[round 5](docs/security-review-2026-11-26-round5.md) (in the source repository).
+[round 5](docs/security-review-2026-11-26-round5.md),
+[round 6](docs/security-review-2026-11-26-round6.md) (in the source repository).
 
 ## Building from source
 

@@ -142,8 +142,11 @@ growing delay instead of exiting. So the socket or port is never free for anothe
 an outage. Connections wait in the listen queue; no request is read before the access rules are complete
 and Rex has answered. A loopback port is held on `127.0.0.1` and on `[::1]`, without `SO_REUSEPORT`, so
 `localhost` cannot lead to another account's listener. While rweb runs it asks Tailscale for the
-machine's own addresses again every minute, so the rule that refuses requests from the machine itself
-follows a changed address.
+machine's own addresses again every minute (every 15 seconds after a failed try), so the rule that
+refuses requests from the machine itself follows a changed address. Each try has ten seconds in all;
+`tailscale` is killed past that. If no try has succeeded for two and a half minutes (of time the machine was awake), the list may be out
+of date, and rweb refuses requests until Tailscale answers again; this is judged at each request, so it
+holds even if the asking itself were stuck. A change of address is seen within about a minute.
 
 Before a request is read, it holds one of a few pending slots. When they are all taken, the oldest
 connection that has not sent a request yet is dropped for the new one: idle connections from a local

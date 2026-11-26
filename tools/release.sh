@@ -16,6 +16,9 @@
 # The fixed path is in a shared /tmp, so the base folder must be ours alone before anything is put in
 # it: a real directory (not a link), owned by this user, mode 0700. /tmp's sticky bit then keeps other
 # users from renaming or replacing it, and its mode keeps them out of the source and the Zig cache.
+# What an earlier run, or anyone who could write there before it was closed, left in it is not trusted
+# either: it is emptied, and the source and the Zig cache are made new by each run. (So every run
+# fetches the pinned dependencies again and compiles everything; that is the price.)
 set -eu
 commit=$(git rev-parse --verify "${1:-HEAD}^{commit}")
 top=$(git rev-parse --show-toplevel)
@@ -25,13 +28,29 @@ die() { echo "release.sh: $*" >&2; exit 1; }
 owner_of() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1"; }
 mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
-(umask 077; mkdir "$base" 2>/dev/null) || true
+marker=$base/.rweb-release-base   # says the folder is release.sh's own, to empty
+made=0
+(umask 077; mkdir "$base" 2>/dev/null) && made=1
 [ -L "$base" ] && die "$base is a symbolic link; remove it and run again"
 [ -d "$base" ] || die "$base is not a directory; remove it and run again"
 [ "$(owner_of "$base")" = "$(id -u)" ] || die "$base belongs to another user; remove it (as that user or root) and run again"
-# Ours and not a link: closing it is safe (nobody else could have written into it while it was ours).
+# Ours and not a link: closing it is safe.
 chmod 0700 "$base"
 [ "$(mode_of "$base")" = 700 ] || die "$base could not be made private (mode $(mode_of "$base"))"
+# Closed from here on, but it may have been open before (made by hand, or by something else): a Zig
+# cache found in it could hold another user's file, a link, or a hard link to some file of ours, and
+# the build would use it. Owners and modes cannot show all of that, so nothing found is kept. The
+# source and the cache stay at their fixed paths all the same: the build embeds paths, and archives of
+# one commit must stay byte-identical. `rm` removes a link, never what it leads to; something of
+# another user's that cannot be removed stops the run.
+# Only a folder release.sh made (it leaves a marker) is emptied, so a folder of yours named by mistake
+# loses nothing. Two runs at once in one base would remove each other's work: run one at a time.
+if [ "$made" = 0 ] && [ ! -e "$marker" ] && [ ! -L "$marker" ] && [ -n "$(ls -A "$base")" ]; then
+  die "$base has files in it and was not made by release.sh, which would empty it. If it is an old release folder, remove it (rm -rf '$base') and run again"
+fi
+find "$base" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+[ -z "$(ls -A "$base")" ] || die "$base could not be emptied (see above); remove it, as its owner or root, and run again"
+: > "$marker"
 [ "${RWEB_RELEASE_CHECK_ONLY:-}" = 1 ] && { echo "release base ok: $base"; exit 0; }
 
 version=$(git -C "$top" show "$commit:build.zig.zon" | sed -n 's/^ *\.version = "\(.*\)",$/\1/p')
@@ -41,8 +60,8 @@ out=$top/zig-out/release/$version
 To rebuild $version on purpose, remove it first: rm -rf '$out'"
 
 build=$base/$commit
-rm -rf "$build"
-mkdir "$build"
+cache=$base/zig-cache
+mkdir "$build" "$cache"   # both new: the base was emptied above, and `mkdir` fails on anything there
 git -C "$top" archive "$commit" | tar -x -C "$build"
 want=$(sed -n 's/^ *\.minimum_zig_version = "\(.*\)",$/\1/p' "$build/build.zig.zon")
 if command -v "zig-$want" >/dev/null 2>&1; then
@@ -57,8 +76,8 @@ fi
 echo "building with $zig $("$zig" version) ($(command -v "$zig"))"
 # The tests run on exactly what is packed (the exported commit), never against a real Rex: the live
 # tests need REX_SOCKET, which is removed here.
-(cd "$build" && env -u REX_SOCKET ZIG_GLOBAL_CACHE_DIR="$base/zig-cache" "$zig" build test -Doptimize=ReleaseSafe) || die "the tests failed on $commit; nothing was packed"
-(cd "$build" && ZIG_GLOBAL_CACHE_DIR="$base/zig-cache" "$zig" build dist -Dcommit="$commit")
+(cd "$build" && env -u REX_SOCKET ZIG_GLOBAL_CACHE_DIR="$cache" "$zig" build test -Doptimize=ReleaseSafe) || die "the tests failed on $commit; nothing was packed"
+(cd "$build" && ZIG_GLOBAL_CACHE_DIR="$cache" "$zig" build dist -Dcommit="$commit")
 mkdir -p "$top/zig-out/release"
 mkdir "$out" || die "$out appeared during the build; nothing was copied into it"
 cp "$build"/zig-out/dist/rweb-*.tar.gz "$build/zig-out/dist/SHA256SUMS" "$out/"
@@ -70,6 +89,6 @@ cp "$build"/zig-out/dist/rweb-*.tar.gz "$build/zig-out/dist/SHA256SUMS" "$out/"
   echo "host $(uname -s) $(uname -m)"
   echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$out/BUILDINFO"
-rm -rf "$build"
+rm -rf "$build" "$cache"
 echo "rweb $version from $commit, built with $zig $("$zig" version):"
 cat "$out/SHA256SUMS"

@@ -512,3 +512,31 @@ test('the token form shows refusals and keeps no token', async () => {
   assert.equal(odd.els.token.value, '');
   assert.match(odd.els['login-msg'].textContent, /Wrong token/);
 });
+
+test('what waits is held with the view it was asked in, and sent only if that view is still on screen', () => {
+  const a = {session: 's1', block: 'b1'}, b = {session: 's1', block: 'b2'};
+  assert.equal(K.holdView(null, 3), null);
+  const held = K.holdView(a, 3);
+  assert.deepEqual(held, {session: 's1', block: 'b1', gen: 3});
+  assert.equal(K.stillView(held, a, 3), true);
+  // Another terminal is on screen when the clipboard answers: not sent.
+  assert.equal(K.stillView(held, b, 4), false);
+  // Away and back to the same terminal is another view: what was asked before is not sent.
+  assert.equal(K.stillView(held, a, 5), false);
+  // No terminal on screen, or nothing held.
+  assert.equal(K.stillView(held, null, 4), false);
+  assert.equal(K.stillView(null, a, 3), false);
+  // The held view is a copy: a later change to the page's own object does not move it.
+  const cur = {session: 's1', block: 'b1'}, h2 = K.holdView(cur, 1);
+  cur.block = 'b9';
+  assert.equal(h2.block, 'b1');
+});
+
+test('a paste that fits still fits with its terminal named', () => {
+  // The largest paste of the worst characters to encode that the limit lets through leaves room for
+  // the two longest names.
+  const d = '\x01'.repeat(10000);
+  assert.equal(K.pasteRefusal(d), null);
+  const msg = JSON.stringify({t: 'paste', d, force: true, session: 's'.repeat(200), block: 'b'.repeat(200)});
+  assert.ok(K.utf8Length(msg) <= K.MESSAGE_MAX_BYTES);
+});

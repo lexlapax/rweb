@@ -7,10 +7,18 @@
 //!   close_view                    stop viewing
 //!   in {d}                        typed or composed text (xterm.js onData)
 //!   key {key}                     a physical key, as Rex's `client.key` takes it
-//!   paste {d, force?}             a `block.event`; a multi-line paste into a program without
+//!   paste {d, force?, session, block}
+//!                                 a `block.event`; a multi-line paste into a program without
 //!                                 bracketed paste is refused (`code: confirm_multiline`) unless
 //!                                 `force` says the user confirmed it
-//!   fit {cols, rows}              take ownership and resize (only when the user asks)
+//!   fit {cols, rows, session, block}
+//!                                 take ownership and resize (only when the user asks)
+//!   term_action {action, session, block} / ul {name, size, session, block}
+//!   ls {path, session, block} / dl {path, session, block}
+//!   (`paste`, `fit`, `term_action`, `ul`, `ls` and `dl` can follow a wait in the page: for the clipboard, an
+//!   answer, an upload's turn. They name the terminal they were asked for, and the bridge does them
+//!   only if that is the terminal it has open for this page: `code: stale` otherwise, and
+//!   `code: reload` for a page that names none, which an earlier rweb served.)
 //!   redraw / more_history         a fresh redraw, the latter with all the scrollback
 //!   text                          the screen and scrollback as plain text (reply: `text`)
 //!   observe {on}                  this browser's read-only switch
@@ -36,6 +44,9 @@ pub const max_cols_rows = 1000;
 pub const max_transfer_size: i64 = 1 << 40;
 pub const max_path_bytes = 1024;
 
+/// The terminal a message was asked for (see the note on `paste` above).
+pub const Target = struct { session: []const u8, block: []const u8 };
+
 pub const Msg = union(enum) {
     tree,
     open: struct { session: []const u8, block: []const u8 },
@@ -43,8 +54,8 @@ pub const Msg = union(enum) {
     in: []const u8,
     /// The `key` object as JSON text, forwarded to `client.key`.
     key: []const u8,
-    paste: struct { text: []const u8, force: bool = false },
-    fit: struct { cols: u16, rows: u16 },
+    paste: struct { text: []const u8, force: bool = false, at: ?Target = null },
+    fit: struct { cols: u16, rows: u16, at: ?Target = null },
     redraw,
     more_history,
     /// The screen and scrollback as plain text, for the page's Copy view.
@@ -52,15 +63,15 @@ pub const Msg = union(enum) {
     /// Title, folder, program and listening ports of the open terminal, for the page's header.
     info,
     /// List a directory (empty: the terminal's folder) for the download picker.
-    ls: []const u8,
+    ls: struct { path: []const u8, at: ?Target = null },
     /// Ask for a download token for a file.
-    dl: []const u8,
+    dl: struct { path: []const u8, at: ?Target = null },
     /// Ask for an upload token for a file the browser is about to send.
-    ul: struct { name: []const u8, size: u64 },
+    ul: struct { name: []const u8, size: u64, at: ?Target = null },
     /// The newest text a program in the terminal copied (OSC 52).
     clip,
     /// `clear` or `reset` the open terminal.
-    term_action: enum { clear, reset },
+    term_action: struct { action: TermAction, at: ?Target = null },
     observe: bool,
     new_session: ?[]const u8,
     new_terminal: []const u8,
@@ -73,6 +84,8 @@ pub const Msg = union(enum) {
     /// `--debug-input`, ignored otherwise.
     dbg,
 };
+
+pub const TermAction = enum { clear, reset };
 
 pub const ParseError = error{ Malformed, TooLarge, UnknownType, BadField } || Allocator.Error;
 
@@ -99,29 +112,29 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
         .clip => .clip,
         .ping => .ping,
         .dbg => .dbg,
-        .ls => .{ .ls = try pathField(o, "path", true) },
-        .dl => .{ .dl = try pathField(o, "path", false) },
+        .ls => .{ .ls = .{ .path = try pathField(o, "path", true), .at = try target(o) } },
+        .dl => .{ .dl = .{ .path = try pathField(o, "path", false), .at = try target(o) } },
         .ul => blk: {
             const name = try str(o, "name", 255);
             if (name.len == 0 or !std.unicode.utf8ValidateSlice(name)) return error.BadField;
             for (name) |c| if (c < 0x20 or c == 0x7f) return error.BadField;
             const sv = o.get("size") orelse return error.BadField;
             if (sv != .integer or sv.integer < 0 or sv.integer > max_transfer_size) return error.BadField;
-            break :blk .{ .ul = .{ .name = name, .size = @intCast(sv.integer) } };
+            break :blk .{ .ul = .{ .name = name, .size = @intCast(sv.integer), .at = try target(o) } };
         },
         .term_action => blk: {
             const a = try str(o, "action", 16);
-            const act = std.meta.stringToEnum(@FieldType(Msg, "term_action"), a) orelse return error.BadField;
-            break :blk .{ .term_action = act };
+            const act = std.meta.stringToEnum(TermAction, a) orelse return error.BadField;
+            break :blk .{ .term_action = .{ .action = act, .at = try target(o) } };
         },
         .open => .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } },
         .in => .{ .in = try str(o, "d", max_input_bytes) },
         .paste => blk: {
             const force = if (o.get("force")) |f| (if (f == .bool) f.bool else return error.BadField) else false;
-            break :blk .{ .paste = .{ .text = try str(o, "d", max_input_bytes), .force = force } };
+            break :blk .{ .paste = .{ .text = try str(o, "d", max_input_bytes), .force = force, .at = try target(o) } };
         },
         .key => .{ .key = try keyJson(arena, o) },
-        .fit => .{ .fit = .{ .cols = try dim(o, "cols"), .rows = try dim(o, "rows") } },
+        .fit => .{ .fit = .{ .cols = try dim(o, "cols"), .rows = try dim(o, "rows"), .at = try target(o) } },
         .observe => blk: {
             const on = o.get("on") orelse return error.BadField;
             if (on != .bool) return error.BadField;
@@ -134,6 +147,13 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
         .rename_block => .{ .rename_block = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes), .label = try label(o, "label") } },
         .close_block => .{ .close_block = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } },
     };
+}
+
+/// The terminal a message names: both `session` and `block`, or neither (a page from before they
+/// were sent; the hub refuses it with a request to reload). One without the other is malformed.
+fn target(o: std.json.ObjectMap) ParseError!?Target {
+    if (!o.contains("session") and !o.contains("block")) return null;
+    return .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) };
 }
 
 fn str(o: std.json.ObjectMap, name: []const u8, max: usize) ParseError![]const u8 {
@@ -237,7 +257,7 @@ test "simple messages" {
     try testing.expectEqual(Msg.ping, try parseT("{\"t\":\"ping\"}"));
     try testing.expectEqual(Msg.redraw, try parseT("{\"t\":\"redraw\"}"));
     try testing.expectEqual(Msg.info, try parseT("{\"t\":\"info\"}"));
-    try testing.expectEqual(Msg{ .term_action = .clear }, try parseT("{\"t\":\"term_action\",\"action\":\"clear\"}"));
+    try testing.expectEqual(Msg{ .term_action = .{ .action = .clear } }, try parseT("{\"t\":\"term_action\",\"action\":\"clear\"}"));
     try testing.expectError(error.BadField, parseT("{\"t\":\"term_action\",\"action\":\"rm\"}"));
     try testing.expectEqual(Msg{ .observe = true }, try parseT("{\"t\":\"observe\",\"on\":true}"));
     try testing.expectEqual(Msg{ .fit = .{ .cols = 100, .rows = 30 } }, try parseT("{\"t\":\"fit\",\"cols\":100,\"rows\":30}"));
@@ -303,9 +323,9 @@ test "transfer messages are checked" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("/etc", (try parse(a, "{\"t\":\"ls\",\"path\":\"/etc\"}")).ls);
-    try testing.expectEqualStrings("", (try parse(a, "{\"t\":\"ls\",\"path\":\"\"}")).ls);
-    try testing.expectEqualStrings("a b/c.txt", (try parse(a, "{\"t\":\"dl\",\"path\":\"a b/c.txt\"}")).dl);
+    try testing.expectEqualStrings("/etc", (try parse(a, "{\"t\":\"ls\",\"path\":\"/etc\"}")).ls.path);
+    try testing.expectEqualStrings("", (try parse(a, "{\"t\":\"ls\",\"path\":\"\"}")).ls.path);
+    try testing.expectEqualStrings("a b/c.txt", (try parse(a, "{\"t\":\"dl\",\"path\":\"a b/c.txt\"}")).dl.path);
     const u = try parse(a, "{\"t\":\"ul\",\"name\":\"pic.png\",\"size\":1234}");
     try testing.expectEqualStrings("pic.png", u.ul.name);
     try testing.expectEqual(@as(u64, 1234), u.ul.size);
@@ -333,4 +353,38 @@ test "every message type is parsed as itself" {
             try testing.expectEqual(tag, std.meta.activeTag(m));
         } else |e| try testing.expect(e != error.UnknownType);
     }
+}
+
+test "messages that can follow a wait name their terminal: both ids or neither" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const named = [_][]const u8{
+        "{\"t\":\"paste\",\"d\":\"x\",\"session\":\"s1\",\"block\":\"b1\"}",
+        "{\"t\":\"fit\",\"cols\":80,\"rows\":24,\"session\":\"s1\",\"block\":\"b1\"}",
+        "{\"t\":\"term_action\",\"action\":\"reset\",\"session\":\"s1\",\"block\":\"b1\"}",
+        "{\"t\":\"ul\",\"name\":\"a\",\"size\":1,\"session\":\"s1\",\"block\":\"b1\"}",
+    };
+    for (named) |text| {
+        const at: ?Target = switch (try parse(a, text)) {
+            .paste => |p| p.at,
+            .fit => |f| f.at,
+            .term_action => |t| t.at,
+            .ul => |u| u.at,
+            else => return error.TestUnexpectedResult,
+        };
+        try testing.expectEqualStrings("s1", at.?.session);
+        try testing.expectEqualStrings("b1", at.?.block);
+    }
+    // None: parsed, for the hub to refuse with a request to reload.
+    try testing.expect((try parse(a, "{\"t\":\"paste\",\"d\":\"x\"}")).paste.at == null);
+    // Half a name, or one of the wrong shape or length, is malformed.
+    for ([_][]const u8{
+        "{\"t\":\"paste\",\"d\":\"x\",\"session\":\"s1\"}",
+        "{\"t\":\"paste\",\"d\":\"x\",\"block\":\"b1\"}",
+        "{\"t\":\"fit\",\"cols\":80,\"rows\":24,\"session\":1,\"block\":\"b1\"}",
+        "{\"t\":\"term_action\",\"action\":\"clear\",\"session\":\"s1\",\"block\":null}",
+    }) |text| try testing.expectError(error.BadField, parse(a, text));
+    const long = try a.print("{{\"t\":\"ul\",\"name\":\"a\",\"size\":1,\"session\":\"{s}\",\"block\":\"b\"}}", .{@as([]const u8, &@as([max_id_bytes + 1]u8, @splat('s')))});
+    try testing.expectError(error.TooLarge, parse(a, long));
 }

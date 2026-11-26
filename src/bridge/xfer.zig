@@ -31,6 +31,9 @@ pub const Config = struct {
     /// relative to it, so replacing the path later (a rename, a symlink) cannot redirect them.
     /// Owned by whoever opened it. Uploads are refused while it is null.
     upload_dir_handle: ?Io.Dir = null,
+    /// The folder inside it for uploads still being written (`upload_parts_dir`), opened and owned
+    /// the same way. Uploads are refused while it is null.
+    upload_parts_handle: ?Io.Dir = null,
     /// The most bytes one transfer may carry, either way.
     max_bytes: u64 = 256 * 1024 * 1024,
 };
@@ -1430,27 +1433,97 @@ pub fn readPrivateFile(arena: Allocator, io: Io, path: []const u8, limit: usize,
     return buf[0..n];
 }
 
-/// The upload folder, opened and kept by the caller for as long as uploads may go into it, and its
-/// real path (what is pasted into the terminal and shown to the page). The folders above it are
-/// walked and checked from `/` (`Walker`; missing ones are made 0700, each inside its checked
-/// parent); the folder itself is made 0700 if missing, opened without following a link and must be a
-/// private folder of ours.
-pub const UploadDir = struct { dir: Io.Dir, real_path: []const u8 };
+/// The upload folder, opened and kept by the caller for as long as uploads may go into it, its real
+/// path (what is pasted into the terminal and shown to the page), and the folder inside it where an
+/// upload is written until it is complete (`upload_parts_dir`). The folders above it are walked and
+/// checked from `/` (`Walker`; missing ones are made 0700, each inside its checked parent); the folder
+/// itself is made 0700 if missing, opened without following a link and must be a private folder of
+/// ours; so must the folder for unfinished uploads inside it.
+pub const UploadDir = struct { dir: Io.Dir, parts: Io.Dir, real_path: []const u8 };
 
-/// An upload is written under this name and linked to its real one when complete (`server.zig`).
-pub const upload_part_prefix = ".rweb-upload-";
+/// The folder inside the upload folder that holds uploads still being written. It is rweb's own:
+/// nothing the user keeps is in it, so what is removed from it is never a file of theirs.
+pub const upload_parts_dir = ".rweb-partial";
+/// A part file's name: 32 hex digits and this. It is linked into the upload folder under its real
+/// name when complete (`server.zig`).
 pub const upload_part_suffix = ".part";
+pub const upload_part_name_len = 32 + upload_part_suffix.len;
 
-/// Remove part files a stopped or crashed rweb left in the upload folder. Only rweb's own names, only
-/// regular files; the folder is ours and closed to others, so nothing here is another user's. Returns
-/// how many were removed.
-pub fn sweepUploadParts(io: Io, dir: Io.Dir) usize {
+pub fn isUploadPartName(name: []const u8) bool {
+    if (name.len != upload_part_name_len or !std.mem.endsWith(u8, name, upload_part_suffix)) return false;
+    for (name[0..32]) |c| switch (c) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// An upload being written: its file, locked for as long as it is open, and its name in the folder
+/// for unfinished uploads.
+pub const UploadPart = struct {
+    file: Io.File,
+    name_buf: [upload_part_name_len + 1]u8,
+
+    pub fn name(p: *const UploadPart) [:0]const u8 {
+        return p.name_buf[0..upload_part_name_len :0];
+    }
+
+    /// Remove the part file and release it. The name goes first, while the lock is still held.
+    pub fn remove(p: *UploadPart, io: Io, parts: Io.Dir) void {
+        parts.deleteFile(io, p.name()) catch {}; // best effort: a leftover is removed at the next start
+        p.file.close(io);
+    }
+};
+
+/// A new, empty part file in `parts`, 0600, under a random name, and locked (`flock`) until it is
+/// closed. The lock is how a starting rweb tells an upload in progress (another rweb using the same
+/// upload folder) from one a stopped rweb left behind: `sweepUploadParts` removes only what it can
+/// lock. Where the lock is taken after the file is made (Linux), a sweep can remove the file in
+/// between; then the file has no name left, and another is made.
+pub fn createUploadPart(io: Io, parts: Io.Dir) error{CreateFailed}!UploadPart {
+    var attempt: u8 = 0;
+    while (attempt < 8) : (attempt += 1) {
+        var part: UploadPart = .{ .file = undefined, .name_buf = undefined };
+        var raw: [16]u8 = undefined;
+        io.randomSecure(&raw) catch return error.CreateFailed;
+        _ = std.fmt.bufPrintSentinel(&part.name_buf, "{x}{s}", .{ &raw, upload_part_suffix }, 0) catch return error.CreateFailed;
+        part.file = parts.createFile(io, part.name(), .{
+            .exclusive = true,
+            .lock = .exclusive,
+            .lock_nonblocking = true,
+            .permissions = @fromBackingInt(@intCast(0o600)),
+        }) catch |e| switch (e) {
+            // The name is taken (it is random: all but impossible), or a sweep holds the lock on the
+            // file just made and is removing it.
+            error.PathAlreadyExists, error.WouldBlock => continue,
+            else => return error.CreateFailed,
+        };
+        const st = part.file.stat(io) catch {
+            part.remove(io, parts);
+            return error.CreateFailed;
+        };
+        if (st.nlink == 0) { // a sweep removed it before the lock was ours
+            part.file.close(io);
+            continue;
+        }
+        return part;
+    }
+    return error.CreateFailed;
+}
+
+/// Remove part files a stopped or crashed rweb left in the folder for unfinished uploads. Only names
+/// of a part file's exact shape, only regular files, and only those nobody holds locked: an upload in
+/// progress in another rweb that uses the same upload folder keeps its lock (`createUploadPart`) and
+/// is left alone, while a process that died released its lock when it did. Returns how many were
+/// removed.
+pub fn sweepUploadParts(io: Io, parts: Io.Dir) usize {
     var n: usize = 0;
-    var it = dir.iterate();
+    var it = parts.iterate();
     while (it.next(io) catch null) |e| {
-        if (e.kind != .file) continue;
-        if (!std.mem.startsWith(u8, e.name, upload_part_prefix) or !std.mem.endsWith(u8, e.name, upload_part_suffix)) continue;
-        dir.deleteFile(io, e.name) catch continue;
+        if (e.kind != .file or !isUploadPartName(e.name)) continue;
+        const f = parts.openFile(io, e.name, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false, .lock = .exclusive, .lock_nonblocking = true }) catch continue; // locked: being written
+        defer f.close(io);
+        parts.deleteFile(io, e.name) catch continue;
         n += 1;
     }
     return n;
@@ -1473,7 +1546,20 @@ pub fn openUploadDir(arena: Allocator, io: Io, path: []const u8, problem: *Probl
     };
     errdefer closeFd(io, fd);
     try checkPrivateDirFdDetailed(arena, io, fd, problem);
-    return .{ .dir = .{ .handle = fd }, .real_path = real_path };
+    // The folder for unfinished uploads, inside it: made if missing, never reached through a link,
+    // ours alone like the folder itself.
+    const parts_path = try std.fs.path.join(arena, &.{ real_path, upload_parts_dir });
+    problem.setPath(parts_path);
+    problem.look(.private_folder);
+    const parts_fd = openFolderAt(io, fd, upload_parts_dir, true) catch |e| {
+        if (e == error.SymLink) noteLink(problem, fd, upload_parts_dir);
+        return e;
+    };
+    errdefer closeFd(io, parts_fd);
+    try checkPrivateDirFdDetailed(arena, io, parts_fd, problem);
+    const dir: Io.Dir = .{ .handle = fd };
+    const parts: Io.Dir = .{ .handle = parts_fd };
+    return .{ .dir = dir, .parts = parts, .real_path = real_path };
 }
 
 /// The program at `path`, checked, and the exact path to run it by. The path is walked and checked
@@ -2966,17 +3052,64 @@ test "no internal error name reaches the user" {
     try testing.expect(std.mem.startsWith(u8, w.buffered(), "rweb: /nowhere can be changed by members of group \""));
 }
 
-test "sweepUploadParts removes only rweb's own part files" {
+test "sweepUploadParts removes only unlocked part files from the folder for unfinished uploads" {
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const d = tmp.dir;
-    for ([_][]const u8{ ".rweb-upload-0123abcd.part", ".rweb-upload-ffff.part", "report.pdf", "notes.part", ".rweb-upload-keep.txt" }) |name| {
+    const left = "0123456789abcdef0123456789abcdef.part";
+    for ([_][]const u8{ left, "report.pdf", "notes.part", "0123.part", "FEDCBA9876543210FEDCBA9876543210.part", ".rweb-upload-0123abcd.part" }) |name| {
         const f = try d.createFile(testing.io, name, .{});
         f.close(testing.io);
     }
-    try d.createDir(testing.io, ".rweb-upload-dir.part", .default_dir);
-    try testing.expectEqual(@as(usize, 2), sweepUploadParts(testing.io, d));
-    for ([_][]const u8{ "report.pdf", "notes.part", ".rweb-upload-keep.txt", ".rweb-upload-dir.part" }) |name| _ = try d.statFile(testing.io, name, .{});
-    try testing.expectError(error.FileNotFound, d.statFile(testing.io, ".rweb-upload-0123abcd.part", .{}));
+    try d.createDir(testing.io, "ffffffffffffffffffffffffffffffff.part", .default_dir);
+    // An upload in progress, as another rweb using this folder would hold it.
+    var live = try createUploadPart(testing.io, d);
+    try testing.expect(isUploadPartName(live.name()));
+    try testing.expectEqual(@as(usize, 1), sweepUploadParts(testing.io, d));
+    try testing.expectError(error.FileNotFound, d.statFile(testing.io, left, .{}));
+    for ([_][]const u8{ "report.pdf", "notes.part", "0123.part", "FEDCBA9876543210FEDCBA9876543210.part", ".rweb-upload-0123abcd.part", "ffffffffffffffffffffffffffffffff.part", live.name() }) |name| _ = try d.statFile(testing.io, name, .{});
     try testing.expectEqual(@as(usize, 0), sweepUploadParts(testing.io, d));
+    // Its writer gone without cleaning up (the lock went with the descriptor): the next sweep takes it.
+    var name_buf: [upload_part_name_len]u8 = undefined;
+    @memcpy(&name_buf, live.name());
+    live.file.close(testing.io);
+    try testing.expectEqual(@as(usize, 1), sweepUploadParts(testing.io, d));
+    try testing.expectError(error.FileNotFound, d.statFile(testing.io, &name_buf, .{}));
+}
+
+test "createUploadPart: a private, locked file under a part name; remove takes it away" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var a = try createUploadPart(testing.io, tmp.dir);
+    var b = try createUploadPart(testing.io, tmp.dir);
+    try testing.expect(!std.mem.eql(u8, a.name(), b.name()));
+    const st = try tmp.dir.statFile(testing.io, a.name(), .{});
+    try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@backingInt(st.permissions))) & 0o777);
+    // Locked: a second open cannot take the lock.
+    try testing.expectError(error.WouldBlock, tmp.dir.openFile(testing.io, a.name(), .{ .lock = .exclusive, .lock_nonblocking = true }));
+    a.remove(testing.io, tmp.dir);
+    b.remove(testing.io, tmp.dir);
+    var it = tmp.dir.iterate();
+    try testing.expect((try it.next(testing.io)) == null);
+}
+
+test "openUploadDir makes the folder for unfinished uploads private, and refuses a link in its place" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", arena);
+    const up_path = try std.fs.path.join(arena, &.{ root, "up" });
+    var problem: Problem = .{};
+    const up = try openUploadDir(arena, testing.io, up_path, &problem);
+    const om = try fdOwnerMode(up.parts.handle);
+    try testing.expectEqual(@as(u32, 0o700), om.mode & 0o777);
+    up.parts.close(testing.io);
+    // A link where that folder should be is never followed.
+    try up.dir.deleteDir(testing.io, upload_parts_dir);
+    try tmp.dir.createDir(testing.io, "elsewhere", .default_dir);
+    try up.dir.symLink(testing.io, "../elsewhere", upload_parts_dir, .{});
+    up.dir.close(testing.io);
+    try testing.expectError(error.SymLink, openUploadDir(arena, testing.io, up_path, &problem));
 }

@@ -346,7 +346,11 @@ each has its own token and its own sign-in, and each `/s/<id>/` address is as se
 user can read (through Rex), and with `--upload-dir DIR` upload into that one folder. rweb makes the
 folder `0700` if it is missing. It must be yours, closed to other users and on a local disk, and the
 folders above it must pass the checks in section 12 ("Files and folders rweb checks"). Uploaded files
-never replace an existing one, and their path is pasted at the prompt. `--max-transfer-mb N` limits the
+never replace an existing one, and their path is pasted at the prompt of the terminal you chose them
+for (if you switch terminals or turn on "View only" while it is on its way, the upload is refused). A
+file appears in the folder only when all of it has arrived and is on disk; until then it is in
+`.rweb-partial/` inside the folder, which is rweb's own (what a stopped rweb left there is removed at
+the next start; do not keep files in it). `--max-transfer-mb N` limits the
 size (default 256). Turn it on only if you want the browser to have that reach. Design and limits:
 [file-transfer.md](file-transfer.md) (in the source repository).
 
@@ -420,6 +424,7 @@ message means a second thing to fix.
 | `cannot find the tailscale program …` or `there is no tailscale program at …` | Tailscale is not where rweb looks (section 4): install it, or pass `--tailscale /absolute/path`. |
 | A message about `the tailscale program` with a `Fix:` line | That program, or a folder above it, can be changed by another account. rweb does not try the other install locations after a refusal: fix that one, or pass `--tailscale` with another. |
 | `cannot read this node's Tailscale …` | Tailscale is down, or not signed in. rweb keeps running and asks again; start Tailscale or sign in. |
+| The page stops loading and the log says `this node's Tailscale addresses have not been confirmed …` | Tailscale has not answered rweb for two and a half minutes, so rweb cannot tell a request from this machine itself and refuses all until it answers. Start Tailscale or sign in; rweb carries on by itself. |
 | `rweb knows none of this node's Tailscale addresses` | Pass them with `--own-address IP` (from `tailscale ip`). |
 | `--owner needs --allow-host NAME` | Add `--allow-host <machine>.<tailnet>.ts.net` (section 4, tagged machines). |
 | `--token: must be at least 32 characters …` | Use `rweb ssh`, which makes a token file, instead of `--token`. |

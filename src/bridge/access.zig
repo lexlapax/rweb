@@ -33,6 +33,10 @@ pub const Config = struct {
     /// This node's own Tailscale addresses, as text.
     own_addresses: []const []const u8 = &.{},
     allow_own_address: bool = false,
+    /// The own addresses are read from Tailscale while running, and have not been confirmed for too
+    /// long (`server.Options.own_address_max_age_ms`): the node may have a new address that is not on
+    /// the list, so the rule cannot be applied and every request it would judge is refused.
+    own_addresses_stale: bool = false,
     /// For a unix listener: the peer uids allowed. Null for a TCP listener (no peer check).
     allowed_peer_uids: ?[]const u32 = null,
     /// Host names (without port) a request may be for. Empty: not checked.
@@ -74,6 +78,8 @@ pub const Refusal = enum {
     bad_forwarded_for,
     /// One of the configured own addresses is not an address: the rule cannot be applied.
     bad_own_address,
+    /// The own addresses could not be confirmed with Tailscale for too long: the rule cannot be applied.
+    own_addresses_stale,
     /// Token mode, and the request carries no token at all (header, query or cookie).
     no_token,
     /// A token in the header or the query, sent by a page of another origin (`Origin`, or
@@ -96,6 +102,7 @@ pub const Refusal = enum {
             .no_forwarded_for => "no X-Forwarded-For",
             .bad_forwarded_for => "X-Forwarded-For is not an address",
             .bad_own_address => "a configured own address is not an address",
+            .own_addresses_stale => "this node's own addresses could not be confirmed with Tailscale for too long",
             .no_token => "no token",
             .cross_site_token => "a token sent from another site",
         };
@@ -216,6 +223,8 @@ pub fn decideAllButToken(cfg: Config, request: Request) Decision {
     }
 
     if (!cfg.allow_own_address and cfg.own_addresses.len > 0) {
+        // A list that may be out of date would silently miss a new address of this node: refuse.
+        if (cfg.own_addresses_stale) return .{ .deny = .own_addresses_stale };
         // A configured address that does not parse would silently match nothing: refuse instead.
         // (Startup already rejects such addresses; this is the second line.)
         for (cfg.own_addresses) |own| if (parseAddress(own) == null) return .{ .deny = .bad_own_address };
@@ -698,4 +707,15 @@ test "address lists compare as sets of addresses" {
     try testing.expect(!sameAddressList(&.{"100.64.0.5"}, &.{ "100.64.0.5", "100.64.0.6" }));
     try testing.expect(!sameAddressList(&.{ "100.64.0.5", "100.64.0.5" }, &.{ "100.64.0.5", "100.64.0.6" }));
     try testing.expect(!sameAddressList(&.{"junk"}, &.{"junk"}));
+}
+
+test "own addresses that could not be confirmed refuse every request the rule would judge" {
+    var h = [_]Header{ .{ .name = "Tailscale-User-Login", .value = owner }, .{ .name = "X-Forwarded-For", .value = "100.64.0.9" } };
+    try testing.expectEqual(Decision.allow, decide(base_cfg, req(&h)));
+    var stale = base_cfg;
+    stale.own_addresses_stale = true;
+    try expectDeny(.own_addresses_stale, stale, req(&h));
+    // Not when the owner has said requests from this node are fine: the list is not used then.
+    stale.allow_own_address = true;
+    try testing.expectEqual(Decision.allow, decide(stale, req(&h)));
 }

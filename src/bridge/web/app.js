@@ -17,6 +17,7 @@ let dbgOn = false;
 
 const state = {
   ws: null, retry: 500, observe: false, locked: false, rexUp: true,
+  viewGen: 0,                             // raised each time the page shows another terminal, or none (keys.js `holdView`)
   tokenMode: K.tokenModeFromPath(location.pathname),   // SSH tunnel (page under /s/<id>/, or `auth: "token"`); see `dropped`
   link: K.LINK_START,                     // {phase, why} of keys.js `linkStep`; loading the page is the first request
   retryTimer: 0,                          // Tailscale mode's backoff before the next connection
@@ -147,26 +148,34 @@ term.onBinary(d => { d = K.stripReplies(d); if (d && canType()) send({t: 'in', d
 // A paste with line ends into a program that has not turned on bracketed paste would run line by
 // line: the bridge refuses it (`confirm_multiline`) and the page asks first (`askMultiline`). The text
 // is kept for that question only until it is answered, the terminal changes, or a few seconds pass.
+// A paste that had to wait (for the clipboard, for the Paste box) comes with the view it was asked in
+// (`held`, from `holdView`) and is sent only if that is still the view on screen; every paste names
+// its terminal, and the bridge refuses one that is not for the terminal it has open.
 const multi = {pending: null, timer: 0};
 function forgetPaste() { multi.pending = null; clearTimeout(multi.timer); }
-function sendPaste(text) {
+function holdView() { return K.holdView(state.current, state.viewGen); }
+function stillView(held) { return K.stillView(held, state.current, state.viewGen); }
+const VIEW_CHANGED = 'Not sent: the terminal on screen changed';
+function sendPaste(text, held) {
   const d = K.cleanPaste(text || '');
   if (!d) return;
+  if (held !== undefined && !stillView(held)) { notice(VIEW_CHANGED); return; }
   if (!canType()) { if (state.current) notice(whyNot()); return; }
+  const view = held || holdView();
   const tooLong = K.pasteRefusal(d);
   if (tooLong) { notice(tooLong); return; }
   if (soft.on) softReset();
   if (/[\r\n]/.test(d)) {
     forgetPaste();
-    multi.pending = {d, session: state.current.session, block: state.current.block};
+    multi.pending = {d, view};
     multi.timer = setTimeout(forgetPaste, 15000);
   }
-  send({t: 'paste', d});
+  send({t: 'paste', d, session: view.session, block: view.block});
 }
 wtermPaste = sendPaste;
 async function askMultiline(msg) {
   const p = multi.pending, dlg = $('mldlg'); forgetPaste();
-  if (!p || !sameTerm(p, state.current)) { notice(msg || 'Paste not sent'); return; }
+  if (!p || !stillView(p.view)) { notice(msg || 'Paste not sent'); return; }
   if (dlg.open) { notice('Paste not sent: answer the open question first'); return; }
   const v = K.pastePreview(p.d);
   const r = await dialogResult(dlg, done => {
@@ -180,8 +189,9 @@ async function askMultiline(msg) {
     setTimeout(() => $('ml-cancel').focus(), 0);     // the safe choice has the focus
   });
   if (r !== 'yes') return;
-  if (!canType() || !sameTerm(p, state.current)) { notice(state.current ? whyNot() : 'Paste not sent: the terminal changed'); return; }
-  send({t: 'paste', d: p.d, force: true});
+  if (!stillView(p.view)) { notice(VIEW_CHANGED); return; }
+  if (!canType()) { notice(whyNot()); return; }
+  send({t: 'paste', d: p.d, force: true, session: p.view.session, block: p.view.block});
 }
 $('term').addEventListener('paste', e => {
   e.preventDefault(); e.stopPropagation();
@@ -276,7 +286,7 @@ function scheduleFit() {
     const d = term.proposeDimensions(stage.clientWidth - 2, stage.clientHeight);
     if (!d || (d.cols === state.cols && d.rows === state.rows)) return;
     const key = d.cols + 'x' + d.rows; if (key === lastFit) return;     // asked already; do not repeat
-    lastFit = key; send({t: 'fit', cols: d.cols, rows: d.rows});
+    lastFit = key; send({t: 'fit', cols: d.cols, rows: d.rows, session: state.current.session, block: state.current.block});
   }, 350);
 }
 function layout() {
@@ -500,11 +510,17 @@ function onError(m) {
       notice(`Refused: ${msg}`); return;
     case 'ls': $('xf-list').setAttribute('aria-busy', 'false'); xfNote(`Cannot list that folder: ${msg}`); return;
     case 'dl': xfNote(`Cannot download: ${msg}`); notice(`Cannot download: ${msg}`); return;
-    case 'ul': ulRefused(msg, m.rate === true); return;
+    case 'ul': ulRefused(m.code === 'stale' ? 'the terminal on screen changed' : msg, m.rate === true); return;
     case 'new_terminal': state.pendingNew = null; break;
     case 'fit': lastFit = ''; break;                 // the next layout may ask again
     case 'info': return;                             // a background poll: the next one tries again
     case 'paste': forgetPaste(); break;
+  }
+  // The bridge has another terminal open for this page than the one the message named, or the page
+  // is one an earlier rweb served (it names none).
+  if (m.code === 'stale') { notice(VIEW_CHANGED); return; }
+  if (m.code === 'reload') { notice('This page is from an earlier rweb: reload it'); return; }
+  switch (f) {
     case 'manage': case 'input': notice(msg); return;
   }
   notice(`${f}: ${msg}`);
@@ -546,7 +562,7 @@ function forgetLast(t) { if (t && sameTerm(LS.get('last', null), t)) LS.set('las
 function showEmpty(text) { forgetLast(state.current); clearView(text); }
 function clearView(text) {
   state.info = null; renderInfo(); forgetPaste(); stopRestore();
-  state.current = null; state.opened = false; state.exited = null;
+  state.current = null; state.opened = false; state.exited = null; state.viewGen++;
   $('stage').hidden = true; $('keys').hidden = true; $('empty').hidden = false; $('empty').textContent = text;
   renderAll(); updateControls(); renderStatus();
 }
@@ -669,7 +685,7 @@ function updateControls() {
 function openBlock(session, block, restoring) {
   lastFit = '';
   if (restoring) startRestore(); else stopRestore();
-  state.current = {session, block}; state.opened = false; state.exited = null; LS.set('last', state.current);
+  state.current = {session, block}; state.opened = false; state.exited = null; state.viewGen++; LS.set('last', state.current);
   forgetPaste();
   term.reset(); clearLatched(); softReset();
   send({t: 'open', session, block});
@@ -736,8 +752,14 @@ $('more').onclick = () => openPop($('more'), pop => {
   item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !ready() || state.observe;
   if (state.canDownload) item(pop, 'Download a file…', () => { closePop(); openFiles(); }, 'pop-dl').disabled = !ready() || state.observe;
   if (state.canUpload) item(pop, 'Upload files…', () => { closePop(); xf.pick = state.current ? {session: state.current.session, block: state.current.block} : null; $('upfile').click(); }, 'pop-ul').disabled = !ready() || state.observe;
-  item(pop, 'Clear screen', () => { closePop(); send({t: 'term_action', action: 'clear'}); }).disabled = !ready() || state.observe;
-  item(pop, 'Reset terminal…', async () => { closePop(); if (await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'}) && ready()) send({t: 'term_action', action: 'reset'}); }).disabled = !ready() || state.observe;
+  item(pop, 'Clear screen', () => { closePop(); if (ready()) send({t: 'term_action', action: 'clear', session: state.current.session, block: state.current.block}); }).disabled = !ready() || state.observe;
+  item(pop, 'Reset terminal…', async () => {
+    closePop();
+    const held = holdView();                         // the terminal the question is about
+    if (!await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'})) return;
+    if (!stillView(held) || !ready()) { notice(VIEW_CHANGED); return; }
+    send({t: 'term_action', action: 'reset', session: held.session, block: held.block});
+  }).disabled = !ready() || state.observe;
   const sz = el('div', 'sizer'); sz.append(el('span', '', 'Text size'));
   const minus = el('button', '', '−'); minus.setAttribute('aria-label', 'Smaller text'); minus.onclick = () => setFontSize(state.fontSize - 1);
   const now = el('span', 'dim', state.fontSize + ' px'); now.id = 'font-now'; now.style.flex = '0 0 auto'; now.style.minWidth = '48px'; now.style.textAlign = 'center';
@@ -749,8 +771,10 @@ $('more').onclick = () => openPop($('more'), pop => {
   if (termKind === 'wterm') { const rt = item(pop, LS.get('rextheme', false) ? 'Use Rex colours: on' : 'Use Rex colours: off', () => { LS.set('rextheme', !LS.get('rextheme', false)); location.reload(); }); rt.setAttribute('role', 'menuitemcheckbox'); }
   item(pop, 'Fit terminal to this window…', async () => {
     closePop();
-    const d = fitAddon.proposeDimensions();
-    if (d && await confirmAction({title: 'Resize the terminal?', message: `Resize it to ${d.cols} × ${d.rows}. It changes for everyone viewing it, including the desktop.`, ok: 'Resize'})) { if (canType()) send({t: 'fit', cols: d.cols, rows: d.rows}); else notice(whyNot()); }
+    const d = fitAddon.proposeDimensions(), held = holdView();
+    if (!d || !held || !await confirmAction({title: 'Resize the terminal?', message: `Resize it to ${d.cols} × ${d.rows}. It changes for everyone viewing it, including the desktop.`, ok: 'Resize'})) return;
+    if (!stillView(held)) { notice(VIEW_CHANGED); return; }
+    if (canType()) send({t: 'fit', cols: d.cols, rows: d.rows, session: held.session, block: held.block}); else notice(whyNot());
   }, 'pop-fit');
   item(pop, 'Load all scrollback', () => { closePop(); send({t: 'more_history'}); }, 'pop-hist');
   { const dg = LS.get('diag', false); const it = item(pop, dg ? 'Touch diagnostics: on' : 'Touch diagnostics: off', () => { LS.set('diag', !dg); location.reload(); }); it.setAttribute('role', 'menuitemcheckbox'); it.setAttribute('aria-pressed', String(dg)); }
@@ -883,11 +907,15 @@ function openCopy(text, truncated, fromProgram) {
   box.focus({preventScroll: true});
   box.scrollTop = box.scrollHeight;
 }
+// The clipboard can take a while (the browser may ask first), and so can the box: the text is for the
+// terminal on screen when Paste was chosen, and goes there or nowhere.
 async function doPaste() {
   if (!canType()) return;
+  const held = holdView();
   let text = '';
   try { text = await navigator.clipboard.readText(); } catch { text = null; }
-  if (text) return sendPaste(text);
+  if (!stillView(held)) { if (text) notice(VIEW_CHANGED); return; }
+  if (text) return sendPaste(text, held);
   if (text === '') return notice('The clipboard is empty');
   const dlg = $('pastedlg'), ta = $('pastetext'); ta.value = '';
   const r = await dialogResult(dlg, done => {
@@ -895,7 +923,7 @@ async function doPaste() {
     dlg.querySelector('form').onsubmit = e => { e.preventDefault(); done(ta.value); };
     setTimeout(() => ta.focus(), 0);
   });
-  if (r) sendPaste(r);
+  if (r) sendPaste(r, held);
 }
 
 // ---- the key row ----
@@ -1003,7 +1031,7 @@ if (startupNote) notice(startupNote);
 // one request to a one-time address; the bridge saves it in its upload folder and pastes the path.
 // Each queued upload is {file, term}: `term` is the terminal shown when the files were chosen (`pick`,
 // set when Upload is chosen from the menu), and the file goes to that terminal or nowhere (H6).
-const xf = {dir: '', home: '', entries: [], hidden: LS.get('showHidden', false), queue: [], current: null, pick: null};
+const xf = {dir: '', home: '', entries: [], hidden: LS.get('showHidden', false), queue: [], current: null, pick: null, view: null};
 
 function fmtSize(n) {
   if (!Number.isFinite(n)) return '';
@@ -1016,12 +1044,19 @@ function joinPath(dir, name) { return dir === '/' || dir === '' ? '/' + name : d
 function parentOf(dir) { const i = dir.lastIndexOf('/'); return i <= 0 ? '/' : dir.slice(0, i); }
 function xfNote(text) { $('xf-note').textContent = text || ''; }
 
+// The picker is for the terminal on screen when it was opened (`xf.view`): it lists and downloads
+// through that terminal, and is closed if another is on screen by the time something in it is asked.
+function xfAsk(msg) {
+  if (!stillView(xf.view)) { if ($('xferdlg').open) $('xferdlg').close(); notice(VIEW_CHANGED); return false; }
+  send({...msg, session: xf.view.session, block: xf.view.block}); return true;
+}
 function openFiles() {
+  xf.view = holdView(); if (!xf.view) return;
   $('xf-hidden').checked = xf.hidden; $('xf-filter').value = ''; xfNote('');
   $('xferdlg').showModal();
   listDir('');
 }
-function listDir(path) { $('xf-list').setAttribute('aria-busy', 'true'); send({t: 'ls', path}); }
+function listDir(path) { if (xfAsk({t: 'ls', path})) $('xf-list').setAttribute('aria-busy', 'true'); }
 
 function renderDir(m) {
   xf.dir = m.path || xf.dir; xf.home = m.home || xf.home; xf.entries = m.entries || [];
@@ -1044,7 +1079,7 @@ function drawDir() {
     b.onclick = () => {
       const full = joinPath(xf.dir, e.n);
       if (e.d) { $('xf-filter').value = ''; listDir(full); }
-      else { send({t: 'dl', path: full}); xfNote(`Asking for ${e.n}…`); }
+      else if (xfAsk({t: 'dl', path: full})) xfNote(`Asking for ${e.n}…`);
     };
     list.append(b);
   }
@@ -1093,7 +1128,7 @@ function pumpUploads(stopped) {
   if (stopped) notice('Upload stopped: you switched terminals');
   if (!xf.queue.length || !canType()) return;
   xf.current = xf.queue.shift();
-  send({t: 'ul', name: xf.current.file.name, size: xf.current.file.size});
+  send({t: 'ul', name: xf.current.file.name, size: xf.current.file.size, session: xf.current.term.session, block: xf.current.term.block});
 }
 // The bridge refused the upload waiting for its token. Refused for the rate, the file goes back to the
 // front of the queue and is asked for again a second later (three times at most); otherwise it is
@@ -1115,8 +1150,8 @@ function putFile(file, token) {
   const done = msg => { notice(msg); xf.current = null; pumpUploads(); };
   req.onload = () => {
     if (req.status !== 200) return done(`Upload of ${file.name} failed (${req.status})`);
-    let name = file.name; try { name = JSON.parse(req.responseText).name || name; } catch {}
-    done(`Uploaded ${name}: its path is at the prompt`);
+    let name = file.name, pasted = true; try { const r = JSON.parse(req.responseText); name = r.name || name; pasted = r.pasted !== false; } catch {}
+    done(pasted ? `Uploaded ${name}: its path is at the prompt` : `Uploaded ${name} to the upload folder; its path was not typed (this page no longer writes to that terminal)`);
   };
   req.onerror = () => done(`Upload of ${file.name} failed`);
   req.send(file);

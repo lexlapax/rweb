@@ -197,11 +197,12 @@
   // The bridge takes at most PASTE_MAX_BYTES of text in one paste, in a message of at most
   // MESSAGE_MAX_BYTES; a larger message would close the connection. Returns the notice to show
   // instead of sending, or null when the paste fits.
-  const PASTE_MAX_BYTES = 32 * 1024, MESSAGE_MAX_BYTES = 64 * 1024;
+  const PASTE_MAX_BYTES = 32 * 1024, MESSAGE_MAX_BYTES = 64 * 1024, ID_MAX_BYTES = 200;
   function pasteRefusal(d) {
     const bytes = utf8Length(d);
     if (bytes > PASTE_MAX_BYTES) return `Too long to paste: ${Math.ceil(bytes / 1024)} KB; the limit is ${PASTE_MAX_BYTES / 1024} KB`;
-    if (utf8Length(JSON.stringify({t: 'paste', d: String(d), force: true})) > MESSAGE_MAX_BYTES)
+    // With the longest names a terminal can have: the message says which terminal the paste is for.
+    if (utf8Length(JSON.stringify({t: 'paste', d: String(d), force: true, session: 'x'.repeat(ID_MAX_BYTES), block: 'x'.repeat(ID_MAX_BYTES)})) > MESSAGE_MAX_BYTES)
       return `Too long to paste: its control characters make it more than ${MESSAGE_MAX_BYTES / 1024} KB to send`;
     return null;
   }
@@ -267,6 +268,16 @@
   // ---- which terminal a message is about ----
   // Terminals are named by `session` and `block` (compared as strings: ids may come as numbers).
   function sameTerm(a, b) { return !!a && !!b && String(a.session) === String(b.session) && String(a.block) === String(b.block); }
+  // Something the person asks for can wait before it is sent: for the clipboard, for an answer to a
+  // question. (Uploads wait too, for their turn; they follow their terminal, not the view: see
+  // `partitionUploads`.) It was asked of the terminal on screen then, so it is held with
+  // that view (`holdView`): the terminal and `gen`, a count the page raises each time it shows another
+  // terminal or none. When the wait is over it is sent only if that view is still the one on screen
+  // (`stillView`); a switch away and back is another view, and what was asked before it is not sent.
+  // The message names the terminal too (`session`, `block`), and the bridge refuses one that is not
+  // for the terminal it has open for this page.
+  function holdView(current, gen) { return current ? {session: current.session, block: current.block, gen} : null; }
+  function stillView(held, current, gen) { return !!held && held.gen === gen && sameTerm(held, current); }
   // Whether a message that names a terminal (an `open` refusal, `closed`) is about `current`, the
   // terminal the page shows. A late one for a terminal the page has left since must not clear the one
   // it shows now (H3). A field the message leaves out is not compared; a message that names no
@@ -358,7 +369,7 @@
   function tokenModeFrom(wasTokenMode, mode) { return wasTokenMode === true || (!!mode && mode.auth === 'token'); }
   function tokenModeFromPath(pathname) { return /^\/s\/[A-Za-z0-9_-]+\//.test(String(pathname || '')); }
 
-  const api = {linkStep, LINK_START, waitText, looksLikeRweb, tokenModeFrom, tokenModeFromPath, sameTerm, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {linkStep, LINK_START, waitText, looksLikeRweb, tokenModeFrom, tokenModeFromPath, sameTerm, holdView, stillView, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);
