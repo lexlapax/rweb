@@ -30,7 +30,7 @@ def text(path):
 ghostty = one("zig-pkg/ghostty-*/LICENSE").rsplit("/", 1)[0]
 zr = zig_root()
 parts = [
-    ("Ghostty (libghostty-vt)", "MIT", "Linked into the binary; also the source of `ghostty-vt.wasm` in the page.", f"{ghostty}/LICENSE"),
+    ("Ghostty (libghostty-vt)", "MIT", "Linked into the binary. The page's `ghostty-vt.wasm` is a prebuilt WebAssembly build of Ghostty's terminal code taken as shipped in the `@wterm/ghostty` 0.6.0 package; that package does not record which Ghostty version it was built from.", f"{ghostty}/LICENSE"),
     ("simdutf", "Apache-2.0 or MIT; used under MIT", "Linked into the binary (vendored in Ghostty).", f"{ghostty}/pkg/simdutf/vendor/LICENSE-MIT"),
     ("Highway", "Apache-2.0 or BSD-3-Clause; used under BSD-3-Clause", "Linked into the binary.", one("zig-pkg/*/LICENSE-BSD3")),
     ("Wuffs", "MIT and Apache-2.0", "Linked into the binary.", one("zig-pkg/*/LICENSE-MIT").rsplit("/", 1)[0] + "/LICENSE"),
@@ -40,7 +40,7 @@ parts = [
     ("Zig standard library and runtime", "MIT", "Compiled into the binary.", f"{zr}/LICENSE"),
     ("musl libc", "MIT", "Linked into the Linux binary only.", f"{zr}/lib/zig/libc/musl/COPYRIGHT"),
     ("xterm.js 6.0.0 and its fit addon", "MIT", "Served by the binary to the browser.", "src/bridge/web/vendor/LICENSE-xterm.txt"),
-    ("wterm 0.6.0", "Apache-2.0", "Served by the binary to the browser.", "src/bridge/web/vendor/LICENSE-wterm.txt"),
+    ("wterm 0.6.0", "Apache-2.0", "Served by the binary to the browser. `wterm.js` is a bundle of `@wterm/dom`, `@wterm/core` and `@wterm/ghostty` 0.6.0 and carries, base64-encoded inside it, a second WebAssembly module from those packages (55,081 bytes, SHA-256 `471458b178f3dae014ce4e87278b4bdc4f33220be2bd6ca36ad7de8b2f6de57f`).", "src/bridge/web/vendor/LICENSE-wterm.txt"),
 ]
 out = ["# Third-party notices", "",
        "The rweb binary contains or serves the software below. Each entry gives its licence and the",

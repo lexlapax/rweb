@@ -11,14 +11,16 @@ Contents: [1 What you need](#1-what-you-need) · [2 Install](#2-install) ·
 [5 Run behind Tailscale on Linux](#5-run-behind-tailscale-on-linux) ·
 [6 Run behind Tailscale on macOS](#6-run-behind-tailscale-on-macos) · [7 SSH tunnel](#7-ssh-tunnel) ·
 [8 Several machines](#8-several-machines) · [9 Using the page](#9-using-the-page) ·
-[10 File transfer](#10-file-transfer-off-by-default) · [11 Upgrade](#11-upgrade-and-roll-back) ·
-[12 Troubleshooting](#12-troubleshooting)
+[10 File transfer](#10-file-transfer-off-by-default) ·
+[11 Upgrade, stop or remove](#11-upgrade-roll-back-stop-or-remove) ·
+[12 Troubleshooting](#12-troubleshooting) · [13 Advanced: every option](#13-advanced-every-option)
 
 ## 1. What you need
 
 - **A machine running Rex**, Linux (x86-64) or macOS (Apple silicon), with the Rex server running for your
-  user. rweb does not start Rex. It finds Rex's socket in `$XDG_RUNTIME_DIR/rex/` or `/run/user/<uid>/rex/`
-  (Linux) or `~/Library/Application Support/Rex/` (macOS); `--rex-socket PATH` names another place.
+  user. rweb does not start Rex. It finds Rex's socket in `~/Library/Application Support/Rex/` (macOS),
+  `$XDG_RUNTIME_DIR/rex/` or `/run/user/<uid>/rex/`; `--rex-socket PATH` names another place. If Rex is
+  not running when rweb starts, rweb waits for it (section 12).
   Windows is not supported yet; it will come later.
 - **A way in**: Tailscale on the Rex machine and on your phone or laptop (section 4), or SSH access to the
   Rex machine (section 7).
@@ -38,22 +40,48 @@ rweb --version
 The checksums catch a damaged or incomplete download. They do not prove that nobody changed the release:
 `SHA256SUMS` comes from the same place as the archives, so whoever could change one could change both.
 
-The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README, the changelog, the
-licence (MIT) and the third-party notices. `rweb --version` shows the version, the commit it was built from, and the Rex
-API revisions it speaks. To build from source instead: `zig build -Doptimize=ReleaseSafe` with Zig 0.17.1 (see the README).
+The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README and its logo
+(`assets/logo/`), the changelog, the licence (MIT) and the third-party notices. `rweb --version` shows the
+version, the commit it was built from, and the Rex API revisions it speaks. To build from source instead:
+`zig build -Doptimize=ReleaseSafe` with Zig 0.17.1 (see the README).
 
 ## 3. Choose how to reach it
 
 rweb never listens on the network. It listens on a unix socket or on loopback, and something you trust
-brings your browser to it:
+brings your browser to it. There is one command for each way:
 
-| | Tailscale Serve | SSH tunnel |
+| | `rweb tailscale` | `rweb ssh` |
 | --- | --- | --- |
 | Who is let in | your own Tailscale login, checked on every request | whoever has the token |
-| From a phone | the Tailscale app; open an `https://` address | an SSH app that forwards ports |
+| From a phone | the Tailscale app; open an `https://` address | an SSH app that forwards ports to a unix socket |
 | Address | `https://<machine>.<tailnet>.ts.net:<port>/`, the same everywhere | `http://127.0.0.1:<port>/` on the device running the tunnel |
 | Needs | Tailscale on both ends | SSH access to the Rex machine |
-| Best for | everyday use, phones | no Tailscale, or occasional use from a laptop |
+| Best for | everyday use, phones | no Tailscale, or occasional use from a laptop nobody else uses |
+
+`rweb` alone prints these two commands; `rweb --help` lists every option.
+
+**What the commands set up.** Each command chooses where rweb listens, makes the files it needs and
+prints the one step that is left (a `tailscale serve` line, or an `ssh` line for your laptop). rweb keeps
+its files in `<config>`, which is `$XDG_CONFIG_HOME/rweb` when that is set, else `~/.config/rweb`. A
+missing secret or token is made there (32 random bytes, mode `0600`) and missing folders are made `0700`;
+an existing file is never replaced. You do not make secrets or folders by hand. Two options apply to both
+commands:
+
+- `--config-dir PATH` puts `<config>` somewhere else (an absolute path). Use it when your home folder is
+  on a network disk, which rweb does not trust (section 12, "Files and folders rweb checks").
+- `--port N`: for `rweb ssh`, the port on your laptop in the printed `ssh` line (default 7700); for
+  `rweb tailscale` on macOS, the loopback port Serve forwards to (default 7695).
+
+**Starting before Rex or Tailscale.** rweb takes its socket or port first and keeps it. If Tailscale or
+Rex is not up yet (at boot, say), rweb does not exit: it says so once a minute and asks again until they
+answer. Until Rex has answered, a browser that connects gets no reply and waits.
+
+**What "your own Tailscale login" covers.** Every device signed in to Tailscale as you, and every account
+and program on those devices: Tailscale names the person, not the app or the local user. If you sign in to
+Tailscale as yourself on a shared computer, a server or a build machine, anything running there can reach
+rweb as you. Keep your login on devices only you use, or limit who can reach the rweb port with
+Tailscale's access rules (grants that let only your phone and laptop reach port 12443 on the Rex
+machine), and consider Tailnet Lock.
 
 ## 4. Tailscale setup
 
@@ -68,8 +96,8 @@ Do this once per tailnet, then once per machine.
    valid certificate.
 3. **Linux only:** Tailscale 1.94 or newer, which can forward to a unix socket (setting that up needs
    root). Check with `tailscale version`.
-4. **Where rweb finds `tailscale`.** rweb runs it to learn your login and the machine's own addresses,
-   from fixed places only, never through `PATH`: on macOS the app's own program
+4. **Where rweb finds `tailscale`.** rweb runs it to learn your login, the machine's name and the
+   machine's own addresses, from fixed places only, never through `PATH`: on macOS the app's own program
    (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`), then `/usr/local/bin/tailscale` and
    `/opt/homebrew/bin/tailscale`; on Linux `/usr/bin/tailscale`, `/usr/local/bin/tailscale` and
    `/usr/sbin/tailscale`. Elsewhere, pass `--tailscale /absolute/path`. The program and every folder above
@@ -79,10 +107,9 @@ Do this once per tailnet, then once per machine.
    user.
 
 **Tagged machines.** If the Rex machine is a tagged device (a server or gateway added with a tag, shown
-under its tags in the admin console), it has no owner login, so `--owner-from-tailscale` cannot work and
-rweb refuses to start with it. Name yourself instead: replace `--owner-from-tailscale` with
-`--owner you@example.com --allow-host <machine>.<tailnet>.ts.net` (your Tailscale login and the machine's
-own name) in sections 5 and 6. rweb refuses `--owner` without `--allow-host`.
+under its tags in the admin console), it has no owner login, and rweb stops with a message that says so.
+Name yourself instead: `rweb tailscale --owner you@example.com --allow-host <machine>.<tailnet>.ts.net`
+(your Tailscale login and the machine's own name). rweb refuses `--owner` without `--allow-host`.
 
 Keep **Funnel off** for rweb's port: Funnel would publish it on the internet, and rweb refuses every
 request that comes through Funnel anyway. Devices that are tagged, or shared into your tailnet by someone
@@ -91,10 +118,21 @@ devices to reach the Rex machine on the port you choose below.
 
 ## 5. Run behind Tailscale on Linux
 
-rweb listens on a unix socket in a directory only you can enter and accepts connections only from root,
-which is `tailscaled`. No other program on the machine, not even one running as you, can use it.
+`rweb tailscale` listens on the unix socket `$XDG_RUNTIME_DIR/rweb/bridge.sock`, in a folder only you can
+enter, and accepts connections only from root, which is `tailscaled`. No other program on the machine,
+not even one running as you, can use it. It takes the owner from the machine's own Tailscale login.
 
-As a systemd user service, `~/.config/systemd/user/rweb.service`:
+Try it in a terminal first:
+
+```sh
+rweb tailscale
+```
+
+It prints the `sudo tailscale serve …` line to run once and the address to open. Run that line in another
+terminal, then open the address on your phone or laptop (from **another device**: a request from the Rex
+machine itself is refused, because any program there could make it). Stop rweb with Ctrl-C.
+
+To keep it running, a systemd user service, `~/.config/systemd/user/rweb.service`:
 
 ```ini
 [Unit]
@@ -104,10 +142,8 @@ After=rex.service
 Wants=rex.service
 
 [Service]
-RuntimeDirectory=rweb
-RuntimeDirectoryMode=0700
-ExecStart=%h/.local/bin/rweb --listen-unix %t/rweb/bridge.sock --owner-from-tailscale
-# At boot Tailscale or Rex may not be up yet: rweb exits and is started again.
+ExecStart=%h/.local/bin/rweb tailscale
+# rweb waits for Tailscale and Rex by itself; this restarts it only if it stops.
 Restart=always
 RestartSec=5
 UMask=0077
@@ -120,34 +156,45 @@ WantedBy=default.target
 ```sh
 systemctl --user daemon-reload && systemctl --user enable --now rweb
 sudo loginctl enable-linger "$USER"      # start at boot, before you log in
-sudo tailscale serve --bg --https=12443 "unix:/run/user/$(id -u)/rweb/bridge.sock"
-tailscale serve status                   # shows the address to open
+journalctl --user -u rweb -n 20          # the Serve line and the address, if you have not run it yet
+tailscale serve status                   # what Serve forwards
 ```
 
-Any free port works instead of 12443 (`tailscale serve status` lists those in use). Tailscale stores the
-Serve entry and keeps it across reboots, so you set it up once.
+The printed line uses port 12443; any free port works instead (change the number after `--https=`;
+`tailscale serve status` lists those in use). Tailscale stores the Serve entry and keeps it across
+reboots, so you set it up once; section 11 says how to remove it.
 
 ## 6. Run behind Tailscale on macOS
 
-The Tailscale app cannot forward to a unix socket, so rweb listens on loopback. Any local program could
-send a loopback request carrying your identity headers, so rweb also requires a long secret as the first
-part of every path, which only Tailscale Serve knows; it refuses to start on loopback with an owner rule
-and no secret.
+The Tailscale app cannot forward to a unix socket, so `rweb tailscale` listens on loopback,
+`127.0.0.1:7695` (and `[::1]:7695`, so `localhost` cannot lead to another program). Any local program
+could send a loopback request carrying your identity headers, so rweb also requires a long secret as the
+first part of every path, which only Tailscale Serve knows. rweb makes that secret in
+`<config>/backend-secret` the first time it starts.
 
 **Use this layout only on a Mac where you are the only local account.** The secret is part of the Serve
 target, so other accounts on the Mac may be able to read it in `tailscale serve status`, or in the
-process list while the `tailscale serve` command runs. With it, another account could send requests with
-your identity to rweb. On a Mac shared with other accounts, do not run rweb this way.
+process list while the `tailscale serve` command runs. And while rweb is not running (before you log in,
+after you log out, while it restarts), another account could listen on its port and receive your requests,
+the secret included. With the secret, another account could send requests with your identity to rweb. On a
+Mac shared with other accounts, do not run rweb this way. When you stop using rweb for a while, remove
+the Serve entry (section 11); if you ever see the page fail for no reason you know, make a new secret
+(remove `<config>/backend-secret`, restart rweb and run the printed Serve line again).
+
+Try it in a terminal first:
 
 ```sh
-mkdir -p ~/.config/rweb
-(umask 077; head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > ~/.config/rweb/backend-secret)
+rweb tailscale
 ```
 
-rweb reads the secret only from a file that is yours and closed to others, in folders that are yours or the
-system's and not writable by others (`~/.config/rweb` made as above is fine).
+It prints the `tailscale serve …` line to run once (the line reads the secret from its file, so the secret
+itself is never printed) and the address to open. Run that line in another terminal, then open
+`https://<machine>.<tailnet>.ts.net:12443/` on your phone or laptop. Open it from **another device**: a
+request from the Rex machine itself is refused, because any program there could make it. Stop rweb with
+Ctrl-C. `--port N` chooses another loopback port.
 
-As a LaunchAgent, `~/Library/LaunchAgents/local.rweb.plist` (replace `YOU` with your user name):
+To keep it running, a LaunchAgent, `~/Library/LaunchAgents/local.rweb.plist` (replace `YOU` with your
+user name):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -157,9 +204,7 @@ As a LaunchAgent, `~/Library/LaunchAgents/local.rweb.plist` (replace `YOU` with 
   <key>Label</key><string>local.rweb</string>
   <key>ProgramArguments</key><array>
     <string>/Users/YOU/.local/bin/rweb</string>
-    <string>--listen-tcp</string><string>7695</string>
-    <string>--owner-from-tailscale</string>
-    <string>--backend-secret-file</string><string>/Users/YOU/.config/rweb/backend-secret</string>
+    <string>tailscale</string>
   </array>
   <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/rweb.log</string>
   <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/rweb.log</string>
@@ -173,60 +218,81 @@ As a LaunchAgent, `~/Library/LaunchAgents/local.rweb.plist` (replace `YOU` with 
 
 ```sh
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.rweb.plist
-tailscale serve --bg --https=12443 "http://127.0.0.1:7695/$(cat ~/.config/rweb/backend-secret)"
+tail -20 ~/Library/Logs/rweb.log         # the Serve line and the address, if you have not run it yet
 ```
 
 rweb does not need `PATH` (it finds `tailscale` in fixed places, section 4). A LaunchAgent starts when
-you log in, which is when Rex.app runs; with FileVault on, nothing of yours runs until you have unlocked the disk after a restart.
-
-Then open `https://<machine>.<tailnet>.ts.net:12443/` on your phone or laptop. Open it from **another
-device**: a request from the Rex machine itself is refused, because any program there could make it.
+you log in, which is when Rex.app runs; with FileVault on, nothing of yours runs until you have unlocked
+the disk after a restart.
 
 ## 7. SSH tunnel
 
-Without Tailscale, run rweb on loopback with a token and forward a port to it over SSH. The token is the
-only thing standing between a process that can reach the port and your Rex sessions, so keep it in a
-file only you can read and never pass it on the command line. Make it with the command below, which picks
-a random one; do not make one up. The token file's folders must be yours or the system's and not writable
-by others.
+Without Tailscale, `rweb ssh` listens on a unix socket on the Rex machine that only your own user can
+connect to, and SSH forwards a port on your device to it. A token is what stands between a program that
+can reach that port and your Rex sessions. rweb makes the token (random, in `<config>/token`, readable
+only by you) the first time it starts; do not make one up, and never pass it on a command line.
 
-On the Rex machine (Linux or macOS):
+Why a unix socket and not a port on the Rex machine: a port is free while rweb is not running, and on a
+machine with other accounts another user could take it then and receive your token. A socket in a folder
+only you can open cannot be taken.
 
-```sh
-mkdir -p ~/.config/rweb
-(umask 077; head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > ~/.config/rweb/token)
-rweb --listen-tcp 7700 --token-file ~/.config/rweb/token
-```
-
-To keep it running, use the service files from section 5 or 6 with this command line instead (on Linux,
-drop `RuntimeDirectory=`; on macOS, replace the arguments).
-
-On the laptop or phone:
+On the Rex machine (on macOS, turn on Remote Login in System Settings → General → Sharing first):
 
 ```sh
-ssh -N -L 7700:127.0.0.1:7700 you@rex-machine
+rweb ssh
 ```
 
-Then open `http://127.0.0.1:7700/?token=<the token>` in that device's browser. rweb moves you to
-`http://127.0.0.1:7700/s/<id>/` and the token into a session cookie for that path only, and removes it from
-the address. Bookmark that address: later visits in the same browser session need no token, and the
-`<id>` stays the same while the token file does. After the browser forgets the cookie, open the address
-with the token again. The cookie is never sent to other web services on your device, even ones on other
-`127.0.0.1` ports. The token file may hold only letters, digits, `-` and `_` (the command above makes such
-a token). On a phone, use an SSH app that supports local port forwarding and keep it open
-while you use the page. Keep the forwarded port on loopback (no `-g`, no `GatewayPorts`), or other devices
-on that network could reach it.
+It prints two things: the `ssh` line to run on your laptop, with the socket's path and this machine's
+user and host name filled in, and the command that shows the token. The socket is
+`$XDG_RUNTIME_DIR/rweb/ssh.sock` on Linux and `<config>/run/ssh.sock` on macOS. The printed line looks
+like this:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+    -L 127.0.0.1:7700:/run/user/1000/rweb/ssh.sock you@rex-machine
+```
+
+Use the name or address your laptop reaches the Rex machine by if it differs from the one printed. Keep
+the `127.0.0.1:` in front of the port, and keep `ExitOnForwardFailure=yes`: if another program already
+holds the port, ssh then stops with an error instead of running without a tunnel. `rweb ssh --port N`
+prints another laptop port. On a phone, use an SSH app that can forward a local port to a remote unix
+socket, and keep it open while you use the page.
+
+To keep rweb running, use the service file from section 5 or 6 with `ssh` in place of `tailscale`.
+
+**Signing in.** Open `http://127.0.0.1:7700/` (use `127.0.0.1`, not `localhost`). The page shows a token
+form. On the Rex machine, `cat` the token file rweb named at startup (`~/.config/rweb/token` unless you
+moved `<config>`) and paste its contents into the form. The token is sent once, in a request header,
+never in the address, so it does not end up in the browser's history or synced address suggestions. rweb
+moves you to `http://127.0.0.1:7700/s/<id>/` with the token in a session cookie for that path only.
+Bookmark that address: later visits in the same browser session need no token. After the browser forgets
+the cookie, sign in with the form again. (Opening `http://127.0.0.1:7700/?token=<the token>` also works,
+but leaves the token in the history.)
+
+**If the tunnel drops** (sleep, a network change), the page shows **Disconnected** and a **Reconnect**
+button instead of retrying by itself: whatever holds the port after a drop gets nothing unless you ask.
+Restart the tunnel first, then tap Reconnect; each tap makes one attempt.
+
+**A known limit: use the tunnel only on devices nobody else uses.** The page is plain HTTP on loopback,
+and plain HTTP cannot prove who is answering. Cookies are not tied to a port: a browser sends
+`127.0.0.1`'s cookies to whatever program holds port 7700 at that moment. What limits the token's cookie
+is its path: it is sent only for addresses under `/s/<id>/`, which other local services do not know. So:
+
+- another web service on another port of `127.0.0.1` does not receive the cookie, as long as nothing
+  sends your browser to that port with the `/s/<id>/` path;
+- a program that holds port 7700 on your device while the tunnel is down receives the cookie when you
+  reload the page or tap Reconnect, and could show a look-alike token form at `/` and receive the token
+  you paste.
+
+`ExitOnForwardFailure=yes` makes ssh refuse to start when the port is already held, and the page does not
+reconnect by itself, but neither can tell you who answers. Use the tunnel only on devices other people do
+not log in to, and on a phone, with apps you trust. Where that is not so, use Tailscale (section 4).
 
 Treat the `/s/<id>/` address like the token. The `<id>` is made from the token, and with it someone can
-test guesses of the token on their own machine; that is why the token must be random. Do not share the
-address or post screenshots that show it. The first address, with `?token=`, can stay in the browser's
-history and address suggestions: open it once per browser, or delete it from the history afterwards. To
-change the token, write a new token file with the same command and restart rweb; the old token and the
-old `/s/<id>/` address then stop working.
-
-For a quick test, `--random-token` makes a token for that run only and prints the address with it, but
-only when rweb runs in a terminal. A token given with `--token` must be at least 16 characters of letters,
-digits, `-` and `_`; it shows in the process list, so prefer the token file.
+test guesses of the token on their own machine; that is why the token is random and at least 32
+characters. Do not share the address or post screenshots that show it. To change the token, remove
+`<config>/token` and restart rweb: it makes a new one, and the old token and the old `/s/<id>/` address
+stop working.
 
 ## 8. Several machines
 
@@ -239,9 +305,9 @@ https://server.<tailnet>.ts.net:12443/    sessions on server
 ```
 
 Bookmark each, or add each to the phone's home screen. With SSH tunnels give each machine its own local
-port (`-L 7701:127.0.0.1:7700 you@desk`, `-L 7702:127.0.0.1:7700 you@server`) and its own token; each keeps
-its own sign-in, and each `/s/<id>/` address is as secret as its token (section 7). Rex sessions on one
-machine are not visible through another machine's rweb.
+port (`rweb ssh --port 7701` on desk, `rweb ssh --port 7702` on server, each printing its own `ssh` line);
+each has its own token and its own sign-in, and each `/s/<id>/` address is as secret as its token
+(section 7). Rex sessions on one machine are not visible through another machine's rweb.
 
 ## 9. Using the page
 
@@ -267,70 +333,174 @@ machine are not visible through another machine's rweb.
   clipboard suggestion, say) is treated as a paste too. If the text has several lines and the program has
   not turned on bracketed paste (plain `sh`, an old shell, some REPLs), each line would run as it arrives,
   so the page shows the text and asks first (the page goes by what the program announced: a program that
-claims bracketed paste and does not handle it is not caught). A paste is at most 32 KB. "Text copied in the terminal" shows
-  what a program put on the clipboard, without control characters; any program can set it.
-- **Reconnecting** is automatic: after sleep or a network change the page reconnects and redraws.
+  claims bracketed paste and does not handle it is not caught). A paste is at most 32 KB. "Text copied in
+  the terminal" shows what a program put on the clipboard, without control characters; any program can
+  set it.
+- **Reconnecting.** Behind Tailscale it is automatic: after sleep or a network change the page reconnects
+  and redraws. Through an SSH tunnel the page shows **Disconnected** and waits for you to tap
+  **Reconnect** (section 7).
 
 ## 10. File transfer (off by default)
 
-`--enable-file-transfer` lets the page download any file your user can read (through Rex), and with
-`--upload-dir DIR` upload into that one folder. The folder and every folder above it must be yours or the
-system's and not writable by others. Uploaded files never replace an existing one, and their
-path is pasted at the prompt. `--max-transfer-mb N` limits the size (default 256). Turn it on only if you
-want the browser to have that reach. Design and limits: [file-transfer.md](file-transfer.md) (in the
-source repository).
+`--enable-file-transfer` (added to `rweb tailscale` or `rweb ssh`) lets the page download any file your
+user can read (through Rex), and with `--upload-dir DIR` upload into that one folder. rweb makes the
+folder `0700` if it is missing. It must be yours, closed to other users and on a local disk, and the
+folders above it must pass the checks in section 12 ("Files and folders rweb checks"). Uploaded files
+never replace an existing one, and their path is pasted at the prompt. `--max-transfer-mb N` limits the
+size (default 256). Turn it on only if you want the browser to have that reach. Design and limits:
+[file-transfer.md](file-transfer.md) (in the source repository).
 
-## 11. Upgrade and roll back
+## 11. Upgrade, roll back, stop or remove
 
 Read [CHANGELOG.md](../CHANGELOG.md), install the new archive over `~/.local/bin/rweb` (keep the old binary
 if you may want it back), then restart rweb: `systemctl --user restart rweb` on Linux,
 `launchctl kickstart -k "gui/$(id -u)/local.rweb"` on macOS. Restarting rweb does not touch your Rex
-sessions, and open pages reconnect. The Serve entry, the secret and the token stay as they are.
+sessions; pages behind Tailscale reconnect by themselves, and a page through an SSH tunnel waits for a
+tap on Reconnect. The Serve entry, the secret and the token stay as they are.
 
-Upgrading to 0.1.1: rweb now checks more at startup and stops with a message naming what to fix (see
-section 12). It refuses `--owner` without `--allow-host`, a `--token` shorter than 16 characters or with
-other characters than letters, digits, `-` and `_`, and a secret file, token file or upload folder that is a
-link or sits under a folder another user can change. If you made those files as this guide says, nothing
-changes. Address the SSH tunnel through the `/s/<id>/` address it redirects to (section 7). A
-`--listen-unix` path must be absolute and pass through no links, and `tailscale` must be in one of the
-places section 4 lists, or named with `--tailscale`.
+**Upgrading to 0.1.1.** A service that starts rweb with the 0.1.0 options (`--listen-unix`,
+`--listen-tcp`, `--owner-from-tailscale`, `--backend-secret-file`, `--token-file` and the rest) keeps
+working: they are all still there (section 13). You can move to `rweb tailscale` or `rweb ssh` when it
+suits you; on Linux and macOS `rweb tailscale` uses the same socket, port and secret file as the 0.1.0
+guide did, so the Serve entry stays valid. What 0.1.1 refuses that 0.1.0 accepted, each with a message
+that names what to fix (section 12):
+
+- A token shorter than 32 characters, in a token file or with `--token` (0.1.0 accepted 16), or one with
+  characters other than letters, digits, `-` and `_`. A token made as the 0.1.0 guide said is long enough.
+- `--owner` without `--allow-host`.
+- A secret file, token file, upload folder, socket folder or `tailscale` program that another user could
+  change or replace. In particular: a folder above it that its group can write to (no group is trusted
+  any more, not even a group that holds only you; `chmod g-w` the folder), and a network disk or a disk a
+  user mounted (move rweb's files to a local disk with `--config-dir`, or name local paths).
+- A `--listen-unix` path that is not absolute.
+
+What 0.1.1 does differently:
+
+- rweb no longer exits when Tailscale or Rex is not up at start. It keeps its socket or port and asks
+  again, so a service no longer restarts in a loop at boot.
+- Through an SSH tunnel: sign in with the token form at `/` and use the `/s/<id>/` address it leads to
+  (section 7); after a drop the page waits for a tap on Reconnect; the documented setup is a unix socket
+  on the Rex machine, not a port. A `--listen-tcp` port with a token still works and prints a warning.
+- `tailscale` must be in one of the places section 4 lists, or named with `--tailscale`.
+
+To stop rweb for good, or for a long time, remove what points at it as well as rweb itself, so nothing
+keeps sending your requests to a port or socket nobody serves:
+
+```sh
+tailscale serve --https=12443 off                          # the Serve entry (use your port; Linux: sudo)
+systemctl --user disable --now rweb                        # Linux
+sudo loginctl disable-linger "$USER"                       # Linux, if nothing else needs it
+launchctl bootout "gui/$(id -u)/local.rweb"                # macOS
+rm ~/Library/LaunchAgents/local.rweb.plist                 # macOS
+rm -f ~/.config/rweb/backend-secret ~/.config/rweb/token   # the secret and the token
+rm -rf ~/.config/rweb/run                                  # macOS: the folder of rweb ssh's socket
+rm ~/.local/bin/rweb
+```
+
+`tailscale serve --https=12443 off` removes only that entry; `tailscale serve reset` removes every Serve
+entry on the machine, rweb's or not. When you have only tried rweb in a terminal, stop it with Ctrl-C and
+remove the Serve entry the same way, or set up the service from section 5 or 6.
 
 ## 12. Troubleshooting
 
 Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.log` (macOS LaunchAgent).
+When rweb refuses to start, its message names what is wrong and, for a file or folder, ends with a
+`Fix:` line holding the command or change that puts it right. Run it and start rweb again; a second
+message means a second thing to fix.
 
 | You see | Why, and what to do |
 | --- | --- |
-| `cannot find Rex's socket` | Rex is not running, or its socket is elsewhere: start Rex, or pass `--rex-socket`. |
-| `this node is a tagged Tailscale device` | Use `--owner` and `--allow-host` instead of `--owner-from-tailscale` (section 4, tagged machines). |
-| `cannot find tailscale in …` | Tailscale is not where rweb looks (section 4): pass `--tailscale /absolute/path`. |
-| `will not run tailscale at …` | That program, or a folder above it, can be changed by another account (see below). rweb does not try the other install locations after a refusal: fix that one, or pass `--tailscale` with another. |
-| `cannot tell this node's Tailscale addresses` | Tailscale is down, or not signed in. |
-| `cannot reach Rex at …: WrongPeer` | The socket rweb found is served by another user, not your Rex: rweb refuses it. Check `--rex-socket` and `XDG_RUNTIME_DIR`. |
+| A message about a file or folder (the token file, the backend secret, the upload folder, the socket's folder, the `tailscale` program, or a folder above one of them), with a `Fix:` line | Another user could read, change or replace it: it is too open, not yours, a link where rweb follows none, has an access list entry for someone else, or is on a disk rweb does not trust. Do what the `Fix:` line says. The rules are below. |
+| `… is on a network disk` (or a FUSE filesystem, a disk image, a disk a user mounted) | rweb keeps its files only on local disks. `rweb tailscale --config-dir /local/path` (or `rweb ssh --config-dir …`) moves them; for an upload folder or socket, name a local path. |
+| `Rex is not running: …` | rweb found no Rex socket, or nothing answers on it. rweb keeps running and asks again; start Rex, or pass `--rex-socket PATH` if the socket is elsewhere. Until Rex answers, the page does not load. |
+| The page never loads right after rweb started | The same: rweb holds its socket or port but answers nothing until Rex is up. Check the log. |
+| `the socket … is served by another user` | The Rex socket rweb found does not belong to your user: rweb refuses it. Check `--rex-socket` and `XDG_RUNTIME_DIR`. |
+| `Rex … speaks an API revision this rweb does not` | Rex is newer or older than this rweb supports (`rweb --version` shows the range): update rweb or Rex. |
+| `this node is a tagged Tailscale device` | Use `--owner` and `--allow-host` (section 4, tagged machines). |
+| `cannot find the tailscale program …` or `there is no tailscale program at …` | Tailscale is not where rweb looks (section 4): install it, or pass `--tailscale /absolute/path`. |
+| A message about `the tailscale program` with a `Fix:` line | That program, or a folder above it, can be changed by another account. rweb does not try the other install locations after a refusal: fix that one, or pass `--tailscale` with another. |
+| `cannot read this node's Tailscale …` | Tailscale is down, or not signed in. rweb keeps running and asks again; start Tailscale or sign in. |
+| `rweb knows none of this node's Tailscale addresses` | Pass them with `--own-address IP` (from `tailscale ip`). |
 | `--owner needs --allow-host NAME` | Add `--allow-host <machine>.<tailnet>.ts.net` (section 4, tagged machines). |
-| `--token must be at least 16 characters` | Use a token file made with the command in section 7 instead. |
-| `cannot use secret file …` or `cannot use upload folder …` | The message names the file or folder and the folder where the check failed. `SymLink`: point the option at the real file. `TooOpen` or `NotOwned`: `chmod 600` the file (`700` a folder) and make sure it is yours. `FolderWritableByOthers`, `FolderWritableByGroup` or `FolderNotOurs`: a folder above it can be changed by another user (see below); move the file somewhere under your home folder. `AclGivesOthersWrite`, `AclGivesOthersAccess` or `AclUnreadable`: an access control list lets another user in (`getfacl` on Linux, `ls -le` on macOS shows it; remove that entry). `FuseFilesystem`, `MountNotOurs` or `MountIgnoresOwnership`: it is on a file system another user controls; use a folder on your own disk. |
-| `--listen-unix … need an absolute path`, `SymLink`, `SocketDirNotOurs` or `SocketDirNotPrivate` | The unix socket's path must be absolute with no links on it (on macOS `/tmp` is a link), in a `0700` folder of yours, under folders only you or root can change; use the runtime folder from section 5. |
+| `--token: must be at least 32 characters …` | Use `rweb ssh`, which makes a token file, instead of `--token`. |
+| A token file that `is too short` or `holds characters other than …` | A token is at least 32 letters, digits, `-` and `_`. Remove the file and start `rweb ssh` again: it makes a new one. |
+| `another program is already listening on …` | Another rweb is running, or another program holds the port: stop it, or choose another port (`--port N`) or socket. |
+| `… is too long for a unix socket` | A unix socket's path may be about 100 characters. Choose a shorter `--config-dir` (macOS `rweb ssh`) or `--listen-unix` path. |
+| `… exists and is not a socket` | Something else sits at the socket's path; rweb never replaces it. Move it away. |
+| `HOME is not set …` | rweb cannot tell where `<config>` is: set `HOME` or pass `--config-dir PATH`. |
+| `made a random token; it is not shown …` | `--random-token` (or `--listen-tcp` with no access rule) shows its address only in a terminal, never in a log. Use `rweb ssh`. |
 | The page keeps reconnecting while others work | rweb takes at most 32 browser connections at once and answers more with 503 "too many viewers"; close other tabs. |
-| 403 "request from this node's own address" | You opened the page on the Rex machine itself. Use another device. |
-| 403 from your phone through Tailscale | The phone is signed in to a different Tailscale account, or is a tagged or shared device. |
-| 403 through an SSH tunnel | No token or the wrong one: open `http://127.0.0.1:<port>/?token=<token>` once. |
-| 404 for everything (macOS, Tailscale) | Serve does not point at the current secret: run the `tailscale serve` line again. |
+| 403 from your phone through Tailscale | The phone is signed in to a different Tailscale account, or is a tagged or shared device; or you opened the page on the Rex machine itself (use another device). The log line `refused: …` says which. |
+| The token form says "Wrong token" | Paste the whole contents of the token file (section 7), with nothing added. |
+| 429, or the form says "Too many attempts" | More than 10 wrong tokens were tried in a minute. Wait a minute. |
+| **Disconnected**, with a Reconnect button (SSH tunnel) | The tunnel dropped. Start it again, then tap Reconnect (section 7). |
+| 404 for everything (macOS, Tailscale) | Serve does not point at the current secret: run the `tailscale serve` line rweb printed again. |
 | The browser cannot connect at all | Tailscale: `tailscale serve status` on the Rex machine. SSH: is the tunnel still open? |
 | Sessions do not appear | rweb cannot reach Rex, or Rex refused its API revision: check the log and `rweb --version`. |
 | Typing does nothing | View only is on (⋯ menu), or rweb runs with `--observe-only`. |
 
-`rweb --help` lists every option.
+**Files and folders rweb checks.** The backend secret, the token file, the upload folder, the unix
+socket's folder and the `tailscale` program must be such that no other account could change them. The
+rules:
 
-**Files and folders rweb checks.** The secret file, the token file, the upload folder, the unix socket's
-folder and the `tailscale` program must be such that no other account could change them: each is opened
-without following links and checked on what was opened, and every folder above it must belong to you or
-root and not be writable by others (a sticky folder such as `/tmp` is fine). A folder its group can write
-to is fine only when that group holds nobody but you: on Linux, your own group of one (named like you, with
-no other members, on a system whose accounts all come from `/etc/passwd` and `/etc/group`); on macOS, a
-group with no other member, or the `admin` group, whose members can become root anyway. Access control
-lists count too: an entry that lets another user change one of these (or read a private one) is refused,
-while entries that only deny (such as macOS's default on your home folder) are fine. A file system another
-user mounted (FUSE on Linux, a disk image on macOS) or one that ignores ownership is refused. Network file
-systems (NFS, SMB) are judged by what they report locally; their server's own permissions are not visible.
+- **The item itself.** A secret or token is a regular file of yours, mode `0600`. The upload folder and
+  the socket's folder are yours, mode `0700`. None of them may be a link. The `tailscale` program is
+  root's or yours and not writable by anyone else.
+- **Every folder above it**, up to `/`, belongs to you or root and is not writable by others (a sticky
+  folder such as `/tmp` is fine).
+- **No group is trusted.** A folder or program its group can write to is refused, even when that group
+  holds only you: who is in a group cannot be known for certain. The one exception is macOS's `admin`
+  group, whose members can become root anyway, and only for folders above an item and for programs; a
+  secret, token, upload folder or socket folder may be open to no group at all.
+- **Access control lists count too.** An entry that lets another user or a group change one of these (or
+  read a private one) is refused; entries that only deny (such as macOS's default on your home folder)
+  are fine.
+- **Local disks only.** Network file systems (NFS, SMB), FUSE, a disk image, a disk a user mounted, a
+  volume that ignores ownership, and a filesystem rweb does not know are refused: on those, someone else
+  decides who owns and reads the files. If your home folder is on a network disk, use `--config-dir`.
+- **Links.** A link on the path is followed only when root or you own it and the folder it sits in has
+  passed the checks; the walk continues from where it leads (so macOS's `/tmp` and `/var` work). The item
+  itself is opened without following a link and checked on what was opened.
+
 rweb also checks that the Rex socket it connects to is served by your own user.
+
+## 13. Advanced: every option
+
+`rweb tailscale` and `rweb ssh` are the supported setups. Everything they set can also be given by hand,
+for unusual setups and for services written for rweb 0.1.0; these options still work, alone or added to
+a command (an option given overrides what the command would set). `rweb --help` is the full list.
+
+What the two commands are equal to:
+
+```sh
+# rweb tailscale, Linux
+rweb --listen-unix "$XDG_RUNTIME_DIR/rweb/bridge.sock" --owner-from-tailscale
+# rweb tailscale, macOS (rweb tailscale also makes the secret file)
+rweb --listen-tcp 7695 --owner-from-tailscale --backend-secret-file ~/.config/rweb/backend-secret
+# rweb ssh, Linux (rweb ssh also makes the token file; macOS: ~/.config/rweb/run/ssh.sock)
+rweb --listen-unix "$XDG_RUNTIME_DIR/rweb/ssh.sock" --allow-peer-uid self --token-file ~/.config/rweb/token
+```
+
+With the options alone, rweb makes no secret or token: a file you name must exist, be yours, mode `0600`
+and hold at least 32 letters, digits, `-` or `_`.
+
+- **Where it listens.** `--listen-unix PATH` (absolute; the socket is made `0600` in a `0700` folder of
+  yours) or `--listen-tcp PORT` (loopback only, `127.0.0.1` and `::1`; `0` picks a port). A port is free
+  while rweb is not running, so on a machine with other accounts prefer a socket.
+- **Who gets in.** `--owner-from-tailscale`, or `--owner LOGIN` with `--allow-host NAME`; or
+  `--token-file PATH`. `--allow-peer-uid N|self` says which local users may connect to a unix socket
+  (default: root, which is `tailscaled`; `rweb ssh` sets `self`). `--backend-secret-file PATH` is needed
+  with an owner rule on a TCP port. `--own-address IP` names this machine's Tailscale addresses when
+  rweb should not ask `tailscale ip` (it asks at start and every minute after).
+- **Rex and Tailscale.** `--rex-socket PATH`, `--tailscale PATH`.
+- **What the page may do.** `--observe-only`, `--history-lines N` (default 1000),
+  `--enable-file-transfer`, `--upload-dir PATH`, `--max-transfer-mb N` (section 10).
+- **Diagnostics.** `--enable-lab`, `--debug-input` (logs what browsers send, typed text included).
+- **For tests only, never in a service.** `--token TOKEN` (visible in the process list), `--random-token`
+  (a token for one run, shown only in a terminal), `--allow-own-address` and
+  `--allow-forgeable-loopback-identity` (each removes a protection; `rweb --help` says which).
+
+A token on a loopback port (`--listen-tcp 7700 --token-file …` with
+`ssh -L 127.0.0.1:7700:127.0.0.1:7700`) still works, and rweb holds the port from the moment it starts,
+but the port is free while rweb is not running: use it only on a Rex machine where you are the only
+account. rweb prints a warning when it runs that way.

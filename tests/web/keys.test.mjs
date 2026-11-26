@@ -332,3 +332,183 @@ test('queued uploads for a terminal the page has left are dropped, not sent to t
   assert.deepEqual(K.partitionUploads([{file: 'x'}], a), {keep: [], drop: [{file: 'x'}]});   // no terminal: never sent
   assert.deepEqual(K.partitionUploads([], a), {keep: [], drop: []});
 });
+
+// ---- E4, M2: in token mode, one connection attempt per request ----
+// Runs events through linkStep from the page's start, as app.js does, and returns each step's result.
+function run(tokenMode, events) {
+  let s = K.LINK_START;
+  return events.map(ev => { const r = K.linkStep(s, ev, tokenMode); s = {phase: r.phase, why: r.why}; return r; });
+}
+
+test('token mode: page load connects once; a drop waits for a tap', () => {
+  const r = run(true, ['open', 'close']);
+  assert.deepEqual(r[0], {phase: 'open', why: null, act: 'none'});
+  assert.deepEqual(r[1], {phase: 'waiting', why: 'dropped', act: 'none'});
+  assert.equal(K.waitText(r[1].why), 'Disconnected. Restart the SSH tunnel, then reconnect.');
+});
+
+test('token mode: a tap makes one attempt; if it fails the page waits again, no timer armed', () => {
+  const r = run(true, ['open', 'close', 'ask', 'close']);
+  assert.deepEqual(r[2], {phase: 'trying', why: null, act: 'connect'});
+  assert.deepEqual(r[3], {phase: 'waiting', why: 'failed', act: 'none'});        // not 'retry'
+  assert.equal(K.waitText(r[3].why), 'Could not connect. Is the SSH tunnel running?');
+  // A page load that cannot connect at all waits the same way.
+  assert.deepEqual(run(true, ['close'])[0], {phase: 'waiting', why: 'failed', act: 'none'});
+  // Taps after failures: each one attempt, never a retry.
+  const many = run(true, ['close', 'ask', 'close', 'ask', 'close']);
+  assert.ok(many.every(x => x.act !== 'retry'));
+  assert.deepEqual(many.map(x => x.act), ['none', 'connect', 'none', 'connect', 'none']);
+});
+
+test('token mode: a tap, an open, then a drop waits again', () => {
+  const r = run(true, ['close', 'ask', 'open', 'close']);
+  assert.deepEqual(r[2], {phase: 'open', why: null, act: 'none'});
+  assert.deepEqual(r[3], {phase: 'waiting', why: 'dropped', act: 'none'});
+  // A late close while waiting changes nothing.
+  assert.deepEqual(run(true, ['open', 'close', 'close'])[2], {phase: 'waiting', why: 'dropped', act: 'none'});
+});
+
+test('token mode: a first message that is not rweb\'s closes and waits', () => {
+  const r = run(true, ['open', 'foreign', 'close']);
+  assert.deepEqual(r[1], {phase: 'waiting', why: 'foreign', act: 'none'});
+  assert.deepEqual(r[2], {phase: 'waiting', why: 'foreign', act: 'none'});
+  assert.equal(K.waitText('foreign'), 'This does not look like rweb. Check the SSH tunnel.');
+});
+
+test('Tailscale mode reconnects by itself, as before', () => {
+  for (const mode of [false, undefined, 'yes']) {
+    const r = run(mode, ['open', 'close', 'close', 'open', 'close']);
+    assert.deepEqual(r.map(x => x.act), ['none', 'retry', 'retry', 'none', 'retry']);
+    assert.ok(r.every(x => x.phase !== 'waiting'));
+  }
+  assert.equal(run(false, ['ask'])[0].act, 'connect');                // the menu's Reconnect
+  assert.equal(run(false, ['open', 'foreign'])[1].phase, 'open');      // the check is token mode's only
+});
+
+test('token mode: the first message must be a well-formed rweb mode message', () => {
+  const ok = {t: 'mode', observe: false, locked: false, rex_up: true, download: false, upload: false, debug: false, auth: 'token'};
+  assert.equal(K.looksLikeRweb(JSON.stringify(ok)), true);
+  assert.equal(K.looksLikeRweb(JSON.stringify({...ok, auth: undefined})), false);      // a Tailscale-mode bridge
+  assert.equal(K.looksLikeRweb(JSON.stringify({...ok, auth: 'tailscale'})), false);
+  assert.equal(K.looksLikeRweb(JSON.stringify({...ok, t: 'tree'})), false);
+  assert.equal(K.looksLikeRweb(JSON.stringify({...ok, rex_up: 'yes'})), false);
+  assert.equal(K.looksLikeRweb(JSON.stringify({t: 'mode', auth: 'token'})), false);
+  assert.equal(K.looksLikeRweb('HTTP/1.1 200 OK'), false);
+  assert.equal(K.looksLikeRweb('[]'), false);
+  assert.equal(K.looksLikeRweb('null'), false);
+  assert.equal(K.looksLikeRweb(new ArrayBuffer(4)), false);
+  assert.equal(K.looksLikeRweb(undefined), false);
+});
+
+test('token mode is known from the page address before any connection', () => {
+  assert.equal(K.tokenModeFromPath('/s/AbC-_09/'), true);
+  assert.equal(K.tokenModeFromPath('/s/AbC/ws'), true);
+  assert.equal(K.tokenModeFromPath('/'), false);
+  assert.equal(K.tokenModeFromPath('/secret/'), false);
+  assert.equal(K.tokenModeFromPath('/x/s/abc/'), false);
+});
+
+test('token mode comes from the mode message and stays', () => {
+  assert.equal(K.tokenModeFrom(false, {t: 'mode', auth: 'token'}), true);
+  assert.equal(K.tokenModeFrom(false, {t: 'mode'}), false);
+  assert.equal(K.tokenModeFrom(false, {t: 'mode', auth: 'tailscale'}), false);
+  assert.equal(K.tokenModeFrom(false, null), false);
+  // A later mode message without `auth` (whatever answered a reconnect) does not undo it.
+  assert.equal(K.tokenModeFrom(true, {t: 'mode'}), true);
+  assert.equal(K.tokenModeFrom(true, null), true);
+});
+
+// ---- P6: the token form ----
+const L = createRequire(import.meta.url)('../../src/bridge/web/login.js');
+const ORIGIN = 'http://127.0.0.1:7700';
+
+test('the token form takes rweb tokens and trims a pasted one', () => {
+  assert.deepEqual(L.cleanToken('  abcDEF0123-_xyz \n'), {token: 'abcDEF0123-_xyz'});
+  assert.ok(L.cleanToken('').msg);
+  assert.ok(L.cleanToken('   ').msg);
+  assert.ok(L.cleanToken(undefined).msg);
+  // Nothing a header could not carry, or that rweb never issues, is sent.
+  for (const bad of ['a b', 'tok;en', 'tök', 'a\r\nX-Evil: 1', 'a/b', '🙂']) assert.ok(L.cleanToken(bad).msg, bad);
+});
+
+test('the token form follows only a redirect to this origin\'s page', () => {
+  assert.deepEqual(L.loginResult(200, ORIGIN + '/s/abc123/', ORIGIN), {go: ORIGIN + '/s/abc123/'});
+  assert.deepEqual(L.loginResult(200, ORIGIN + '/s/a-b_C/?x=1#y', ORIGIN), {go: ORIGIN + '/s/a-b_C/'});
+  // Not the page: the login page again, another path, another origin, an unparsable address.
+  for (const url of [ORIGIN + '/', ORIGIN + '/s/abc', ORIGIN + '/s/abc/ws', ORIGIN + '/s//', ORIGIN + '/x/s/abc/',
+    'http://127.0.0.1:7701/s/abc/', 'https://127.0.0.1:7700/s/abc/', 'http://evil.example/s/abc/', '', 'not a url']) {
+    const r = L.loginResult(200, url, ORIGIN);
+    assert.equal(r.go, undefined, url);
+    assert.ok(r.msg, url);
+  }
+});
+
+test('the token form says why a token was refused', () => {
+  assert.deepEqual(L.loginResult(403, ORIGIN + '/', ORIGIN), {msg: 'Wrong token'});
+  assert.deepEqual(L.loginResult(429, ORIGIN + '/', ORIGIN), {msg: 'Too many attempts; wait a minute'});
+  assert.match(L.loginResult(500, ORIGIN + '/', ORIGIN).msg, /HTTP 500/);
+  assert.equal(L.loginResult(0, '', ORIGIN).go, undefined);
+});
+
+// The form itself, run as login.html runs it (a plain script), with a stand-in page and fetch.
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+const LOGIN_SRC = readFileSync(new URL('../../src/bridge/web/login.js', import.meta.url), 'utf8');
+function loginPage(answer) {
+  const els = {
+    token: {value: '', focused: 0, focus() { this.focused++; }},
+    'login-msg': {textContent: ''},
+  };
+  const button = {disabled: false};
+  let onSubmit = null;
+  els.login = {addEventListener(ev, f) { if (ev === 'submit') onSubmit = f; }, querySelector: () => button};
+  const calls = [], replaced = [], logged = [];
+  const ctx = {
+    document: {getElementById: id => els[id] || null},
+    location: {origin: ORIGIN, replace: u => replaced.push(u)},
+    fetch: async (url, opts) => { calls.push({url, opts}); return answer(url, opts); },
+    console: new Proxy({}, {get: () => (...a) => logged.push(a)}),
+    URL,
+  };
+  ctx.window = ctx;
+  vm.runInNewContext(LOGIN_SRC, ctx);
+  return {els, button, calls, replaced, logged, ctx,
+    async submit(value) { els.token.value = value; let prevented = false; await onSubmit({preventDefault() { prevented = true; }}); return prevented; }};
+}
+
+test('the token form sends the token once, in a header, and opens the page', async () => {
+  const p = loginPage(async () => ({status: 200, url: ORIGIN + '/s/abc123/'}));
+  assert.ok(await p.submit('tok-123_abcdefghijklmnop'));
+  assert.equal(p.calls.length, 1);
+  const {url, opts} = p.calls[0];
+  assert.equal(url, '/');
+  assert.deepEqual({...opts.headers}, {'rweb-token': 'tok-123_abcdefghijklmnop'});
+  assert.equal(opts.redirect, 'follow');
+  assert.equal(opts.credentials, 'same-origin');
+  assert.equal(p.els.token.value, '');                       // cleared
+  assert.deepEqual(p.replaced, [ORIGIN + '/s/abc123/']);     // no token in the address
+  assert.deepEqual(p.logged, []);
+  assert.ok(!JSON.stringify(p.replaced).includes('tok-123'));
+});
+
+test('the token form shows refusals and keeps no token', async () => {
+  for (const [status, text] of [[403, 'Wrong token'], [429, 'Too many attempts; wait a minute']]) {
+    const p = loginPage(async () => ({status, url: ORIGIN + '/'}));
+    await p.submit('tok-123_abcdefghijklmnop');
+    assert.equal(p.els['login-msg'].textContent, text);
+    assert.equal(p.els.token.value, '');
+    assert.equal(p.button.disabled, false);
+    assert.deepEqual(p.replaced, []);
+    assert.deepEqual(p.logged, []);
+  }
+  // A network failure, and a token rweb never issues (nothing sent).
+  const down = loginPage(async () => { throw new TypeError('Failed to fetch'); });
+  await down.submit('tok-123_abcdefghijklmnop');
+  assert.equal(down.els['login-msg'].textContent, 'Could not reach rweb');
+  assert.equal(down.button.disabled, false);
+  const odd = loginPage(async () => { throw new Error('must not be called'); });
+  await odd.submit('not a token');
+  assert.equal(odd.calls.length, 0);
+  assert.equal(odd.els.token.value, '');
+  assert.match(odd.els['login-msg'].textContent, /Wrong token/);
+});

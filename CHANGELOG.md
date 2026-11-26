@@ -29,10 +29,10 @@ the Rex API revisions it speaks.
 - `tools/release.sh` refuses a release folder that is a link or another user's, and makes its own
   private (`0700`) before building in it.
 - The page has a logo: a favicon, home-screen icons for iOS and Android with a web app manifest (added to
-  a home screen, it opens without the browser's bars), and the logo before the title while no terminal
-  is open. Sources and rules: `assets/logo/`.
+  a home screen, it opens without the browser's bars), and the logo at the left of the header. Sources
+  and rules: `assets/logo/`.
 
-From the second review (details: `docs/security-review-2026-11-25-round2.md`):
+From the second review (details: `docs/security-review-2026-11-25-round2.md`, in the source repository):
 
 - Fixed a deadlock: a management action (new session, rename) racing the first open of a session could
   hang the bridge. Fixed use-after-free crashes when a terminal closed (its shell exited) while a browser
@@ -80,7 +80,7 @@ From the second review (details: `docs/security-review-2026-11-25-round2.md`):
 - `tools/release.sh` will not overwrite a version it already built; `tools/dist.sh` removes its stage
   after packing.
 
-From the third review (details: `docs/security-review-2026-11-25-round3.md`):
+From the third review (details: `docs/security-review-2026-11-25-round3.md`, in the source repository):
 
 - Fixed: an open refused by the rate limit left the bridge on the old terminal while the page showed the
   new one, so typing could go to a terminal not on screen. A refused open now also leaves the old
@@ -98,12 +98,13 @@ From the third review (details: `docs/security-review-2026-11-25-round3.md`):
 - Pastes: a multi-line paste into a program without bracketed paste asks first; the bridge also removes
   ESC and C1; text a phone keyboard inserts in one go is treated as a paste; a paste over 32 KB is refused
   with a message; program-set clipboard text is shown without control characters.
-- The unix socket: an absolute path with no links, every folder above it checked, the folder kept open,
-  and the socket removed at shutdown only if it is still rweb's. Rex's socket must be served by your own
+- The unix socket: an absolute path, every folder above it checked, the folder kept open, and the socket
+  removed at shutdown only if it is still rweb's. (Links on the path: see the fifth review below.) Rex's socket must be served by your own
   user, and on macOS the app's socket is tried first. `tailscale` is run from `--tailscale PATH` or fixed
   locations, never from `PATH`, and must pass the same folder checks. The upload folder is created only
   after its parent folders pass, and the real path is pasted.
-- Folder checks accept a group-writable folder whose group holds only you, and macOS's `admin` group.
+- Folder checks accept macOS's `admin` group. (They also accepted a group-writable folder whose group
+  holds only you; the fifth review removed that, see below.)
 - The Rex client: a frame is written whole even if its task is cancelled; closing during a reconnect
   returns at once; a stream that breaks the protocol ends instead of resuming forever; message limits
   from the first read (64 KiB in handshakes, 1 MiB per data message); a fired handshake deadline fails
@@ -115,7 +116,7 @@ From the third review (details: `docs/security-review-2026-11-25-round3.md`):
   folder.
 - Docs name reviewers generically.
 
-From the fourth review (details: `docs/security-review-2026-11-25-round4.md`):
+From the fourth review (details: `docs/security-review-2026-11-25-round4.md`, in the source repository):
 
 - Fixed: pastes containing characters such as `’ “ — € ß`, Cyrillic, emoji or much CJK text were mangled
   or lost by the bridge's paste cleaning (it removed UTF-8 continuation bytes); and a race between the
@@ -125,9 +126,8 @@ From the fourth review (details: `docs/security-review-2026-11-25-round4.md`):
   scrollback to 10,000 rows and 32 MiB, and redraws and Copy text to fixed byte budgets (a redraw carries
   less history rather than more memory).
 - Access control lists are checked (Linux POSIX ACLs and macOS ACLs) on the secret files, the upload and
-  socket folders, the `tailscale` program and the folders above them; group-writable folders pass on Linux
-  only for your own group of one, with all accounts in the local files; file systems another user mounts
-  are refused; `tailscale` is run by exactly the path that was checked, and a refused install location is
+  socket folders, the `tailscale` program and the folders above them; file systems another user mounts
+  are refused (the group and disk rules were tightened again in the fifth review, below); `tailscale` is run by exactly the path that was checked, and a refused install location is
   final.
 - Writes to Rex have deadlines; an idle terminal's stream is resumed rather than restarted after repeated
   drops; typed input is never cut inside an SS3 key or an X10 mouse report.
@@ -146,6 +146,59 @@ From the fourth review (details: `docs/security-review-2026-11-25-round4.md`):
   labels and hidden dialogs; typing right after switching terminals reaches the new terminal.
 - README: "About this project"; `CONTRIBUTING.md`. Vendored browser code: what is and is not known about
   its provenance is recorded, and a rebuild from recorded sources is planned for Phase 6.
+
+From the fifth review (details: `docs/security-review-2026-11-26-round5.md`, in the source repository):
+
+- Two commands set rweb up, one for each supported way in. `rweb tailscale`: behind Tailscale Serve,
+  only your own Tailscale login (Linux: the unix socket `$XDG_RUNTIME_DIR/rweb/bridge.sock`; macOS:
+  `127.0.0.1:7695` behind a secret). `rweb ssh`: for an SSH tunnel, a unix socket only your own user can
+  connect to and a token. Each makes what it needs (a missing secret or token, 32 random bytes, mode
+  `0600`; missing folders `0700`; nothing existing is replaced), keeps it in `$XDG_CONFIG_HOME/rweb` or
+  `~/.config/rweb`, and prints the one step left: the `tailscale serve` line, or the `ssh` line for your
+  laptop. `--config-dir PATH` moves the files; `--port N` changes the port. `rweb` alone prints a short
+  help. The 0.1.0 options all still work, alone or added to a command; `rweb --help` lists them under
+  "Advanced" and the test-only ones under "For tests".
+- Every refusal at startup is a plain sentence that names what is wrong, and for a file or folder a
+  `Fix:` line with the command that puts it right. Internal error names no longer appear.
+- rweb takes its socket or port first and keeps it. When Tailscale or Rex is not up at start it no longer
+  exits: it says so, at most once a minute, and asks again. Requests wait unanswered until Rex is up. A
+  socket path too long for the system is refused before anything is made.
+- A loopback port is held on `[::1]` as well as `127.0.0.1`, so `localhost` cannot lead to another
+  account's listener; a port taken on either is refused with a message.
+- SSH tunnel: the documented setup is a unix socket on the Rex machine (a port there is free while rweb
+  is down, and another account could take it and receive the token). A token on a `--listen-tcp` port
+  still works and prints a warning.
+- SSH tunnel: the page at `/` is a token form. The token is sent once in a request header, never in the
+  address, and the answer is the redirect to `/s/<id>/` with the cookie. `/?token=` still works.
+- SSH tunnel: after a dropped connection the page shows "Disconnected" and a Reconnect button instead of
+  retrying by itself, and each tap makes one attempt, so nothing is sent to whatever holds the port
+  unless you ask. Behind Tailscale the page reconnects by itself as before.
+- Behind a token, rweb answers only for `127.0.0.1`, `localhost` and `[::1]` unless `--allow-host` says
+  otherwise, and refuses a token that arrives from another website, even a right one (a link on another
+  site cannot sign you in; type or bookmark the address).
+- Wrong tokens are limited: after 10 in a minute, wrong tokens get 429 until the minute ends. A right
+  token is never refused, and a web page on another site cannot use up the allowance.
+- **Upgrade note:** a token must be at least 32 characters (0.1.0 accepted 16), in a token file and with
+  `--token`.
+- **Upgrade note:** no group is trusted. A folder or program its group can write to is refused, on Linux
+  and macOS, even when the group holds only you; the message gives the `chmod g-w` that fixes it. macOS's
+  `admin` group passes only for folders above an item and for programs. A secret, token, upload folder or
+  socket folder may have no access list entry for any group.
+- **Upgrade note:** only local disks are trusted. A secret, token, upload folder, socket folder or
+  `tailscale` program on a network disk (NFS, SMB), a FUSE filesystem, a disk image, a disk a user
+  mounted or a filesystem rweb does not know is refused. With a home folder on a network disk, use
+  `--config-dir`.
+- Links on a checked path are followed only when root or you own them and the folder they sit in has
+  passed its checks; the item itself is never opened through a link.
+- This machine's own Tailscale addresses are read again every minute while rweb runs, so a request from
+  a new address of the machine is refused too. Startup messages no longer suggest `--allow-own-address`.
+- Docs: the user guide is written around the two commands, with the options in "Advanced: every option";
+  what "your login" covers (every device and account signed in to Tailscale as you); how to stop or
+  remove rweb; the tunnel's known limit (plain HTTP on loopback cannot prove who is answering: use it
+  only on devices nobody else uses).
+- README: "About this project" says the project was built with AI coding assistants.
+- Release archives include the README's logo (`assets/logo/`); the third-party notices record what is
+  known about each vendored file's provenance.
 
 ## 0.1.0 (2026-11-25, built and installed; not published)
 

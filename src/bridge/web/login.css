@@ -1,0 +1,12 @@
+:root { color-scheme: dark; --bg: #181818; --fg: #ececec; --dim: #9aa3ad; --line: #2c323b; --accent: #3fb950; --bad: #f3b1b4; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
+main { box-sizing: border-box; max-width: 26rem; margin: 12vh auto 0; padding: 0 16px; }
+h1 { font-size: 1.4rem; margin: 0 0 1rem; }
+form { display: grid; gap: 8px; }
+input, button { font: inherit; color: var(--fg); border-radius: 6px; padding: 8px 10px; min-height: 40px; box-sizing: border-box; }
+input { background: #101010; border: 1px solid var(--line); width: 100%; }
+input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+button { background: #232830; border: 1px solid var(--line); cursor: pointer; }
+#login-msg { min-height: 1.4em; margin: 0; }
+.dim { color: var(--dim); font-size: 13px; }
+code { font-family: ui-monospace, monospace; }

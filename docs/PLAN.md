@@ -43,7 +43,8 @@ network.
 - The bridge has the user's full Rex access, so it must authenticate browsers itself:
   - Listen on a unix socket (mode 0600, directory 0700) that Tailscale Serve proxies to, and
     accept only peers with uid 0 (tailscaled). On desktop-mac, where Tailscale.app cannot use a
-    unix socket, the bridge listens on loopback TCP instead.
+    unix socket, the bridge listens on loopback TCP instead. For an SSH tunnel (`rweb ssh`, since
+    round 5) the unix socket accepts only the bridge's own user, and a token is required.
   - Require `Tailscale-User-Login` to equal the configured owner; reject any request carrying
     `Tailscale-Funnel-Request`; reject requests whose `X-Forwarded-For` is one of the node's own
     Tailscale addresses unless that machine's setting allows them; check `Origin` against
@@ -226,6 +227,18 @@ Exit: each machine in scope serves rweb after a reboot, recorded in setup-repo.
 Release builds go first to the owner's own machines (Phase 5), then to other people (Phase 6).
 Before either: the owner's open feedback items ([feedback.md](feedback.md)) and the name.
 
+### Owner's decisions (2026-11-26), from the fifth review
+
+Record: [security-review-2026-11-26-round5.md](security-review-2026-11-26-round5.md).
+
+| Decision | Choice |
+| --- | --- |
+| Command line | Redesigned with sane security defaults: one command per supported layout (`rweb tailscale`, `rweb ssh`) that makes its own secret, token and folders and prints the one step left. Every refusal says in plain words what is wrong and the fix. No flag that loosens a check is added. The existing options stay, under "Advanced". This brings forward part of Phase 6's "Generalise" (no config file yet). |
+| SSH tunnel | A unix socket on the Rex machine, not a port; a token form instead of a token in the address; in token mode a dropped page reconnects only on a tap. |
+| Groups | No group is trusted, on Linux or macOS (the round-3 decision "private groups pass" is withdrawn). macOS `admin` passes only for folders above an item and for programs. |
+| Disks | Local disks only: network, FUSE, user-mounted and unknown filesystems are refused; `--config-dir` moves rweb's files. |
+| README | "About this project" states that the project was built with AI coding assistants; it is the only such mention (AGENTS.md). |
+
 ### Phase 5: release builds for the owner's machines
 
 0. **Name: decided 2026-11-25, the owner keeps `rweb`**, described as "a web client for Rex (not
@@ -256,7 +269,10 @@ Before either: the owner's open feedback items ([feedback.md](feedback.md)) and 
    phase5-result.md. Before it, two independent reviews (release readiness, security) and their fixes:
    [release-review-2026-11-25.md](release-review-2026-11-25.md); then a rescan and an internal adversarial
    review, fixed by mechanism: [security-review-2026-11-25-round2.md](security-review-2026-11-25-round2.md),
-   then a third round: [security-review-2026-11-25-round3.md](security-review-2026-11-25-round3.md)). A GitHub Release on the private repository (the owner approves each release);
+   then a third round: [security-review-2026-11-25-round3.md](security-review-2026-11-25-round3.md),
+   a fourth with the live test: [security-review-2026-11-25-round4.md](security-review-2026-11-25-round4.md),
+   and a fifth, which redesigned the command line: [security-review-2026-11-26-round5.md](security-review-2026-11-26-round5.md);
+   its live run on macOS and Linux and its simulator and phone tests come before the release). A GitHub Release on the private repository (the owner approves each release);
    hosts fetch with `gh release download`.
 5. **setup-repo** (done 2026-11-25: installs the pinned archive, build fallback kept; live on laptop-mac,
    desktop-mac and linux-box). The pin becomes version plus SHA-256 per platform; the hook downloads,

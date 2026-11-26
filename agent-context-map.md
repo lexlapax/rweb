@@ -1,7 +1,42 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: fourth review round, live-tested on laptop-mac and linux-box; push pending the owner). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
+Last updated: 2026-11-26 (laptop-mac: round five merged to main locally; not pushed).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-26: round five (in progress, not merged, not released)
+
+Record: [docs/security-review-2026-11-26-round5.md](docs/security-review-2026-11-26-round5.md); the
+owner's decisions are in [docs/PLAN.md](docs/PLAN.md) ("Owner's decisions (2026-11-26)").
+
+- **What it changed.** Two commands, `rweb tailscale` and `rweb ssh`, set everything up (secret, token,
+  folders; `--config-dir`, `--port`) and print the one step left; the old options stay as "Advanced".
+  The listener is taken first and held while rweb waits for Tailscale and Rex (it no longer exits).
+  `[::1]` is held too. Token mode has a token form, a wrong-token limit and tap to reconnect. No group is
+  trusted (macOS `admin` only for folders above and programs); local disks only; links followed only from
+  checked folders when root's or the user's. Tokens are 32+ characters. Refusals are plain sentences with
+  a `Fix:` line. New source: `src/bridge/layout.zig`, `src/bridge/web/login.{html,js,css}`.
+- **State.** The code is committed on `wt/reviews-note` at `124eb91` (worktree
+  `~/projects/lexlapax/.worktrees/rweb/reviews-note`), not merged to `main`, not deployed. A second pass
+  (internal re-review, a readiness review on macOS, a Zig idiom audit; findings S1 to S13 in the record)
+  is fixed and merged.
+- **Checks actually run on the merged work (2026-11-26):** macOS: `zig build test` 382/393 (11 skipped),
+  web tests 42/42. Linux with the live Rex: 390/393 (3 skipped), web tests 42/42, release-base test,
+  `zig build dist`. The Linux release binary as a new user (refusals and their Fix lines, `rweb ssh`,
+  the form over the socket, socket removed on SIGTERM). Live on a Mac with a throwaway session: the
+  Tailscale layout from the Android emulator (Chrome) and the iOS Simulator (Safari), and the tunnel
+  layout from both (form, sign-in, drop, one attempt per tap). Exact results and limits:
+  docs/security-review-2026-11-26-round5.md.
+- **Not verified:** the owner's phone; `rweb tailscale` on Linux through Serve (needs `sudo tailscale
+  serve`); typing into the form in iOS Safari (automation cannot tap there); the deployed hosts against
+  the new refusals. `tools/release.sh` not run.
+- **State:** merged to `main` locally, not pushed (owner, 2026-11-26: another reviewer goes through the
+  work next). The deployed services still run the previous build.
+- **Next:** the owner's other review; before upgrading a host, check it against the new refusals
+  (group-writable folders above rweb's files, token length 32, local disks), and consider moving the
+  deployments to `rweb tailscale`; the deferred Zig idiom items (typed JSON in the Rex client, release
+  allocator choice with measurements, per-frame allocations, event waits, write-deadline watcher, the
+  api mutex); then, on the owner's word: push, the 0.1.1 release commit (date the changelog), archives,
+  tag and private release.
 
 ## 2026-11-26: logo
 
@@ -18,6 +53,15 @@ README heading is the lockup (`<picture>`, dark and light). Checked on laptop-ma
 265/275 (10 skipped, no live), `web-test` 29/29, `zig build`; the header and every raster looked at in
 headless Chrome. Not checked: a phone's home screen or a simulator. Release archives (`tools/dist.sh`)
 copy `README.md` without `assets/`, so there the heading shows its alt text.
+
+## 2026-11-26: the reviews, described for readers
+
+At the owner's request, README "Security, in short" gains "How it was reviewed" (the design review, four
+rounds of scan, readiness and internal adversarial review, over 120 findings, the live test, links to each
+round's record), and docs/README.md gains a "How it was reviewed" section listing every round (round 4 was
+missing from the index), and "About this project" says point releases will follow as the owner finds
+things worth adding or fixing. Reviewers named generically. Round 5 has its own section above; the README and the index now say five rounds and no longer say the
+final candidate was run live (that run comes before each release and is recorded in the round's document).
 
 ## 2026-11-25: fourth review round of `c5fd3c1` and its fixes
 

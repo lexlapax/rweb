@@ -33,8 +33,9 @@ button.small { min-height: 32px; min-width: 32px; padding: 3px 8px; }
 .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--dim); flex: none; margin: 0 4px; }
 .dot.good { background: var(--good); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
 
-#banner { padding: 5px 10px; background: #2a2412; color: #f2d98a; border-bottom: 1px solid #4a3f1a; font-size: 13px; flex: none; }
+#banner { padding: 5px 10px; background: #2a2412; color: #f2d98a; border-bottom: 1px solid #4a3f1a; font-size: 13px; flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 #banner.bad { background: #2b1618; color: #f3b1b4; border-color: #5a2a2d; }
+#banner-act { font: inherit; font-weight: 600; padding: 6px 16px; min-height: 36px; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; }
 
 /* layout */
 main { flex: 1; display: flex; min-height: 0; position: relative; }

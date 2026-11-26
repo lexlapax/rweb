@@ -5,7 +5,8 @@
 # Zig get byte-identical archives; machines of different host platforms do not, because that embedded
 # path still differs (see docs/phase5-result.md, "Pinning Zig").
 # The compiler is the pinned official Zig, `zig-<minimum_zig_version>` from PATH, when it is installed
-# (package managers' builds of the same version compile differently); otherwise `zig`, with a warning.
+# (package managers' builds of the same version compile differently); without it the script stops, unless
+# RWEB_RELEASE_ANY_ZIG=1 says to use `zig` from PATH anyway.
 # Usage: tools/release.sh [COMMIT]   (default: HEAD; run inside the repository)
 # It runs the tests on the exported commit first and packs nothing if they fail. It is the only way to
 # make release archives: `zig build dist` alone packs the working tree, uncommitted edits included.

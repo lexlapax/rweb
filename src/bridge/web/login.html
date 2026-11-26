@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>rweb: sign in</title>
+<link rel="stylesheet" href="login.css">
+</head>
+<body>
+<main>
+  <h1>rweb</h1>
+  <form id="login" method="post" autocomplete="off">
+    <label for="token">Token</label>
+    <input id="token" name="token" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required autofocus>
+    <button type="submit">Open</button>
+    <p id="login-msg" role="status" aria-live="polite"></p>
+  </form>
+  <p class="dim">On the machine that runs rweb, <code>cat</code> the token file it named at startup and paste its contents here. The token is sent in a header, never in the address.</p>
+</main>
+<script src="login.js"></script>
+</body>
+</html>

@@ -86,56 +86,54 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (v != .object) return error.Malformed;
     const o = v.object;
     const t = try str(o, "t", 32);
-    const eql = std.mem.eql;
-    if (eql(u8, t, "tree")) return .tree;
-    if (eql(u8, t, "close_view")) return .close_view;
-    if (eql(u8, t, "redraw")) return .redraw;
-    if (eql(u8, t, "more_history")) return .more_history;
-    if (eql(u8, t, "text")) return .text;
-    if (eql(u8, t, "info")) return .info;
-    if (eql(u8, t, "ls")) return .{ .ls = try pathField(o, "path", true) };
-    if (eql(u8, t, "dl")) return .{ .dl = try pathField(o, "path", false) };
-    if (eql(u8, t, "ul")) {
-        const name = try str(o, "name", 255);
-        if (name.len == 0 or !std.unicode.utf8ValidateSlice(name)) return error.BadField;
-        for (name) |c| if (c < 0x20 or c == 0x7f) return error.BadField;
-        const sv = o.get("size") orelse return error.BadField;
-        if (sv != .integer or sv.integer < 0 or sv.integer > max_transfer_size) return error.BadField;
-        return .{ .ul = .{ .name = name, .size = @intCast(sv.integer) } };
-    }
-    if (eql(u8, t, "clip")) return .clip;
-    if (eql(u8, t, "term_action")) {
-        const a = try str(o, "action", 16);
-        if (eql(u8, a, "clear")) return .{ .term_action = .clear };
-        if (eql(u8, a, "reset")) return .{ .term_action = .reset };
-        return error.BadField;
-    }
-    if (eql(u8, t, "ping")) return .ping;
-    if (eql(u8, t, "dbg")) return .dbg;
-    if (eql(u8, t, "open")) return .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } };
-    if (eql(u8, t, "in")) return .{ .in = try str(o, "d", max_input_bytes) };
-    if (eql(u8, t, "paste")) {
-        const force = if (o.get("force")) |f| (if (f == .bool) f.bool else return error.BadField) else false;
-        return .{ .paste = .{ .text = try str(o, "d", max_input_bytes), .force = force } };
-    }
-    if (eql(u8, t, "key")) return .{ .key = try keyJson(arena, o) };
-    if (eql(u8, t, "fit")) {
-        const cols = try dim(o, "cols");
-        const rows = try dim(o, "rows");
-        return .{ .fit = .{ .cols = cols, .rows = rows } };
-    }
-    if (eql(u8, t, "observe")) {
-        const on = o.get("on") orelse return error.BadField;
-        if (on != .bool) return error.BadField;
-        return .{ .observe = on.bool };
-    }
-    if (eql(u8, t, "new_session")) return .{ .new_session = if (o.get("label") != null) try label(o, "label") else null };
-    if (eql(u8, t, "new_terminal")) return .{ .new_terminal = try str(o, "session", max_id_bytes) };
-    if (eql(u8, t, "destroy_session")) return .{ .destroy_session = try str(o, "session", max_id_bytes) };
-    if (eql(u8, t, "rename_session")) return .{ .rename_session = .{ .session = try str(o, "session", max_id_bytes), .label = try label(o, "label") } };
-    if (eql(u8, t, "rename_block")) return .{ .rename_block = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes), .label = try label(o, "label") } };
-    if (eql(u8, t, "close_block")) return .{ .close_block = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } };
-    return error.UnknownType;
+    // Every message type is a tag of `Msg`, and the switch is exhaustive: a new type does not
+    // compile until it is parsed here (and given a rate class in `hub.zig`).
+    const tag = std.meta.stringToEnum(std.meta.Tag(Msg), t) orelse return error.UnknownType;
+    return switch (tag) {
+        .tree => .tree,
+        .close_view => .close_view,
+        .redraw => .redraw,
+        .more_history => .more_history,
+        .text => .text,
+        .info => .info,
+        .clip => .clip,
+        .ping => .ping,
+        .dbg => .dbg,
+        .ls => .{ .ls = try pathField(o, "path", true) },
+        .dl => .{ .dl = try pathField(o, "path", false) },
+        .ul => blk: {
+            const name = try str(o, "name", 255);
+            if (name.len == 0 or !std.unicode.utf8ValidateSlice(name)) return error.BadField;
+            for (name) |c| if (c < 0x20 or c == 0x7f) return error.BadField;
+            const sv = o.get("size") orelse return error.BadField;
+            if (sv != .integer or sv.integer < 0 or sv.integer > max_transfer_size) return error.BadField;
+            break :blk .{ .ul = .{ .name = name, .size = @intCast(sv.integer) } };
+        },
+        .term_action => blk: {
+            const a = try str(o, "action", 16);
+            const act = std.meta.stringToEnum(@FieldType(Msg, "term_action"), a) orelse return error.BadField;
+            break :blk .{ .term_action = act };
+        },
+        .open => .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } },
+        .in => .{ .in = try str(o, "d", max_input_bytes) },
+        .paste => blk: {
+            const force = if (o.get("force")) |f| (if (f == .bool) f.bool else return error.BadField) else false;
+            break :blk .{ .paste = .{ .text = try str(o, "d", max_input_bytes), .force = force } };
+        },
+        .key => .{ .key = try keyJson(arena, o) },
+        .fit => .{ .fit = .{ .cols = try dim(o, "cols"), .rows = try dim(o, "rows") } },
+        .observe => blk: {
+            const on = o.get("on") orelse return error.BadField;
+            if (on != .bool) return error.BadField;
+            break :blk .{ .observe = on.bool };
+        },
+        .new_session => .{ .new_session = if (o.get("label") != null) try label(o, "label") else null },
+        .new_terminal => .{ .new_terminal = try str(o, "session", max_id_bytes) },
+        .destroy_session => .{ .destroy_session = try str(o, "session", max_id_bytes) },
+        .rename_session => .{ .rename_session = .{ .session = try str(o, "session", max_id_bytes), .label = try label(o, "label") } },
+        .rename_block => .{ .rename_block = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes), .label = try label(o, "label") } },
+        .close_block => .{ .close_block = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } },
+    };
 }
 
 fn str(o: std.json.ObjectMap, name: []const u8, max: usize) ParseError![]const u8 {
@@ -323,4 +321,16 @@ test "transfer messages are checked" {
         "{\"t\":\"ul\",\"name\":\"a\",\"size\":\"1\"}",
     };
     for (bad) |b| try testing.expect(std.meta.isError(parse(a, b)));
+}
+
+test "every message type is parsed as itself" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for (std.meta.tags(std.meta.Tag(Msg))) |tag| {
+        const text = try std.fmt.allocPrint(arena.allocator(), "{{\"t\":\"{s}\"}}", .{@tagName(tag)});
+        // Without its fields a message may be refused, but never as an unknown type.
+        if (parse(arena.allocator(), text)) |m| {
+            try testing.expectEqual(tag, std.meta.activeTag(m));
+        } else |e| try testing.expect(e != error.UnknownType);
+    }
 }

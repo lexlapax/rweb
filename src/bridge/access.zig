@@ -74,6 +74,11 @@ pub const Refusal = enum {
     bad_forwarded_for,
     /// One of the configured own addresses is not an address: the rule cannot be applied.
     bad_own_address,
+    /// Token mode, and the request carries no token at all (header, query or cookie).
+    no_token,
+    /// A token in the header or the query, sent by a page of another origin (`Origin`, or
+    /// `Sec-Fetch-Site` other than `same-origin` or `none`): never compared, never counted.
+    cross_site_token,
 
     pub fn text(r: Refusal) []const u8 {
         return switch (r) {
@@ -91,6 +96,8 @@ pub const Refusal = enum {
             .no_forwarded_for => "no X-Forwarded-For",
             .bad_forwarded_for => "X-Forwarded-For is not an address",
             .bad_own_address => "a configured own address is not an address",
+            .no_token => "no token",
+            .cross_site_token => "a token sent from another site",
         };
     }
 };
@@ -100,8 +107,91 @@ pub const Decision = union(enum) {
     deny: Refusal,
 };
 
-/// Decide in a fixed order, so a log line says the first reason a request failed.
+/// Decide in a fixed order, so a log line says the first reason a request failed: every other check
+/// first (`decideAllButToken`), the token last (`checkToken`), so a request refused for another reason
+/// never counts as a guess at the token.
 pub fn decide(cfg: Config, request: Request) Decision {
+    switch (decideAllButToken(cfg, request)) {
+        .allow => {},
+        .deny => |why| return .{ .deny = why },
+    }
+    return switch (checkToken(cfg, request)) {
+        .none, .right => .allow,
+        .missing => .{ .deny = .no_token },
+        .wrong, .wrong_cookie => .{ .deny = .bad_token },
+        .cross_site => .{ .deny = .cross_site_token },
+    };
+}
+
+/// Every check but the token's, for the token form (a static page that carries nothing from the
+/// bridge): only in token mode, so an owner or secret deployment never serves it without its checks.
+pub fn decideLoginPage(cfg: Config, request: Request) Decision {
+    if (cfg.token == null) return .{ .deny = .unconfigured };
+    return decideAllButToken(cfg, request);
+}
+
+/// The token a request presents, from the header, the query or the cookie, in that order (the
+/// order `checkToken` reads them in); null when it presents none.
+pub fn presentedToken(request: Request) ?[]const u8 {
+    return request.header("rweb-token") orelse request.query_token orelse
+        cookieValue(request.header("cookie") orelse "", "rweb-token");
+}
+
+/// What a request's token says, in token mode.
+pub const TokenCheck = enum {
+    /// No token is configured: there is nothing to check.
+    none,
+    right,
+    /// No token at all: no header, query or cookie.
+    missing,
+    /// A wrong token in the header or the query: a guess, which the server counts.
+    wrong,
+    /// Only a cookie, and none of its `rweb-token` values is right. Not a guess: a page on another
+    /// port of the same host can set a cookie for this one, so a wrong cookie is never counted.
+    wrong_cookie,
+    /// A token in the header or the query sent by a page of another origin: refused without being
+    /// compared or counted (no page elsewhere has any business sending one).
+    cross_site,
+};
+
+/// The token, in constant time: the header's or the query's when there is one (from this origin
+/// only), else any `rweb-token` cookie.
+pub fn checkToken(cfg: Config, request: Request) TokenCheck {
+    const want = cfg.token orelse return .none;
+    if (request.header("rweb-token") orelse request.query_token) |got| {
+        if (fromAnotherOrigin(request)) return .cross_site;
+        return if (constantTimeEql(want, got)) .right else .wrong;
+    }
+    var any = false;
+    var right = false;
+    var it = std.mem.tokenizeAny(u8, request.header("cookie") orelse "", "; ");
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        if (!std.mem.eql(u8, kv[0..eq], "rweb-token")) continue;
+        any = true;
+        // Every value is compared: a cookie planted beside the right one must not hide it.
+        if (constantTimeEql(want, kv[eq + 1 ..])) right = true;
+    }
+    if (right) return .right;
+    return if (any) .wrong_cookie else .missing;
+}
+
+/// Whether a browser says the request comes from a page of another origin: an `Origin` that is not
+/// this host's, or `Sec-Fetch-Site` other than `same-origin` (this page) or `none` (typed, a
+/// bookmark). `same-site` is another origin too: another port on this host.
+pub fn fromAnotherOrigin(request: Request) bool {
+    if (request.header("sec-fetch-site")) |site| {
+        if (!std.ascii.eqlIgnoreCase(site, "same-origin") and !std.ascii.eqlIgnoreCase(site, "none")) return true;
+    }
+    if (request.header("origin")) |origin| {
+        const host = request.header("x-forwarded-host") orelse request.header("host") orelse return true;
+        if (!originMatchesHost(origin, host)) return true;
+    }
+    return false;
+}
+
+/// Every check but the token's.
+pub fn decideAllButToken(cfg: Config, request: Request) Decision {
     if (cfg.owner == null and cfg.token == null) return .{ .deny = .unconfigured };
 
     if (cfg.allowed_peer_uids) |uids| {
@@ -143,12 +233,6 @@ pub fn decide(cfg: Config, request: Request) Decision {
         if (!seen) return .{ .deny = .bad_forwarded_for };
     }
 
-    if (cfg.token) |want| {
-        const got = request.header("rweb-token") orelse request.query_token orelse
-            cookieValue(request.header("cookie") orelse "", "rweb-token") orelse return .{ .deny = .bad_token };
-        if (!constantTimeEql(want, got)) return .{ .deny = .bad_token };
-    }
-
     const host = request.header("x-forwarded-host") orelse request.header("host");
     if (cfg.allowed_hosts.len > 0) {
         const h = host orelse return .{ .deny = .bad_host };
@@ -164,8 +248,14 @@ pub fn decide(cfg: Config, request: Request) Decision {
 
 /// Headers whose single value the decision relies on. Two of them cannot both be the proxy's.
 const single_headers = [_][]const u8{
-    "host",                 "origin",           "x-forwarded-host", "x-forwarded-for",
-    "tailscale-user-login", "rweb-token",       "x-forwarded-proto",
+    "host",
+    "origin",
+    "x-forwarded-host",
+    "x-forwarded-for",
+    "tailscale-user-login",
+    "rweb-token",
+    "x-forwarded-proto",
+    "sec-fetch-site",
 };
 
 fn duplicatedSecurityHeader(headers: []const Header) bool {
@@ -179,17 +269,32 @@ fn duplicatedSecurityHeader(headers: []const Header) bool {
     return false;
 }
 
-/// `host[:port]` against a list of bare host names.
+/// `host[:port]` against a list of allowed hosts, each a bare name (any port) or `name:port` (that
+/// port only; `[v6]:port` for an IPv6 address). A host with no port is on port 80.
 pub fn hostAllowed(allowed: []const []const u8, host: []const u8) bool {
-    var name = host;
-    if (name.len > 0 and name[0] == '[') { // [v6]:port
-        const close = std.mem.indexOfScalar(u8, name, ']') orelse return false;
-        name = name[1..close];
-    } else if (std.mem.lastIndexOfScalar(u8, name, ':')) |c| {
-        if (std.mem.indexOfScalar(u8, name[0..c], ':') == null) name = name[0..c]; // not a bare v6
+    const got = splitHost(host) orelse return false;
+    for (allowed) |a| {
+        const want = splitHost(a) orelse continue;
+        if (!std.ascii.eqlIgnoreCase(want.name, got.name)) continue;
+        if (want.port) |p| if (!std.mem.eql(u8, p, got.port orelse "80")) continue;
+        return true;
     }
-    for (allowed) |a| if (std.ascii.eqlIgnoreCase(a, name)) return true;
     return false;
+}
+
+/// `name[:port]`, `[v6][:port]` or a bare IPv6 address, split; null when brackets do not close.
+fn splitHost(h: []const u8) ?struct { name: []const u8, port: ?[]const u8 } {
+    if (h.len > 0 and h[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, h, ']') orelse return null;
+        const rest = h[close + 1 ..];
+        if (rest.len == 0) return .{ .name = h[1..close], .port = null };
+        if (rest[0] != ':') return null;
+        return .{ .name = h[1..close], .port = rest[1..] };
+    }
+    if (std.mem.lastIndexOfScalar(u8, h, ':')) |c| {
+        if (std.mem.indexOfScalar(u8, h[0..c], ':') == null) return .{ .name = h[0..c], .port = h[c + 1 ..] };
+    }
+    return .{ .name = h, .port = null }; // a name, or a bare IPv6 address
 }
 
 const Ip = union(enum) { v4: [4]u8, v6: [16]u8 };
@@ -209,6 +314,30 @@ fn parseAddress(text: []const u8) ?Ip {
     const b = a6.bytes;
     if (std.mem.allEqual(u8, b[0..10], 0) and b[10] == 0xff and b[11] == 0xff) return .{ .v4 = b[12..16].* };
     return .{ .v6 = b };
+}
+
+/// Whether two lists of address texts name the same addresses, in any order and spelling. A text that
+/// is not an address makes the lists different.
+pub fn sameAddressList(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a) |x| {
+        const px = parseAddress(x) orelse return false;
+        var found = false;
+        for (b) |y| {
+            const py = parseAddress(y) orelse return false;
+            if (sameAddress(px, py)) found = true;
+        }
+        if (!found) return false;
+    }
+    for (b) |y| {
+        const py = parseAddress(y) orelse return false;
+        var found = false;
+        for (a) |x| if (sameAddress(parseAddress(x).?, py)) {
+            found = true;
+        };
+        if (!found) return false;
+    }
+    return true;
 }
 
 fn sameAddress(a: Ip, b: Ip) bool {
@@ -366,7 +495,7 @@ test "unix peers: only the allowed uids" {
 
 test "token mode (local test servers)" {
     const cfg: Config = .{ .token = "s3cret-token" };
-    try expectDeny(.bad_token, cfg, req(&.{}));
+    try expectDeny(.no_token, cfg, req(&.{}));
     var r = req(&.{});
     r.query_token = "wrong";
     try expectDeny(.bad_token, cfg, r);
@@ -394,9 +523,58 @@ test "token from a cookie (subresources and the socket carry it, not the query)"
     const bad = [_]Header{.{ .name = "Cookie", .value = "rweb-token=nope" }};
     try expectDeny(.bad_token, cfg, req(&bad));
     const other = [_]Header{.{ .name = "Cookie", .value = "xrweb-token=tok123" }};
-    try expectDeny(.bad_token, cfg, req(&other));
+    try expectDeny(.no_token, cfg, req(&other));
     try testing.expectEqualStrings("1", cookieValue("x=1; y=2; z=3", "x").?);
     try testing.expect(cookieValue("", "x") == null);
+}
+
+test "a token is compared only after every other check, and only from this origin" {
+    const cfg: Config = .{ .token = "tok123", .allowed_hosts = &.{"127.0.0.1:7700"} };
+    const host = Header{ .name = "Host", .value = "127.0.0.1:7700" };
+    // A foreign Host is refused for that, never as a token: the server counts only `wrong`.
+    try expectDeny(.bad_host, cfg, .{ .headers = &.{.{ .name = "Host", .value = "evil.example" }}, .query_token = "nope" });
+    try testing.expectEqual(Decision.allow, decide(cfg, .{ .headers = &.{host}, .query_token = "tok123" }));
+    try testing.expectEqual(TokenCheck.wrong, checkToken(cfg, .{ .headers = &.{host}, .query_token = "nope" }));
+    try testing.expectEqual(TokenCheck.wrong, checkToken(cfg, .{ .headers = &.{ host, .{ .name = "rweb-token", .value = "nope" } } }));
+    try testing.expectEqual(TokenCheck.none, checkToken(.{ .owner = owner }, .{ .headers = &.{host}, .query_token = "x" }));
+    // From another origin, by Origin or by Sec-Fetch-Site (same-site: another port on this host), a
+    // token in the header or the query is refused uncompared: the right one too.
+    for ([_]Header{
+        .{ .name = "Origin", .value = "http://127.0.0.1:9999" },
+        .{ .name = "Origin", .value = "https://evil.example" },
+        .{ .name = "Origin", .value = "null" },
+        .{ .name = "Sec-Fetch-Site", .value = "cross-site" },
+        .{ .name = "Sec-Fetch-Site", .value = "same-site" },
+    }) |h| {
+        for ([_][]const u8{ "nope", "tok123" }) |t| {
+            try testing.expectEqual(TokenCheck.cross_site, checkToken(cfg, .{ .headers = &.{ host, h }, .query_token = t }));
+            try testing.expectEqual(TokenCheck.cross_site, checkToken(cfg, .{ .headers = &.{ host, h, .{ .name = "rweb-token", .value = t } } }));
+        }
+        try expectDeny(.cross_site_token, cfg, .{ .headers = &.{ host, h }, .query_token = "tok123" });
+    }
+    // This origin, typed or followed from a bookmark.
+    for ([_]Header{
+        .{ .name = "Origin", .value = "http://127.0.0.1:7700" },
+        .{ .name = "Sec-Fetch-Site", .value = "same-origin" },
+        .{ .name = "Sec-Fetch-Site", .value = "none" },
+    }) |h| try testing.expectEqual(TokenCheck.right, checkToken(cfg, .{ .headers = &.{ host, h }, .query_token = "tok123" }));
+    // Cookies: a wrong one is never a guess, and a planted one does not hide the right one.
+    try testing.expectEqual(TokenCheck.wrong_cookie, checkToken(cfg, .{ .headers = &.{ host, .{ .name = "Cookie", .value = "rweb-token=nope" } } }));
+    try testing.expectEqual(TokenCheck.right, checkToken(cfg, .{ .headers = &.{ host, .{ .name = "Cookie", .value = "rweb-token=nope; rweb-token=tok123" } } }));
+    try testing.expectEqual(TokenCheck.missing, checkToken(cfg, .{ .headers = &.{ host, .{ .name = "Cookie", .value = "x=1" } } }));
+    // A doubled Sec-Fetch-Site is ambiguous.
+    try expectDeny(.ambiguous_header, cfg, .{ .headers = &.{ host, .{ .name = "Sec-Fetch-Site", .value = "none" }, .{ .name = "sec-fetch-site", .value = "cross-site" } } });
+}
+
+test "an allowed host with a port allows that port only" {
+    const loop = [_][]const u8{ "127.0.0.1:7700", "localhost:7700", "[::1]:7700" };
+    for ([_][]const u8{ "127.0.0.1:7700", "LOCALHOST:7700", "[::1]:7700" }) |h| try testing.expect(hostAllowed(&loop, h));
+    for ([_][]const u8{ "127.0.0.1:7701", "127.0.0.1", "localhost", "[::1]", "evil.example:7700", "[::1", "[::1]x" }) |h| try testing.expect(!hostAllowed(&loop, h));
+    // Without a port, any port (an SSH tunnel's local port is not known to rweb).
+    const any = [_][]const u8{ "127.0.0.1", "localhost", "[::1]" };
+    for ([_][]const u8{ "127.0.0.1:7700", "localhost:1234", "[::1]:7700", "[::1]", "localhost" }) |h| try testing.expect(hostAllowed(&any, h));
+    try testing.expect(!hostAllowed(&any, "evil.example"));
+    try testing.expect(hostAllowed(&.{"localhost:80"}, "localhost"));
 }
 
 test "the own-address rule compares addresses, and fails closed" {
@@ -488,4 +666,36 @@ test "a PUT needs the page's own Origin, as a WebSocket does" {
     r = req(&none);
     r.requires_origin = true;
     try expectDeny(.no_origin, base_cfg, r);
+}
+
+test "the token form is judged on every check but the token, and only in token mode" {
+    const cfg: Config = .{ .token = "s3cret-token", .allowed_hosts = &.{"127.0.0.1"} };
+    const ok_host = [_]Header{.{ .name = "Host", .value = "127.0.0.1:7700" }};
+    try expectDeny(.no_token, cfg, req(&ok_host));
+    try testing.expectEqual(Decision.allow, decideLoginPage(cfg, req(&ok_host)));
+    // The other checks still apply: a rebound host name gets no form.
+    const evil = [_]Header{.{ .name = "Host", .value = "evil.example" }};
+    try expectDeny(.bad_host, .{ .token = "t", .allowed_hosts = &.{"127.0.0.1"} }, .{ .headers = &evil, .query_token = "t" });
+    try testing.expectEqual(Decision{ .deny = .bad_host }, decideLoginPage(cfg, req(&evil)));
+    // Owner and secret deployments (no token) never get it.
+    const login = [_]Header{ .{ .name = "Tailscale-User-Login", .value = owner }, .{ .name = "X-Forwarded-For", .value = "100.64.0.9" } };
+    try testing.expectEqual(Decision{ .deny = .unconfigured }, decideLoginPage(base_cfg, req(&login)));
+    // Owner and token together: the owner rule still stands in front of the form.
+    const both: Config = .{ .owner = owner, .token = "t" };
+    try testing.expectEqual(Decision{ .deny = .no_identity }, decideLoginPage(both, req(&.{})));
+    try testing.expectEqual(Decision.allow, decideLoginPage(both, req(&.{ login[0], .{ .name = "X-Forwarded-For", .value = "100.64.0.9" } })));
+    // What counts as presenting a token: header, query or cookie.
+    try testing.expect(presentedToken(req(&.{})) == null);
+    try testing.expectEqualStrings("h", presentedToken(.{ .headers = &.{.{ .name = "RWEB-TOKEN", .value = "h" }}, .query_token = "q" }).?);
+    try testing.expectEqualStrings("q", presentedToken(.{ .headers = &.{}, .query_token = "q" }).?);
+    try testing.expectEqualStrings("c", presentedToken(req(&.{.{ .name = "Cookie", .value = "rweb-token=c" }})).?);
+}
+
+test "address lists compare as sets of addresses" {
+    try testing.expect(sameAddressList(&.{ "100.64.0.5", "fd7a:115c:a1e0::5" }, &.{ "FD7A:115C:A1E0:0:0:0:0:5", "100.64.0.5" }));
+    try testing.expect(sameAddressList(&.{}, &.{}));
+    try testing.expect(!sameAddressList(&.{"100.64.0.5"}, &.{"100.64.0.6"}));
+    try testing.expect(!sameAddressList(&.{"100.64.0.5"}, &.{ "100.64.0.5", "100.64.0.6" }));
+    try testing.expect(!sameAddressList(&.{ "100.64.0.5", "100.64.0.5" }, &.{ "100.64.0.5", "100.64.0.6" }));
+    try testing.expect(!sameAddressList(&.{"junk"}, &.{"junk"}));
 }

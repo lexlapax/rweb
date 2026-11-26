@@ -10,7 +10,7 @@ version=$1
 dist=$2
 stage=$dist/stage
 stamp=202601010000.00 # 2026-01-01 00:00 UTC, for every file in every archive
-files="CHANGELOG.md LICENSE README.md THIRD-PARTY-NOTICES.md docs docs/architecture.md docs/user-guide.md rweb"
+files="CHANGELOG.md LICENSE README.md THIRD-PARTY-NOTICES.md assets assets/logo assets/logo/lockup-light.svg assets/logo/lockup.svg docs docs/architecture.md docs/user-guide.md rweb"
 
 if tar --version 2>/dev/null | grep -q bsdtar; then
   tarc() { COPYFILE_DISABLE=1 tar -c -n --format ustar --uid 0 --gid 0 --uname root --gname root --no-xattrs --no-mac-metadata -f - "$@"; }
@@ -28,10 +28,11 @@ for dir in "$stage"/*/; do
   mkdir -p "$work"
   cp "$dir/rweb" "$work/rweb"
   cp CHANGELOG.md LICENSE README.md THIRD-PARTY-NOTICES.md "$work/"
-  mkdir -p "$work/docs"
+  mkdir -p "$work/docs" "$work/assets/logo"
   cp docs/architecture.md docs/user-guide.md "$work/docs/"
-  chmod 0755 "$work" "$work/docs" "$work/rweb"
-  chmod 0644 "$work/CHANGELOG.md" "$work/LICENSE" "$work/README.md" "$work/THIRD-PARTY-NOTICES.md" "$work/docs/architecture.md" "$work/docs/user-guide.md"
+  cp assets/logo/lockup.svg assets/logo/lockup-light.svg "$work/assets/logo/"   # the README's heading
+  chmod 0755 "$work" "$work/docs" "$work/assets" "$work/assets/logo" "$work/rweb"
+  chmod 0644 "$work/CHANGELOG.md" "$work/LICENSE" "$work/README.md" "$work/THIRD-PARTY-NOTICES.md" "$work/docs/architecture.md" "$work/docs/user-guide.md" "$work/assets/logo/lockup.svg" "$work/assets/logo/lockup-light.svg"
   find "$work" -exec env TZ=UTC touch -t "$stamp" {} +
   members=$name
   for f in $files; do members="$members $name/$f"; done

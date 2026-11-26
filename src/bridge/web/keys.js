@@ -302,7 +302,63 @@
     return {keep, drop};
   }
 
-  const api = {sameTerm, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  // ---- the connection (E4, M2) ----
+  // In token mode (the bridge's `mode` message says `auth: "token"`: an SSH tunnel to a loopback
+  // port), whatever answers on this origin after a drop may not be rweb: another account can hold
+  // the port while the tunnel or rweb is down, and every connection hands it the page's cookie. So
+  // each request (loading the page, a tap on Reconnect) makes exactly one connection attempt; when
+  // that attempt fails, closes before it opens, or drops later, the page waits for the next tap. No
+  // timer ever reconnects in token mode. In Tailscale mode the page reconnects by itself, with backoff.
+  //
+  // `linkStep(s, ev, tokenMode)` is the whole decision. `s` is {phase, why}: phase 'trying' (a
+  // connection is being made), 'open' (it opened) or 'waiting' (for a tap; `why` says why: 'dropped',
+  // 'failed' or 'foreign'). Events: 'ask' (the page loads, or a tap), 'open' (the socket opened),
+  // 'close' (it closed, or the watchdog gave up on it), 'foreign' (its first message was not rweb's;
+  // see `looksLikeRweb`). Returns the new {phase, why} and `act`: 'connect' (one attempt now),
+  // 'retry' (reconnect after the backoff: Tailscale mode only) or 'none'.
+  const LINK_START = Object.freeze({phase: 'trying', why: null});
+  function linkStep(s, ev, tokenMode) {
+    const cur = s || LINK_START, token = tokenMode === true;
+    switch (ev) {
+      case 'ask': return {phase: 'trying', why: null, act: 'connect'};
+      case 'open': return cur.phase === 'trying' ? {phase: 'open', why: null, act: 'none'} : {...cur, act: 'none'};
+      case 'close':
+        if (cur.phase === 'waiting') return {...cur, act: 'none'};       // a late close: still waiting
+        if (!token) return {phase: 'trying', why: null, act: 'retry'};
+        return {phase: 'waiting', why: cur.phase === 'open' ? 'dropped' : 'failed', act: 'none'};
+      case 'foreign':
+        if (!token) return {...cur, act: 'none'};
+        return {phase: 'waiting', why: 'foreign', act: 'none'};
+    }
+    return {...cur, act: 'none'};
+  }
+  // What the banner says while the page waits for a tap.
+  function waitText(why) {
+    if (why === 'failed') return 'Could not connect. Is the SSH tunnel running?';
+    if (why === 'foreign') return 'This does not look like rweb. Check the SSH tunnel.';
+    return 'Disconnected. Restart the SSH tunnel, then reconnect.';
+  }
+  // In token mode the first message on a new connection must be rweb's `mode` message, well formed,
+  // saying `auth: "token"`; otherwise the page closes the connection and shows nothing it sent. This
+  // only catches accidents (another program on the tunnel's port, a wrong port): whatever holds the
+  // port can send this message too, and has had the cookie by then.
+  const MODE_FLAGS = ['observe', 'locked', 'rex_up', 'download', 'upload', 'debug'];
+  function looksLikeRweb(data) {
+    if (typeof data !== 'string') return false;
+    let m;
+    try { m = JSON.parse(data); } catch { return false; }
+    if (!m || typeof m !== 'object' || Array.isArray(m)) return false;
+    if (m.t !== 'mode' || m.auth !== 'token') return false;
+    return MODE_FLAGS.every(k => typeof m[k] === 'boolean');
+  }
+  // Token mode, once known, stays for the page's life: a later `mode` message without `auth` (from
+  // whatever answered after a reconnect) does not turn automatic reconnects back on. It is known
+  // before any connection from the page's own address: only token mode serves the page under
+  // `/s/<id>/`, so a page that cannot reach rweb at all on load does not retry by itself either.
+  function tokenModeFrom(wasTokenMode, mode) { return wasTokenMode === true || (!!mode && mode.auth === 'token'); }
+  function tokenModeFromPath(pathname) { return /^\/s\/[A-Za-z0-9_-]+\//.test(String(pathname || '')); }
+
+  const api = {linkStep, LINK_START, waitText, looksLikeRweb, tokenModeFrom, tokenModeFromPath, sameTerm, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

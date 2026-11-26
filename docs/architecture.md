@@ -8,7 +8,10 @@ behind each choice, the plan and the test records linked at the end (in the sour
 
 One rweb per machine that runs Rex. Each rweb serves only its own Rex, runs as the same user as Rex, and
 talks to Rex only through Rex's own unix socket. It never listens on the network: Tailscale Serve or an
-SSH tunnel brings the browser to it.
+SSH tunnel brings the browser to it. Two commands set up the two ways in: `rweb tailscale` (a unix socket
+on Linux, loopback behind a secret path on macOS, the owner taken from the machine's Tailscale login) and
+`rweb ssh` (a unix socket only the same user can connect to, and a token). Each makes the files it needs
+and prints the one step left; `layout.zig` holds their defaults.
 
 ```mermaid
 flowchart LR
@@ -24,7 +27,7 @@ flowchart LR
   end
   P --> S1
   P --> S2
-  L -- "or: ssh -L tunnel to loopback + token" --> W2
+  L -- "or: ssh -L tunnel to a unix socket + token" --> W2
 ```
 
 ## Inside rweb
@@ -91,7 +94,7 @@ flowchart TB
 ```mermaid
 flowchart TB
   A["Request arrives"] --> U{"Unix socket?"}
-  U -- yes --> PEER{"Peer is root<br/>(tailscaled)?"}
+  U -- yes --> PEER{"Peer is an allowed user?<br/>(root, which is tailscaled;<br/>rweb ssh: your own user)"}
   PEER -- no --> X1["Refused at accept"]
   U -- "no (loopback)" --> SEC{"Secret first path segment<br/>or token, as configured?"}
   SEC -- no --> X2["404 / 403"]
@@ -107,18 +110,40 @@ flowchart TB
   WS -- no --> OK
 ```
 
-Every check is a pure function in `access.zig`, so each refusal has a test that shows it refusing. On
-Linux the unix socket is in a `0700` directory and accepts only root; on macOS the loopback listener
-answers anything without the secret with a bare 404. With an SSH tunnel the token rule replaces the
-owner rule: the token arrives once in the address (`/?token=`), and rweb answers with a redirect to
-`/s/<id>/`, where `<id>` is a hash of the token. It does not show the token, but anyone who sees it can
-check guesses of the token against it, so tokens are random (the user guide's generator; `--token` must
-be 16 or more URL-safe characters) and the address is kept as private as the token. The token moves into an
-`HttpOnly`, `SameSite=Strict` cookie scoped to that path, and leaves the address bar. A browser sends a
-cookie to every port of a host, so a cookie for `/` on `127.0.0.1` would also reach any other local web
-service you open, and two tunnels on two ports would overwrite each other's; scoped to its own path it
-reaches neither. The page uses relative addresses only, so it works under `/s/<id>/` and, behind Serve,
-at `/`.
+Every check is a pure function in `access.zig`, so each refusal has a test that shows it refusing. Behind
+Tailscale on Linux the unix socket is in a `0700` directory and accepts only root; on macOS the loopback
+listener answers anything without the secret with a bare 404.
+
+With an SSH tunnel (`rweb ssh`) the socket accepts only the user rweb runs as, which is what SSH's forward
+connects as, and the token rule replaces the owner rule. A page load of `/` that carries no token gets
+the token form (`login.html`, `login.js`, `login.css`: static files with nothing from rweb in them), after
+every check but the token's; nothing else is served without the token. The form sends the token once in a
+`rweb-token` request header, and rweb answers with a redirect to `/s/<id>/`, where `<id>` is a hash of the
+token (`/?token=` in the address gets the same redirect, for compatibility). `<id>` does not show the
+token, but anyone who sees it can check guesses of the token against it, so tokens are random (rweb makes
+them: 32 random bytes) and at least 32 URL-safe characters, and the address is kept as private as the
+token. The token moves into an `HttpOnly`, `SameSite=Strict` cookie scoped to that path. A browser sends
+a host's cookies to every port of that host, so a cookie for `/` on `127.0.0.1` would reach any other
+local web service you open, and two tunnels on two ports would overwrite each other's; scoped to its own
+unguessable path it reaches neither. The page uses relative addresses only, so it works under `/s/<id>/`
+and, behind Serve, at `/`.
+
+Wrong tokens are limited to 10 a minute for the whole listener; past that, wrong tokens get 429 until the
+minute ends, so a token cannot be guessed online at any useful rate. In token mode the page does not
+reconnect by itself after a drop: it shows "Disconnected" and makes one attempt per tap, so its cookie is
+not sent to whatever holds the port unless the person asks. This is a limit, not a cure: the tunnel's
+local end is plain HTTP on loopback, which cannot prove who is answering, so a program that holds the
+forwarded port while the tunnel is down receives the cookie on a reload and could show a look-alike
+form. The user guide says to use the tunnel only on devices nobody else uses.
+
+**The listener comes first.** At startup rweb checks its configuration, then takes its socket or port and
+keeps it while it waits for Tailscale (its login, name and addresses) and for Rex, asking again with a
+growing delay instead of exiting. So the socket or port is never free for another account to take during
+an outage. Connections wait in the listen queue; no request is read before the access rules are complete
+and Rex has answered. A loopback port is held on `127.0.0.1` and on `[::1]`, without `SO_REUSEPORT`, so
+`localhost` cannot lead to another account's listener. While rweb runs it asks Tailscale for the
+machine's own addresses again every minute, so the rule that refuses requests from the machine itself
+follows a changed address.
 
 Before a request is read, it holds one of a few pending slots. When they are all taken, the oldest
 connection that has not sent a request yet is dropped for the new one: idle connections from a local
@@ -131,17 +156,26 @@ vendored scripts are revalidated on every load (`no-cache` with an ETag), so an 
 browser at once. `/api/tree` and the lab pages exist only with `--enable-lab`.
 
 Secret files (the backend secret, the token file), the upload folder, the unix socket's folder and the
-`tailscale` program are trusted only through an open descriptor: every folder from `/` down is opened
-without following links and must be root's or yours and not writable by others (unless sticky, as `/tmp`
-is; a folder its group can write to only when that group holds nobody else, or is macOS's root-equivalent
-`admin`), with no access-control entry that lets another user change it, and not on a file system another
-user controls (FUSE, a disk image they mounted, a volume that ignores ownership). A secret must be a regular file of yours closed to others, read from the descriptor that was
-checked. The upload folder is created only once the folders above it pass, stays open for the life of the
-process, and files are created relative to it; the path pasted is its real path. The unix socket's folder
-stays open too: stale sockets are inspected and removed relative to it, and at shutdown the socket is
-removed only if the entry is still the one rweb bound. `tailscale` comes from `--tailscale` or the first
-of a fixed list of install locations that exists, never from `PATH`; it is opened inside its checked folder
-and run by exactly that path, and a refusal is final (the next location is not tried).
+`tailscale` program are trusted only through an open descriptor. The path is walked from `/`: every
+folder on it must be root's or yours and not writable by others (unless sticky, as `/tmp` is) or by its
+group, with no access-control entry that lets another user or a group change it. No group is trusted,
+because who is in a group cannot be known for certain; the one exception is macOS's root-equivalent
+`admin`, and only for folders above an item and for programs. A link on the path is followed only when
+root or you own it and the folder it sits in has already passed, and the walk goes on from its target.
+Every folder and the item must be on a local disk: a network filesystem, FUSE, a disk image, a mount a
+user made, a volume that ignores ownership and a filesystem rweb does not know are all refused, because
+there someone else decides who owns and reads the files. The item itself is opened without following a
+link and checked on that descriptor: a secret must be a regular file of yours closed to group and others,
+with no access-control entry for anyone else, and is read from the descriptor that was checked. The two
+commands make a missing secret or token themselves (created exclusively, mode `0600`, in folders made
+`0700` under folders that passed). The upload folder is created only once the folders above it pass,
+stays open for the life of the process, and files are created relative to it; the path pasted is its
+real path. The unix socket's folder stays open too: stale sockets are inspected and removed relative to
+it, and at shutdown the socket is removed only if the entry is still the one rweb bound. `tailscale`
+comes from `--tailscale` or the first of a fixed list of install locations that exists, never from
+`PATH`; it is opened inside its checked folder and run by exactly that path, and a refusal is final (the
+next location is not tried). Each refusal is reported as a plain sentence with the fix (`xfer.zig`,
+`explain`).
 
 A browser connection that goes quiet for 20 seconds (unless rweb is still working on its last request),
 or whose socket does not take a frame within 30 seconds, is dropped, so a phone that stopped reading
@@ -228,8 +262,8 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 | Path | What it is |
 | --- | --- |
 | `src/rex/` | Rex client library: `ws.zig` (WebSocket over a unix socket), `control.zig` (hello, revisions, calls, events, reconnect), `api.zig` (typed calls), `data.zig` and `rex1.zig` (output streams), `mirror.zig` (libghostty-vt terminal), `input.zig` (ordered input), `transfer.zig` (downloads), `wire.zig` (handshake parsers), `fake.zig` (a fake Rex for tests) |
-| `src/bridge/` | The program: `main.zig` (start-up, `--version`), `cli.zig` (options), `access.zig` (who may talk to it), `server.zig` (HTTP and WebSocket), `protocol.zig` (browser protocol), `hub.zig` (sessions, terminals, viewers), `xfer.zig` (file transfer), `assets.zig` (embedded page) |
-| `src/bridge/web/` | The page: `index.html`, `app.js`, `app.css`, `keys.js` (pure key and touch logic, tested with Node), `wterm-shim.js`, `diag.js`, `manifest.webmanifest`; `icons/` holds the favicons and app icons; `vendor/` holds xterm.js and wterm with their licences and checksums |
+| `src/bridge/` | The program: `main.zig` (start-up, `--version`), `cli.zig` (commands and options), `layout.zig` (the two commands' defaults, the files they make, the next step they print), `access.zig` (who may talk to it), `server.zig` (HTTP and WebSocket), `protocol.zig` (browser protocol), `hub.zig` (sessions, terminals, viewers), `xfer.zig` (file transfer, and the checks and explanations for files and folders), `assets.zig` (embedded page) |
+| `src/bridge/web/` | The page: `index.html`, `app.js`, `app.css`, `keys.js` (pure key and touch logic, tested with Node), `wterm-shim.js`, `diag.js`, `manifest.webmanifest`; `login.html`, `login.js`, `login.css` (the token form); `icons/` holds the favicons and app icons; `vendor/` holds xterm.js and wterm with their licences and checksums |
 | `src/fuzz.zig` | Fuzz targets for every parser that reads outside bytes (`zig build fuzz --fuzz`) |
 | `tests/web/` | Tests for the page's logic (`zig build web-test`) |
 | `assets/logo/` | The logo's SVG sources, the social preview and `build.sh`, which exports the rasters (the page's icons are in `src/bridge/web/icons/`) |

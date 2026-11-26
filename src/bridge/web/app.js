@@ -17,6 +17,10 @@ let dbgOn = false;
 
 const state = {
   ws: null, retry: 500, observe: false, locked: false, rexUp: true,
+  tokenMode: K.tokenModeFromPath(location.pathname),   // SSH tunnel (page under /s/<id>/, or `auth: "token"`); see `dropped`
+  link: K.LINK_START,                     // {phase, why} of keys.js `linkStep`; loading the page is the first request
+  retryTimer: 0,                          // Tailscale mode's backoff before the next connection
+  linkChecked: false,                     // this connection's first message passed keys.js `looksLikeRweb` (token mode)
   tree: [], current: null,               // {session, block}
   opened: false,                          // the bridge confirmed it shows `current` (see `ready`)
   cols: 80, rows: 24, historyRows: 0,
@@ -102,7 +106,8 @@ if (!term) {
   for (const n of [4, 10, 11, 12]) term.parser.registerOscHandler(n, data => data.includes('?'));
 }
 
-function send(obj) { if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(obj)); }
+// Nothing goes out on a token-mode connection before its first message showed it is rweb (`connect`).
+function send(obj) { if (state.ws && state.ws.readyState === 1 && state.linkChecked) state.ws.send(JSON.stringify(obj)); }
 // `opened`: the bridge has said it shows state.current (an `opened` for it arrived). Until then the
 // bridge may still be on the terminal shown before, so nothing is typed and its output is not drawn.
 function ready() { return !!state.current && state.opened; }
@@ -331,13 +336,16 @@ function notice(text) {
 function renderStatus() {
   const dot = $('dot');
   let cls = 'good', label = 'connected', banner = null, bad = false;
-  if (!state.ws || state.ws.readyState !== 1) { cls = 'warn'; label = 'reconnecting'; banner = 'Reconnecting…'; }
+  const waiting = state.link.phase === 'waiting';
+  if (waiting) { cls = 'bad'; label = 'disconnected'; banner = K.waitText(state.link.why); bad = true; }
+  else if (!state.ws || state.ws.readyState !== 1) { cls = 'warn'; label = 'reconnecting'; banner = 'Reconnecting…'; }
   else if (!link.healthy) { cls = 'warn'; label = 'connection stalled'; banner = 'Connection stalled: typing is paused until it recovers.'; }
   else if (!state.rexUp) { cls = 'bad'; label = 'Rex unreachable'; banner = 'Rex is not reachable. This page will reconnect when it is back.'; bad = true; }
   else if (state.observe) { banner = state.locked ? 'View only (locked by the server): nothing you do here changes anything.' : 'View only: typing and changes are off.'; }
   else if (state.exited !== null) { banner = `The program in this terminal exited (${state.exited}).`; }
   dot.className = 'dot ' + cls; dot.setAttribute('aria-label', label); dot.title = label;
-  const b = $('banner'); b.hidden = banner === null; b.textContent = banner || ''; b.className = bad ? 'bad' : '';
+  const b = $('banner'); b.hidden = banner === null; $('banner-text').textContent = banner || ''; b.className = bad ? 'bad' : '';
+  $('banner-act').hidden = !waiting;
   requestAnimationFrame(layout);
 }
 
@@ -345,25 +353,70 @@ function renderStatus() {
 // A phone's connection through Tailscale Serve can go silently dead. So: ask for a reply every
 // 3 s, and if nothing has come back for 8 s give the socket up and open a new one at once. Typing
 // is refused until something arrives, so no keystroke is sent into a dead connection.
+// In token mode (an SSH tunnel) each request (loading the page, a tap on Reconnect) makes one
+// connection attempt and nothing reconnects by itself: whatever answers on this origin once the
+// tunnel is down may not be rweb, and would get the page's cookie (E4, M2: keys.js `linkStep`). The
+// page says why it stopped and reconnects when the person taps Reconnect.
+function step(ev) { const r = K.linkStep(state.link, ev, state.tokenMode); state.link = {phase: r.phase, why: r.why}; return r.act; }
+function stopRetry() { clearTimeout(state.retryTimer); state.retryTimer = 0; }
+function dropped(delay) {
+  stopRetry();
+  if (step('close') !== 'retry') { state.ws = null; link.healthy = false; renderStatus(); return; }
+  if (delay > 0) {
+    const ws = state.ws;
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = 0;
+      if (state.ws !== ws) return;
+      // Token mode became known meanwhile: never a connection from a timer then.
+      if (state.tokenMode) { dropped(0); return; }
+      connect();
+    }, delay);
+    state.retry = Math.min(state.retry * 2, 4000);
+  } else { state.retry = 500; connect(); }
+}
+// The person asked for a new connection (the banner's button, the menu's Reconnect): one attempt in
+// token mode; in Tailscale mode the usual backoff follows if it fails.
+function reconnectNow() {
+  stopRetry(); step('ask'); state.retry = 500;
+  if (state.ws) { const w = state.ws; state.ws = null; try { w.close(); } catch {} }
+  connect();
+}
+$('banner-act').onclick = reconnectNow;
+// Its first message was not rweb's (token mode): close it and show nothing it sent.
+function notRweb(ws) {
+  stopRetry();
+  state.ws = null; try { ws.close(); } catch {}
+  step('foreign'); link.healthy = false; renderStatus();
+}
 function connect() {
+  stopRetry();
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}ws${location.search}`);
   state.ws = ws; ws.binaryType = 'arraybuffer';
   state.opened = false; forgetPaste();         // a new connection shows nothing until it says `opened`
   const mine = () => state.ws === ws;          // a socket we abandoned must not act
+  // Token mode: nothing is sent (see `send`) and nothing received is used until the first message
+  // passed keys.js `looksLikeRweb`.
+  state.linkChecked = !state.tokenMode;
+  const restore = () => { if (state.current) { startRestore(); send({t: 'open', session: state.current.session, block: state.current.block}); } };
   link.lastRx = performance.now(); link.healthy = false; renderStatus();
   ws.onopen = () => {
     if (!mine()) return;
     state.retry = 500; link.lastRx = performance.now();
-    if (state.current) { startRestore(); send({t: 'open', session: state.current.session, block: state.current.block}); }
+    step('open');
+    if (state.linkChecked) restore();
     renderStatus();
   };
   ws.onclose = () => {
     if (!mine()) return;
     link.healthy = false; renderStatus();
-    setTimeout(() => { if (mine()) connect(); }, state.retry); state.retry = Math.min(state.retry * 2, 4000);
+    dropped(state.retry);
   };
   ws.onmessage = ev => {
     if (!mine()) return;
+    if (!state.linkChecked) {
+      if (!state.tokenMode || K.looksLikeRweb(ev.data)) { state.linkChecked = true; restore(); }
+      else { notRweb(ws); return; }
+    }
     link.lastRx = performance.now();
     if (!link.healthy) { link.healthy = true; renderStatus(); }
     // Output is drawn only once the bridge has said it shows this page's terminal (see `ready`).
@@ -380,13 +433,13 @@ setInterval(() => {
   if (quiet > 5000 && link.healthy) { link.healthy = false; renderStatus(); }
   if (quiet > 8000) {
     state.ws = null; try { ws.close(); } catch {}
-    state.retry = 500; connect();
+    dropped(0);
   }
 }, 1000);
 
 function handleMessage(m) {
   switch (m.t) {
-    case 'mode': setDebug(K.debugOn(dbgAsked, m)); state.canDownload = !!m.download; state.canUpload = !!m.upload; state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
+    case 'mode': state.tokenMode = K.tokenModeFrom(state.tokenMode, m); setDebug(K.debugOn(dbgAsked, m)); state.canDownload = !!m.download; state.canUpload = !!m.upload; state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
     case 'rex': state.rexUp = m.up; renderStatus(); if (m.up) retryOpenNow(); break;
     case 'tree': {
       state.tree = m.sessions; renderAll(); maybeRestore();
@@ -438,7 +491,8 @@ function onError(m) {
   if (f === 'open') { openRefused(m, msg); return; }
   if (f === 'rate' && state.current && !state.opened) { openRefused({for: 'open', rate: true}, msg); return; }
   if (f === 'paste' && m.code === 'confirm_multiline') { askMultiline(msg); return; }
-  // The bridge closes the connection after this one; the page reconnects as usual.
+  // The bridge closes the connection after this one; the page reconnects as usual (in token mode,
+  // on a tap: see `dropped`).
   if (f === 'message') { notice(`Not sent: the message was ${msg}`); return; }
   switch (f) {
     case 'rate':                                     // an older bridge: it could be any of these
@@ -706,7 +760,7 @@ $('more').onclick = () => openPop($('more'), pop => {
     history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash);
     location.reload();
   });
-  item(pop, 'Reconnect', () => { closePop(); if (state.ws) { const w = state.ws; state.ws = null; try { w.close(); } catch {} } connect(); });
+  item(pop, 'Reconnect', () => { closePop(); reconnectNow(); });
   updateControls();
 });
 $('tab-menu').onclick = () => openPop($('tab-menu'), pop => {

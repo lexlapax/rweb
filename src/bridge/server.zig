@@ -12,6 +12,7 @@ const protocol = @import("protocol.zig");
 const hub_mod = @import("hub.zig");
 const xfer = @import("xfer.zig");
 const assets = @import("assets.zig");
+const layout = @import("layout.zig");
 const Hub = hub_mod.Hub;
 
 const log = std.log.scoped(.server);
@@ -21,9 +22,170 @@ pub const Listen = union(enum) {
     /// under folders only we or root can change, none of them a link (Tailscale Serve reaches the
     /// socket by this path, so the path itself must stay ours).
     unix: []const u8,
-    /// Loopback TCP only (port 0 picks one).
+    /// Loopback TCP only (port 0 picks one): `127.0.0.1` and, where the system has IPv6 loopback,
+    /// `[::1]` on the same port, so `localhost` cannot reach another account's listener.
     tcp_loopback: u16,
 };
+
+/// A listener taken before anything else at startup and kept through outages of Rex and Tailscale,
+/// so the port or socket is never free for another account to take while rweb waits. Connections
+/// wait in the kernel's listen queue until `Server.startBound` accepts them; no request is read
+/// before the access rules are complete.
+pub const Bound = struct {
+    listen: Listen,
+    listener: Io.net.Server,
+    /// `[::1]` on the TCP port; null for a unix socket, or when the system has no IPv6 loopback.
+    listener6: ?Io.net.Server = null,
+    /// Why `[::1]` is not held on a TCP listener, when it is not.
+    v6_missing: ?anyerror = null,
+    /// The TCP port.
+    port: u16 = 0,
+    sock_dir: ?std.posix.fd_t = null,
+    sock_name: []const u8 = "",
+    sock_id: ?SockId = null,
+
+    /// Release it: close the listeners and remove the unix socket this process made (only that).
+    pub fn deinit(b: *Bound, io: Io) void {
+        b.listener.deinit(io);
+        if (b.listener6) |*l| l.deinit(io);
+        if (b.sock_dir) |fd| {
+            const dir: Io.Dir = .{ .handle = fd };
+            if (socketInPlace(fd, b.sock_name, b.sock_id)) dir.deleteFile(io, b.sock_name) catch {};
+            dir.close(io);
+        }
+        b.* = undefined;
+    }
+};
+
+const SockId = struct { dev: u64, ino: u64 };
+
+/// Whether `name` in folder `fd` is still the socket with identity `id`.
+fn socketInPlace(fd: std.posix.fd_t, name: []const u8, id: ?SockId) bool {
+    const want = id orelse return false;
+    const n = xfer.statAt(fd, name) catch return false;
+    return n.dev == want.dev and n.ino == want.ino;
+}
+
+/// The longest unix socket path the system takes, NUL included (`sockaddr_un.sun_path`: 104 bytes on
+/// macOS, 108 on Linux).
+pub const max_unix_path = @typeInfo(@FieldType(std.posix.sockaddr.un, "path")).array.len;
+
+/// Whether `path` fits in a unix socket address, with its NUL.
+pub fn unixPathFits(path: []const u8) bool {
+    return path.len < max_unix_path;
+}
+
+/// Take the listener `listen` names. A unix socket: in a folder that passes the checks (see
+/// `Listen.unix`), created 0600. TCP: `127.0.0.1` and `[::1]` on the same port, without
+/// `SO_REUSEPORT` (with it, another socket that also sets it could bind the same port and take
+/// connections); a port of 0 picks one free on both. A `[::1]` already taken by another socket is
+/// an error; a system with no IPv6 loopback is not (`Bound.v6_missing` says why).
+pub fn bind(gpa: Allocator, io: Io, listen: Listen, problem: ?*xfer.Problem) !Bound {
+    switch (listen) {
+        .unix => |path| {
+            // Before anything is made: a path the system cannot bind would fail only after the
+            // folders were made.
+            if (!unixPathFits(path)) return error.NameTooLong;
+            var own_problem: xfer.Problem = .{};
+            const dir = try openSocketDir(gpa, io, path, problem orelse &own_problem);
+            errdefer (Io.Dir{ .handle = dir.fd }).close(io);
+            try clearStaleSocket(io, dir.fd, dir.name, path);
+            var b: Bound = .{ .listen = listen, .listener = undefined, .sock_dir = dir.fd, .sock_name = dir.name };
+            {
+                const old = std.c.umask(0o177); // the socket is created 0600
+                defer _ = std.c.umask(old);
+                // Bound by path: every folder on it was just checked (only we or root can change
+                // them), so the path leads into the folder that is held open.
+                const addr = try Io.net.UnixAddress.init(path);
+                b.listener = try addr.listen(io, .{});
+            }
+            errdefer b.listener.deinit(io);
+            // What was bound, seen in the kept folder: removed at the end only if still the same.
+            const n = try xfer.statAt(dir.fd, dir.name);
+            if (!xfer.isSocket(n)) return error.NotASocket;
+            b.sock_id = .{ .dev = n.dev, .ino = n.ino };
+            return b;
+        },
+        .tcp_loopback => |want_port| {
+            // With port 0, the port picked on 127.0.0.1 may be taken on ::1: try a few.
+            var tries: u32 = if (want_port == 0) 16 else 1;
+            while (true) {
+                tries -= 1;
+                var l4 = try listenLoopback(.v4, want_port);
+                errdefer l4.deinit(io);
+                const port = l4.socket.address.getPort();
+                var b: Bound = .{ .listen = .{ .tcp_loopback = port }, .listener = l4, .port = port };
+                if (listenLoopback(.v6, port)) |l6| {
+                    b.listener6 = l6;
+                    return b;
+                } else |e| switch (e) {
+                    // No IPv6 loopback here: nothing to hold.
+                    error.AddressNotAvailable, error.AddressFamilyUnsupported => {
+                        b.v6_missing = e;
+                        return b;
+                    },
+                    error.AddressInUse => if (tries > 0) {
+                        l4.deinit(io);
+                        continue;
+                    } else return error.Ip6AddressInUse,
+                    else => return e,
+                }
+            }
+        },
+    }
+}
+
+const Family = enum { v4, v6 };
+
+/// A listening loopback TCP socket on `port`: `SO_REUSEADDR` (a restart is not held up by old
+/// connections in TIME_WAIT) and never `SO_REUSEPORT`; IPv6 is `IPV6_V6ONLY`.
+fn listenLoopback(family: Family, port: u16) !Io.net.Server {
+    const posix = std.posix;
+    const af: c_uint = if (family == .v4) posix.AF.INET else posix.AF.INET6;
+    const fd = std.c.socket(af, posix.SOCK.STREAM, 0);
+    if (fd < 0) return switch (posix.errno(fd)) {
+        .AFNOSUPPORT => error.AddressFamilyUnsupported,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        else => error.SocketFailed,
+    };
+    errdefer _ = std.c.close(fd);
+    _ = std.c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
+    const one: c_int = 1;
+    if (std.c.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &one, @sizeOf(c_int)) != 0) return error.SocketFailed;
+    var address: Io.net.IpAddress = undefined;
+    const rc = switch (family) {
+        .v4 => blk: {
+            var sa: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f00_0001) };
+            address = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+            break :blk std.c.bind(fd, @ptrCast(&sa), @sizeOf(posix.sockaddr.in));
+        },
+        .v6 => blk: {
+            if (std.c.setsockopt(fd, posix.IPPROTO.IPV6, posix.IPV6.V6ONLY, &one, @sizeOf(c_int)) != 0) return error.SocketFailed;
+            var sa: posix.sockaddr.in6 = .{ .port = std.mem.nativeToBig(u16, port), .flowinfo = 0, .addr = Io.net.Ip6Address.loopback(0).bytes, .scope_id = 0 };
+            address = .{ .ip6 = Io.net.Ip6Address.loopback(port) };
+            break :blk std.c.bind(fd, @ptrCast(&sa), @sizeOf(posix.sockaddr.in6));
+        },
+    };
+    if (rc != 0) return switch (posix.errno(rc)) {
+        .ADDRINUSE => error.AddressInUse,
+        .ADDRNOTAVAIL => error.AddressNotAvailable,
+        .AFNOSUPPORT => error.AddressFamilyUnsupported,
+        .ACCES => error.AccessDenied,
+        else => error.BindFailed,
+    };
+    if (std.c.listen(fd, 128) != 0) return switch (posix.errno(@as(c_int, -1))) {
+        .ADDRINUSE => error.AddressInUse,
+        else => error.ListenFailed,
+    };
+    if (port == 0) {
+        var got: posix.sockaddr.in = undefined;
+        var len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+        if (std.c.getsockname(fd, @ptrCast(&got), &len) != 0) return error.SocketFailed;
+        address = .{ .ip4 = Io.net.Ip4Address.loopback(std.mem.bigToNative(u16, got.port)) };
+    }
+    return .{ .socket = .{ .handle = fd, .address = address }, .options = {} };
+}
 
 pub const Options = struct {
     listen: Listen,
@@ -34,6 +196,12 @@ pub const Options = struct {
     max_viewers: u32 = 32,
     /// With a unix listener: where a failed check of the socket's folders was, for the message.
     problem: ?*xfer.Problem = null,
+    /// Wrong tokens (in the header or the query, from this origin) counted in any `token_window_ms`:
+    /// past them every wrong one gets 429 until the window ends, so a token cannot be guessed online
+    /// at any useful rate (it is all one budget: every local account reaches a loopback port from the
+    /// same address). A right token always gets in (see `TokenLimiter`).
+    max_token_failures: u32 = 10,
+    token_window_ms: u32 = 60_000,
     /// Log what browsers send, typed text included. For keyboard testing only.
     debug_input: bool = false,
     /// A secret first path segment every request must carry, for a loopback TCP listener where
@@ -120,6 +288,57 @@ fn isSilent(now: i64, last_rx: i64, busy_since: i64, limit_ms: u32) bool {
 /// stream cannot be resynchronized, so it is closed either way).
 const too_large_text = "{\"t\":\"error\",\"for\":\"message\",\"msg\":\"too large\"}";
 
+fn freeList(gpa: Allocator, list: [][]u8) void {
+    for (list) |a| gpa.free(a);
+    gpa.free(list);
+}
+
+/// Whether `list` holds the address `a` (compared as addresses, see `access.sameAddressList`).
+fn containsAddress(list: []const []const u8, a: []const u8) bool {
+    for (list) |x| if (access.sameAddressList(&.{x}, &.{a})) return true;
+    return false;
+}
+
+/// One budget of wrong tokens for the whole server, per window. Only a wrong token in the header or
+/// the query counts, and only from a request that passed every other check and came from this
+/// origin (`access.checkToken`): a refused request, a page elsewhere and a planted cookie take
+/// nothing from it. A right token is compared first and always gets in, so the budget caps how fast
+/// tokens can be guessed without ever locking the owner out; and comparing while over the budget
+/// tells a guesser nothing a right guess would not give anyway.
+const TokenLimiter = struct {
+    mu: Io.Mutex = .init,
+    window_start: i64 = 0,
+    used: u32 = 0,
+    /// Whether this window's "over the limit" was logged.
+    logged: bool = false,
+
+    /// Count one wrong token; false when the window's budget was already used up (answer 429).
+    fn fail(l: *TokenLimiter, io: Io, now: i64, max: u32, window_ms: u32) bool {
+        l.mu.lockUncancelable(io);
+        defer l.mu.unlock(io);
+        if (now - l.window_start >= window_ms) {
+            l.window_start = now;
+            l.used = 0;
+            l.logged = false;
+        }
+        if (l.used >= max) {
+            if (!l.logged) log.warn("wrong tokens over the limit ({d} in {d} s): every wrong one is answered 429 until the window ends", .{ max, window_ms / 1000 });
+            l.logged = true;
+            return false;
+        }
+        l.used += 1;
+        return true;
+    }
+};
+
+/// The token form's files, served without a token in token mode: the form at `/` and its script
+/// and style. Static; nothing from the bridge is in them.
+fn loginAsset(path: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, path, "/")) return "/login.html";
+    if (std.mem.eql(u8, path, "/login.js") or std.mem.eql(u8, path, "/login.css")) return path;
+    return null;
+}
+
 /// When a transfer last moved bytes.
 const Progress = struct {
     last_ms: std.atomic.Value(i64),
@@ -135,9 +354,12 @@ pub const Server = struct {
     hub: *Hub,
     opts: Options,
     listener: Io.net.Server,
+    /// `[::1]` on the TCP port, when the system has it.
+    listener6: ?Io.net.Server = null,
     /// The TCP port, once listening.
     port: u16 = 0,
     accept_task: ?Io.Future(void) = null,
+    accept_task6: ?Io.Future(void) = null,
     group: Io.Group = .init,
     active: std.atomic.Value(u32) = .init(0),
     /// Connections accepted but not yet through the access check.
@@ -153,7 +375,13 @@ pub const Server = struct {
     /// it; and the device and inode of the socket this server bound, so `stop` removes only that.
     sock_dir: ?std.posix.fd_t = null,
     sock_name: []const u8 = "",
-    sock_id: ?struct { dev: u64, ino: u64 } = null,
+    sock_id: ?SockId = null,
+    /// Guards `opts.access.own_addresses`, which `setOwnAddresses` replaces while requests are judged.
+    access_mu: Io.Mutex = .init,
+    /// The own-address list `setOwnAddresses` made (ours to free), if any.
+    own_owned: ?[][]u8 = null,
+    /// Failed token checks in the current window (see `Options.max_token_failures`).
+    limiter: TokenLimiter = .{},
     /// Accepted connections that have not sent a request head yet, oldest first (under `conns_mu`).
     waiting: std.ArrayList(Io.net.Stream) = .empty,
     /// Connections evicted from `waiting`, for tests and logs.
@@ -172,52 +400,105 @@ pub const Server = struct {
     token_prefix_buf: [3 + 32]u8 = undefined,
     token_prefix: ?[]const u8 = null,
 
+    /// `bind` then `startBound`.
     pub fn start(gpa: Allocator, io: Io, hub: *Hub, opts: Options) !*Server {
         if (opts.access.owner == null and opts.access.token == null) return error.AccessNotConfigured;
+        var b = try bind(gpa, io, opts.listen, opts.problem);
+        errdefer b.deinit(io);
+        return startBound(gpa, io, hub, opts, b);
+    }
+
+    /// Serve on a listener taken earlier with `bind` (`opts.listen` is replaced by what was bound).
+    /// On success the server owns `b`; on failure it is still the caller's.
+    pub fn startBound(gpa: Allocator, io: Io, hub: *Hub, opts_in: Options, b: Bound) !*Server {
+        if (opts_in.access.owner == null and opts_in.access.token == null) return error.AccessNotConfigured;
+        var opts = opts_in;
+        opts.listen = b.listen;
         const s = try gpa.create(Server);
         errdefer gpa.destroy(s);
-        s.* = .{ .gpa = gpa, .io = io, .hub = hub, .opts = opts, .listener = undefined };
+        s.* = .{
+            .gpa = gpa,
+            .io = io,
+            .hub = hub,
+            .opts = opts,
+            .listener = b.listener,
+            .listener6 = b.listener6,
+            .port = b.port,
+            .sock_dir = b.sock_dir,
+            .sock_name = b.sock_name,
+            .sock_id = b.sock_id,
+        };
         if (opts.access.token) |t| s.token_prefix = tokenPrefix(&s.token_prefix_buf, t);
-        switch (opts.listen) {
-            .unix => |path| {
-                var own_problem: xfer.Problem = .{};
-                const dir = try openSocketDir(io, path, opts.problem orelse &own_problem);
-                s.sock_dir = dir.fd;
-                s.sock_name = dir.name;
-                errdefer {
-                    (Io.Dir{ .handle = dir.fd }).close(io);
-                    s.sock_dir = null;
-                }
-                try clearStaleSocket(io, dir.fd, dir.name, path);
-                {
-                    const old = umask(0o177); // the socket is created 0600
-                    defer _ = umask(old);
-                    // Bound by path: every folder on it was just checked (only we or root can change
-                    // them), so the path leads into the folder that is held open.
-                    const addr = try Io.net.UnixAddress.init(path);
-                    s.listener = try addr.listen(io, .{});
-                }
-                // What was bound, seen in the kept folder: removed at `stop` only if still the same.
-                const n = xfer.statAt(dir.fd, dir.name) catch |e| {
-                    s.listener.deinit(io);
-                    return e;
-                };
-                if (!xfer.isSocket(n)) {
-                    s.listener.deinit(io);
-                    return error.NotASocket;
-                }
-                s.sock_id = .{ .dev = n.dev, .ino = n.ino };
-            },
-            .tcp_loopback => |port| {
-                var addr = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(port) };
-                s.listener = try addr.listen(io, .{ .reuse_address = true });
-                s.port = s.listener.socket.address.getPort();
-            },
-        }
-        errdefer s.listener.deinit(io);
-        errdefer if (s.sock_dir) |fd| (Io.Dir{ .handle = fd }).close(io);
-        s.accept_task = try io.concurrent(acceptLoop, .{s});
+        s.accept_task = try io.concurrent(acceptLoop, .{ s, &s.listener });
+        if (s.listener6 != null) s.accept_task6 = io.concurrent(acceptLoop, .{ s, &s.listener6.? }) catch |e| {
+            s.stopping.store(true, .release);
+            s.wakeAccept();
+            s.accept_task.?.cancel(io);
+            return e;
+        };
         return s;
+    }
+
+    /// Replace this node's own addresses (refreshed from Tailscale while running). Copied; the old
+    /// list is freed once no request is being judged against it.
+    pub fn setOwnAddresses(s: *Server, list: []const []const u8) Allocator.Error!void {
+        const copy = try s.gpa.alloc([]u8, list.len);
+        var made: usize = 0;
+        errdefer {
+            for (copy[0..made]) |a| s.gpa.free(a);
+            s.gpa.free(copy);
+        }
+        for (list, 0..) |a, i| {
+            copy[i] = try s.gpa.dupe(u8, a);
+            made += 1;
+        }
+        s.access_mu.lockUncancelable(s.io);
+        const old = s.own_owned;
+        s.own_owned = copy;
+        s.opts.access.own_addresses = @ptrCast(copy);
+        s.access_mu.unlock(s.io);
+        if (old) |o| freeList(s.gpa, o);
+    }
+
+    /// This node's own addresses now (a copy in `arena`).
+    pub fn ownAddresses(s: *Server, arena: Allocator) Allocator.Error![]const []const u8 {
+        s.access_mu.lockUncancelable(s.io);
+        defer s.access_mu.unlock(s.io);
+        const out = try arena.alloc([]const u8, s.opts.access.own_addresses.len);
+        for (s.opts.access.own_addresses, 0..) |a, i| out[i] = try arena.dupe(u8, a);
+        return out;
+    }
+
+    pub const Refresh = enum { unchanged, added, failed, invalid };
+
+    /// One refresh of the own addresses from what was `fetched`: addresses not yet on the list are
+    /// added (each logged), and none is ever taken off while rweb runs, so a request from an address
+    /// this node had a minute ago is still refused. A failed fetch, an empty list or one with
+    /// something that is not an address changes nothing.
+    pub fn refreshOwnAddresses(s: *Server, fetched: anyerror![]const []const u8) Refresh {
+        const list = fetched catch return .failed;
+        if (list.len == 0) return .invalid;
+        for (list) |a| if (!access.isAddress(a)) return .invalid;
+        var arena_state = std.heap.ArenaAllocator.init(s.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const now = s.ownAddresses(arena) catch return .failed;
+        var all: std.ArrayList([]const u8) = .empty;
+        all.appendSlice(arena, now) catch return .failed;
+        for (list) |a| {
+            if (containsAddress(all.items, a)) continue;
+            all.append(arena, a) catch return .failed;
+        }
+        if (all.items.len == now.len) return .unchanged;
+        s.setOwnAddresses(all.items) catch return .failed;
+        for (all.items[now.len..]) |a| log.info("a new address of this node, {s}: requests from it are refused from now on (the earlier ones still are)", .{a});
+        return .added;
+    }
+
+    fn decideAllButToken(s: *Server, request: access.Request) access.Decision {
+        s.access_mu.lockUncancelable(s.io);
+        defer s.access_mu.unlock(s.io);
+        return access.decideAllButToken(s.opts.access, request);
     }
 
     pub fn stop(s: *Server) void {
@@ -227,11 +508,14 @@ pub const Server = struct {
         s.conns_mu.unlock(s.io);
         s.wakeAccept();
         if (s.accept_task) |*t| t.cancel(s.io);
+        if (s.accept_task6) |*t| t.cancel(s.io);
         s.group.cancel(s.io);
         s.conns.deinit(s.gpa);
         s.waiting.deinit(s.gpa);
         for (s.gz) |z| if (z) |bytes| s.gpa.free(bytes);
+        if (s.own_owned) |o| freeList(s.gpa, o);
         s.listener.deinit(s.io);
+        if (s.listener6) |*l| l.deinit(s.io);
         if (s.sock_dir) |fd| {
             const dir: Io.Dir = .{ .handle = fd };
             // Only the socket this server made: something put in its place is left alone.
@@ -245,9 +529,7 @@ pub const Server = struct {
     /// device and inode).
     fn ownSocketInPlace(s: *Server) bool {
         const fd = s.sock_dir orelse return false;
-        const want = s.sock_id orelse return false;
-        const n = xfer.statAt(fd, s.sock_name) catch return false;
-        return n.dev == want.dev and n.ino == want.ino;
+        return socketInPlace(fd, s.sock_name, s.sock_id);
     }
 
     /// Make a blocked `accept` return, by connecting to ourselves.
@@ -263,16 +545,19 @@ pub const Server = struct {
             },
             .tcp_loopback => {
                 var addr = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(s.port) };
-                const c = addr.connect(s.io, .{ .mode = .stream }) catch return;
-                c.close(s.io);
+                if (addr.connect(s.io, .{ .mode = .stream })) |c| c.close(s.io) else |_| {}
+                if (s.listener6 != null) {
+                    var addr6 = Io.net.IpAddress{ .ip6 = Io.net.Ip6Address.loopback(s.port) };
+                    if (addr6.connect(s.io, .{ .mode = .stream })) |c| c.close(s.io) else |_| {}
+                }
             },
         }
     }
 
-    fn acceptLoop(s: *Server) void {
+    fn acceptLoop(s: *Server, listener: *Io.net.Server) void {
         while (true) {
             if (s.stopping.load(.acquire)) return;
-            const conn = s.listener.accept(s.io) catch |e| switch (e) {
+            const conn = listener.accept(s.io) catch |e| switch (e) {
                 error.Canceled => return,
                 else => {
                     log.err("accept: {t}", .{e});
@@ -286,7 +571,7 @@ pub const Server = struct {
             }
             // A unix peer is checked at once, before it can hold anything.
             if (s.opts.listen == .unix) if (s.opts.access.allowed_peer_uids) |uids| {
-                const uid = peerUid(conn);
+                const uid = rex.ws.peerUid(conn);
                 const ok = if (uid) |u| std.mem.indexOfScalar(u32, uids, u) != null else false;
                 if (!ok) {
                     s.last_refusal.store(@intFromEnum(access.Refusal.wrong_peer), .release);
@@ -444,26 +729,55 @@ pub const Server = struct {
         }
         const upgrade = req.upgradeRequested();
         const areq: access.Request = .{
-            .peer_uid = if (s.opts.listen == .unix) peerUid(conn) else null,
+            .peer_uid = if (s.opts.listen == .unix) rex.ws.peerUid(conn) else null,
             .headers = hdrs[0..n],
             .query_token = access.queryToken(rest),
             .is_websocket_upgrade = upgrade == .websocket,
             .requires_origin = req.head.method != .GET and req.head.method != .HEAD,
         };
-        switch (access.decide(s.opts.access, areq)) {
-            .allow => {
-                if (pending.*) {
-                    pending.* = false;
-                    _ = s.pending.fetchSub(1, .acq_rel);
+        // Every check but the token's first: a request refused for anything else never counts as a
+        // guess. Then the token (`access.checkToken`): a right one gets in whatever the budget; a
+        // wrong one in the header or the query from this origin is counted, and over the budget it
+        // gets 429; a wrong cookie and a token sent from another origin are refused uncounted.
+        var why: ?access.Refusal = switch (s.decideAllButToken(areq)) {
+            .allow => null,
+            .deny => |refusal| refusal,
+        };
+        if (why == null) switch (access.checkToken(s.opts.access, areq)) {
+            .none, .right => {},
+            .missing => why = .no_token,
+            .wrong_cookie => why = .bad_token,
+            .cross_site => why = .cross_site_token,
+            .wrong => {
+                if (!s.limiter.fail(s.io, nowMs(s.io), s.opts.max_token_failures, s.opts.token_window_ms)) {
+                    s.last_refusal.store(@intFromEnum(access.Refusal.bad_token), .release);
+                    _ = s.refusals.fetchAdd(1, .acq_rel);
+                    try req.respond("too many wrong tokens: try again in a minute\n", .{ .status = .too_many_requests, .keep_alive = false, .extra_headers = &(security_headers ++ no_store ++ [_]std.http.Header{.{ .name = "retry-after", .value = "60" }}) });
+                    return;
                 }
+                why = .bad_token;
             },
-            .deny => |why| {
-                s.last_refusal.store(@intFromEnum(why), .release);
-                _ = s.refusals.fetchAdd(1, .acq_rel);
-                log.info("refused: {s}", .{why.text()});
-                try req.respond("forbidden\n", .{ .status = .forbidden, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
-                return;
-            },
+        };
+        if (why) |refusal| {
+            // Token mode: the token form, at `/` (outside the prefix) for a page load that carries
+            // no token in its header or address (every other check passed to get here).
+            if (s.token_prefix != null and (refusal == .no_token or refusal == .bad_token) and !under_prefix and
+                req.head.method == .GET and upgrade == .none and areq.query_token == null and areq.header("rweb-token") == null)
+            {
+                if (loginAsset(path)) |p| {
+                    logged_path = if (std.mem.eql(u8, path, "/")) "(token form)" else p;
+                    return s.serveAsset(&req, assets.indexOf(p).?, null, hdrs[0..n]);
+                }
+            }
+            s.last_refusal.store(@intFromEnum(refusal), .release);
+            _ = s.refusals.fetchAdd(1, .acq_rel);
+            log.info("refused: {s}", .{refusal.text()});
+            try req.respond("forbidden\n", .{ .status = .forbidden, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+            return;
+        }
+        if (pending.*) {
+            pending.* = false;
+            _ = s.pending.fetchSub(1, .acq_rel);
         }
         if (bare_prefix) return s.redirect(&req, s.token_prefix.?, rest, false, false);
 
@@ -536,9 +850,10 @@ pub const Server = struct {
             try req.respond(tree, .{ .keep_alive = false, .extra_headers = &(security_headers ++ no_store ++ [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }}) });
             return;
         }
-        // The page opened with `?token=` outside its prefix: move to the prefix, where the token's
-        // cookie lives, and take the token out of the address.
-        if (s.token_prefix) |pfx| if (!under_prefix and areq.query_token != null and std.mem.eql(u8, path, "/")) {
+        // The page opened with `?token=` outside its prefix, or the token form sent the token in its
+        // header: move to the prefix, where the token's cookie lives, and take the token out of the
+        // address.
+        if (s.token_prefix) |pfx| if (!under_prefix and (areq.query_token != null or areq.header("rweb-token") != null) and std.mem.eql(u8, path, "/")) {
             return s.redirect(&req, pfx, rest[std.mem.indexOfScalar(u8, rest, '?') orelse rest.len ..], true, behindHttps(hdrs[0..n]));
         };
         if (assets.indexOf(path)) |idx| return s.serveAsset(&req, idx, if (under_prefix) areq.query_token else null, hdrs[0..n]);
@@ -1078,8 +1393,6 @@ fn clearStaleSocket(io: Io, dir_fd: std.posix.fd_t, name: []const u8, path: []co
 
 // ---- OS bits ----
 
-extern "c" fn umask(mask: c_uint) c_uint;
-
 /// The unix socket's folder, opened and checked: every folder above it passes `xfer.checkAncestor`
 /// (walked from `/` without following a link; missing ones are made 0700 inside their checked
 /// parent), and the folder itself, made 0700 if missing, must be ours and closed to others
@@ -1087,8 +1400,8 @@ extern "c" fn umask(mask: c_uint) c_uint;
 /// folder, this one included, must also have no ACL that lets another user write and be on a
 /// filesystem whose owners mean what they say. The caller keeps the descriptor; `name` is the socket's
 /// name in it (a slice of `socket_path`).
-fn openSocketDir(io: Io, socket_path: []const u8, problem: *xfer.Problem) !struct { fd: std.posix.fd_t, name: []const u8 } {
-    problem.path = socket_path;
+fn openSocketDir(gpa: Allocator, io: Io, socket_path: []const u8, problem: *xfer.Problem) !struct { fd: std.posix.fd_t, name: []const u8 } {
+    problem.setPath(socket_path);
     if (socket_path.len == 0 or socket_path[0] != '/') return error.SocketPathNotAbsolute;
     const name = std.fs.path.basename(socket_path);
     if (socket_path[socket_path.len - 1] == '/' or name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.BadSocketPath;
@@ -1096,44 +1409,20 @@ fn openSocketDir(io: Io, socket_path: []const u8, problem: *xfer.Problem) !struc
     const above = std.fs.path.dirname(dir) orelse return error.SocketDirNotOurs; // the socket right in `/`
     const dir_name = std.fs.path.basename(dir);
     if (std.mem.eql(u8, dir_name, ".") or std.mem.eql(u8, dir_name, "..")) return error.BadSocketPath;
-    const parent = try xfer.openChain(io, above, true, problem);
+    const parent = try xfer.openChain(gpa, io, above, true, problem);
     defer (Io.Dir{ .handle = parent }).close(io);
-    problem.path = dir;
+    problem.setPath(dir);
     const fd = try xfer.openFolderAt(io, parent, dir_name, true);
     errdefer (Io.Dir{ .handle = fd }).close(io);
     // Ours and closed to others, by mode and by ACL, on a filesystem whose owners mean what they say.
-    xfer.checkPrivateDirFd(io, fd) catch |e| return switch (e) {
+    xfer.checkPrivateDirFdDetailed(gpa, io, fd, problem) catch |e| return switch (e) {
         error.NotOwned => error.SocketDirNotOurs,
         error.TooOpen, error.StatFailed => error.SocketDirNotPrivate,
         else => e,
     };
-    problem.path = socket_path;
+    problem.setPath(socket_path);
     return .{ .fd = fd, .name = name };
 }
-
-/// The uid of the process on the other end of a unix socket, if the OS will say.
-pub fn peerUid(conn: Io.net.Stream) ?u32 {
-    const fd = conn.socket.handle;
-    switch (builtin.os.tag) {
-        .macos, .freebsd, .netbsd, .openbsd => {
-            var uid: std.c.uid_t = undefined;
-            var gid: std.c.gid_t = undefined;
-            if (getpeereid(fd, &uid, &gid) != 0) return null;
-            return uid;
-        },
-        .linux => {
-            var cred: extern struct { pid: i32, uid: u32, gid: u32 } = undefined;
-            var len: std.c.socklen_t = @sizeOf(@TypeOf(cred));
-            const SOL_SOCKET = 1;
-            const SO_PEERCRED = 17;
-            if (std.c.getsockopt(fd, SOL_SOCKET, SO_PEERCRED, @ptrCast(&cred), &len) != 0) return null;
-            return cred.uid;
-        },
-        else => return null,
-    }
-}
-
-extern "c" fn getpeereid(fd: c_int, uid: *std.c.uid_t, gid: *std.c.gid_t) c_int;
 
 // ---- tests ----
 
@@ -1467,10 +1756,12 @@ test "server: the token cookie is scoped to the token's own path, never to the w
 test "server: refuses a request with no token or the wrong one" {
     const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
     defer rig.deinit();
-    const a = try get(rig, "/", "");
+    // Without a token, `/` is the token form (below); any other path is refused.
+    const a = try get(rig, "/app.js", "");
     defer freeHttp(a);
     try testing.expectEqual(@as(u16, 403), a.status);
     try testing.expectEqualStrings("forbidden\n", a.body);
+    try testing.expectEqual(@intFromEnum(access.Refusal.no_token), rig.srv.last_refusal.load(.acquire));
     const b = try get(rig, "/?token=wrong", "");
     defer freeHttp(b);
     try testing.expectEqual(@as(u16, 403), b.status);
@@ -1994,15 +2285,30 @@ test "server: the unix socket's folders are checked to the root, and only our ow
         _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/priv", .{open}), @enumFromInt(0o700));
         const path = try std.fmt.bufPrint(&pb, "{s}/priv/bridge.sock", .{open});
         try testing.expectError(error.FolderWritableByOthers, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc, .problem = &problem }));
-        try testing.expectEqualStrings(open, problem.path);
+        try testing.expectEqualStrings(open, problem.pathText());
     }
-    // Through a linked folder (which whoever can write its folder could point elsewhere): refused.
+    // Through a link of ours in a checked folder: followed during the checked walk, so it serves.
     {
         _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/real/sock", .{base}), @enumFromInt(0o700));
         var lb: [128]u8 = undefined;
         try Io.Dir.cwd().symLink(testing.io, try std.fmt.bufPrint(&lb, "{s}/real", .{base}), try std.fmt.bufPrint(&pb, "{s}/link", .{base}), .{});
         const path = try std.fmt.bufPrint(&pb, "{s}/link/sock/bridge.sock", .{base});
-        try testing.expectError(error.SymLink, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc }));
+        const srv = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc });
+        srv.stop();
+    }
+    // A link in a folder others can write (who could point it elsewhere): refused at that folder.
+    {
+        var ob: [128]u8 = undefined;
+        const open = try std.fmt.bufPrint(&ob, "{s}/open2", .{base});
+        try Io.Dir.cwd().createDirPath(testing.io, open);
+        var z: [128:0]u8 = undefined;
+        try testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}", .{open}, 0), 0o777));
+        var lb: [128]u8 = undefined;
+        try Io.Dir.cwd().symLink(testing.io, try std.fmt.bufPrint(&lb, "{s}/real", .{base}), try std.fmt.bufPrint(&pb, "{s}/lnk", .{open}), .{});
+        const path = try std.fmt.bufPrint(&pb, "{s}/lnk/sock/bridge.sock", .{open});
+        var lp: xfer.Problem = .{};
+        try testing.expectError(error.FolderWritableByOthers, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc, .problem = &lp }));
+        try testing.expectEqualStrings(open, lp.pathText());
     }
     // A relative path, or one with `..`, is refused.
     try testing.expectError(error.SocketPathNotAbsolute, Server.start(a, testing.io, h, .{ .listen = .{ .unix = "rweb/bridge.sock" }, .access = acc }));
@@ -2691,4 +2997,343 @@ test "server: a busy bridge does not use up a transfer token" {
     const ok = try put(o.rig, url, "Origin: http://localhost\r\n", "hi");
     defer freeHttp(ok);
     try testing.expectEqual(@as(u16, 200), ok.status);
+}
+
+test "server: token mode serves the token form at / without a token, and only there" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    const form = try get(rig, "/", "");
+    defer freeHttp(form);
+    try testing.expectEqual(@as(u16, 200), form.status);
+    try testing.expectEqualStrings(assets.find("/login.html").?.body, form.body);
+    try testing.expect(headerValue(form.head, "set-cookie") == null);
+    try testing.expect(std.mem.indexOf(u8, headerValue(form.head, "content-security-policy").?, "form-action 'none'") != null);
+    // Nothing from the bridge is in it: not the prefix, not a session.
+    var pb: [35]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, form.body, tokenPrefix(&pb, rig.token())) == null);
+    try testing.expect(std.mem.indexOf(u8, form.body, rig.session_id) == null);
+    // The token field is masked and invites no saving: no autocomplete, no username field beside it.
+    try testing.expect(std.mem.indexOf(u8, form.body, "type=\"password\" autocomplete=\"off\" autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\"") != null);
+    try testing.expect(std.mem.indexOf(u8, form.body, "current-password") == null);
+    try testing.expect(std.mem.indexOf(u8, form.body, "username") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, form.body, "<input"));
+    // Its script and style, at the top level only.
+    for ([_][]const u8{ "/login.js", "/login.css" }) |p| {
+        const r = try get(rig, p, "");
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 200), r.status);
+    }
+    // Not anywhere else: the page, its other files, the prefix, the socket, `/login.html` itself.
+    var ub: [96]u8 = undefined;
+    for ([_][]const u8{ "/login.html", "/app.js", "/api/tree", "/ws", "/x" }) |p| {
+        const r = try get(rig, p, "");
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 403), r.status);
+    }
+    for ([_][]const u8{ "/", "/login.js" }) |p| {
+        const r = try get(rig, try std.fmt.bufPrint(&ub, "{s}{s}", .{ tokenPrefix(&pb, rig.token()), p }), "");
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 403), r.status);
+    }
+    // A wrong token in the header or the address is refused, not shown the form.
+    for ([_][]const u8{ "rweb-token: wrong-token-0123456789abcdef0123456789\r\n", "" }) |h| {
+        const r = try get(rig, if (h.len == 0) "/?token=wrong" else "/", h);
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 403), r.status);
+        try testing.expectEqualStrings("forbidden\n", r.body);
+    }
+    // A POST (the form submitting itself, were the CSP not there) gets nothing.
+    const post = try httpRequest(try rig.tcp(), "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    defer freeHttp(post);
+    try testing.expect(post.status == 403);
+}
+
+test "server: the form's header login gets the cookie and the redirect, with the token in no address" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    var hb: [96]u8 = undefined;
+    const r = try get(rig, "/", try std.fmt.bufPrint(&hb, "rweb-token: {s}\r\n", .{rig.token()}));
+    defer freeHttp(r);
+    try testing.expectEqual(@as(u16, 303), r.status);
+    var pb: [35]u8 = undefined;
+    const pfx = tokenPrefix(&pb, rig.token());
+    var lb: [64]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&lb, "{s}/", .{pfx}), headerValue(r.head, "location").?);
+    var cb: [160]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, r.head, try std.fmt.bufPrint(&cb, "rweb-token={s}; Path={s}/; HttpOnly; SameSite=Strict", .{ rig.token(), pfx })) != null);
+    // The redirected request (fetch keeps the header) loads the page.
+    var ub: [64]u8 = undefined;
+    const page = try get(rig, try std.fmt.bufPrint(&ub, "{s}/", .{pfx}), try std.fmt.bufPrint(&hb, "rweb-token: {s}\r\n", .{rig.token()}));
+    defer freeHttp(page);
+    try testing.expectEqual(@as(u16, 200), page.status);
+    try testing.expectEqualStrings(assets.find("/").?.body, page.body);
+}
+
+test "server: wrong tokens are limited, and a right one is not counted" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    rig.srv.opts.max_token_failures = 3;
+    var hb: [96]u8 = undefined;
+    const good = try std.fmt.bufPrint(&hb, "rweb-token: {s}\r\n", .{rig.token()});
+    // Right tokens take nothing.
+    for (0..5) |_| {
+        const r = try get(rig, "/app.js", good);
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 200), r.status);
+    }
+    try testing.expectEqual(@as(u32, 0), rig.srv.limiter.used);
+    // Three wrong ones (header, address, header) use the budget; a wrong cookie does not.
+    for ([_][]const u8{ "rweb-token: nope\r\n", "", "Cookie: rweb-token=nope\r\n", "rweb-token: nope\r\n" }) |h| {
+        const r = try get(rig, if (h.len == 0) "/app.js?token=nope" else "/app.js", h);
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 403), r.status);
+    }
+    try testing.expectEqual(@as(u32, 3), rig.srv.limiter.used);
+    // Then a wrong one gets 429, and the right one still gets in.
+    for ([_]struct { []const u8, u16 }{ .{ "rweb-token: nope2\r\n", 429 }, .{ good, 200 } }) |c| {
+        const r = try get(rig, "/app.js", c[0]);
+        defer freeHttp(r);
+        try testing.expectEqual(c[1], r.status);
+    }
+    // A request without any token still gets the form.
+    const form = try get(rig, "/", "");
+    defer freeHttp(form);
+    try testing.expectEqual(@as(u16, 200), form.status);
+    // A new window: the budget is back.
+    rig.srv.limiter.mu.lockUncancelable(testing.io);
+    rig.srv.limiter.window_start -= rig.srv.opts.token_window_ms;
+    rig.srv.limiter.mu.unlock(testing.io);
+    const again = try get(rig, "/app.js", "rweb-token: nope3\r\n");
+    defer freeHttp(again);
+    try testing.expectEqual(@as(u16, 403), again.status);
+}
+
+test "server: guesses from another site, or with another Host, never lock the owner out" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    var pb: [35]u8 = undefined;
+    const pfx = tokenPrefix(&pb, rig.token());
+    var cb: [128]u8 = undefined;
+    const right_cookie = try std.fmt.bufPrint(&cb, "Cookie: rweb-token={s}\r\n", .{rig.token()});
+    var ub: [64]u8 = undefined;
+    const page = try std.fmt.bufPrint(&ub, "{s}/app.js", .{pfx});
+    // 100 wrong guesses in the address from a page elsewhere, as an <img> or a link would send them:
+    // refused uncounted.
+    for (0..100) |i| {
+        const h: []const u8 = if (i % 2 == 0) "Sec-Fetch-Site: cross-site\r\n" else "Origin: http://localhost:9\r\n";
+        const r = try get(rig, "/app.js?token=nope", h);
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 403), r.status);
+    }
+    try testing.expectEqual(@as(u32, 0), rig.srv.limiter.used);
+    try testing.expectEqual(@intFromEnum(access.Refusal.cross_site_token), rig.srv.last_refusal.load(.acquire));
+    // The right token from another site is refused too, without being compared.
+    var qb: [96]u8 = undefined;
+    const cross_right = try get(rig, try std.fmt.bufPrint(&qb, "/app.js?token={s}", .{rig.token()}), "Sec-Fetch-Site: same-site\r\n");
+    defer freeHttp(cross_right);
+    try testing.expectEqual(@as(u16, 403), cross_right.status);
+    // The right cookie still gets in.
+    const ok = try get(rig, page, right_cookie);
+    defer freeHttp(ok);
+    try testing.expectEqual(@as(u16, 200), ok.status);
+    // A request refused for another reason (here a PUT without an Origin) never counts.
+    for (0..20) |_| {
+        const r = try httpRequest(try rig.tcp(), "PUT /app.js?token=nope HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 403), r.status);
+    }
+    try testing.expectEqual(@as(u32, 0), rig.srv.limiter.used);
+}
+
+test "server: 100 wrong header tokens get 429 after 10, and the right cookie and header still pass" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    try testing.expectEqual(@as(u32, 10), rig.srv.opts.max_token_failures);
+    var refused: u32 = 0;
+    var limited: u32 = 0;
+    for (0..100) |_| {
+        const r = try get(rig, "/app.js", "Origin: http://localhost\r\nSec-Fetch-Site: same-origin\r\nrweb-token: wrong-0123456789abcdef0123456789abcdef\r\n");
+        defer freeHttp(r);
+        switch (r.status) {
+            403 => refused += 1,
+            429 => limited += 1,
+            else => return error.UnexpectedStatus,
+        }
+    }
+    try testing.expectEqual(@as(u32, 10), refused);
+    try testing.expectEqual(@as(u32, 90), limited);
+    var pb: [35]u8 = undefined;
+    var ub: [64]u8 = undefined;
+    const page = try std.fmt.bufPrint(&ub, "{s}/app.js", .{tokenPrefix(&pb, rig.token())});
+    var cb: [128]u8 = undefined;
+    const by_cookie = try get(rig, page, try std.fmt.bufPrint(&cb, "Cookie: rweb-token={s}\r\n", .{rig.token()}));
+    defer freeHttp(by_cookie);
+    try testing.expectEqual(@as(u16, 200), by_cookie.status);
+    var hb: [96]u8 = undefined;
+    const by_header = try get(rig, "/app.js", try std.fmt.bufPrint(&hb, "Origin: http://localhost\r\nrweb-token: {s}\r\n", .{rig.token()}));
+    defer freeHttp(by_header);
+    try testing.expectEqual(@as(u16, 200), by_header.status);
+    // The form's own header login still works, and so does the address the startup line prints.
+    const login = try get(rig, "/", try std.fmt.bufPrint(&hb, "rweb-token: {s}\r\n", .{rig.token()}));
+    defer freeHttp(login);
+    try testing.expectEqual(@as(u16, 303), login.status);
+    var qb: [96]u8 = undefined;
+    const typed = try get(rig, try std.fmt.bufPrint(&qb, "/?token={s}", .{rig.token()}), "Sec-Fetch-Site: none\r\n");
+    defer freeHttp(typed);
+    try testing.expectEqual(@as(u16, 303), typed.status);
+}
+
+test "server: a planted wrong cookie on the form and its files takes nothing from the budget" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    for (0..30) |_| for ([_][]const u8{ "/", "/login.js", "/login.css" }) |p| {
+        const r = try get(rig, p, "Cookie: rweb-token=planted-by-another-port\r\n");
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 200), r.status);
+    };
+    // Elsewhere it is refused, still uncounted.
+    const other = try get(rig, "/app.js", "Cookie: rweb-token=planted-by-another-port\r\n");
+    defer freeHttp(other);
+    try testing.expectEqual(@as(u16, 403), other.status);
+    try testing.expectEqual(@as(u32, 0), rig.srv.limiter.used);
+}
+
+test "server: token mode with the default hosts serves 127.0.0.1 and localhost on its port, never another Host" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // TCP (the printed http://127.0.0.1:PORT/ address): the listener's own port only.
+    {
+        const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+        defer rig.deinit();
+        rig.srv.opts.access.allowed_hosts = try layout.tokenHosts(arena, rig.srv.port);
+        var rb: [256]u8 = undefined;
+        var hb: [64]u8 = undefined;
+        for ([_][]const u8{ "127.0.0.1", "localhost" }) |name| {
+            const host = try std.fmt.bufPrint(&hb, "{s}:{d}", .{ name, rig.srv.port });
+            const form = try httpRequest(try rig.tcp(), try std.fmt.bufPrint(&rb, "GET / HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{host}));
+            defer freeHttp(form);
+            try testing.expectEqual(@as(u16, 200), form.status);
+            var qb: [96]u8 = undefined;
+            const typed = try httpRequest(try rig.tcp(), try std.fmt.bufPrint(&rb, "GET {s} HTTP/1.1\r\nHost: {s}\r\nSec-Fetch-Site: none\r\nConnection: close\r\n\r\n", .{ try std.fmt.bufPrint(&qb, "/?token={s}", .{rig.token()}), host }));
+            defer freeHttp(typed);
+            try testing.expectEqual(@as(u16, 303), typed.status);
+        }
+        for ([_][]const u8{ "evil.example", "evil.example:80", "127.0.0.1:1", "localhost" }) |host| {
+            const r = try httpRequest(try rig.tcp(), try std.fmt.bufPrint(&rb, "GET / HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{host}));
+            defer freeHttp(r);
+            try testing.expectEqual(@as(u16, 403), r.status);
+            try testing.expectEqual(@intFromEnum(access.Refusal.bad_host), rig.srv.last_refusal.load(.acquire));
+        }
+    }
+    // A unix socket behind `ssh -L 127.0.0.1:7700:<socket>`: the loopback names on any port.
+    {
+        var pb: [96]u8 = undefined;
+        const path = try tmpSocketPath(&pb, testing.io);
+        defer Io.Dir.cwd().deleteTree(testing.io, std.fs.path.dirname(path).?) catch {};
+        const uids = [_]u32{@intCast(std.c.getuid())};
+        var cfg = token_cfg;
+        cfg.allowed_peer_uids = &uids;
+        cfg.allowed_hosts = try layout.tokenHosts(arena, null);
+        const rig = try Rig.init(.{}, cfg, .{ .unix = path });
+        defer rig.deinit();
+        const addr = try Io.net.UnixAddress.init(path);
+        var rb: [256]u8 = undefined;
+        for ([_]struct { []const u8, u16 }{ .{ "127.0.0.1:7700", 200 }, .{ "localhost:7700", 200 }, .{ "[::1]:7700", 200 }, .{ "evil.example:7700", 403 } }) |c| {
+            const r = try httpRequest(try addr.connect(testing.io), try std.fmt.bufPrint(&rb, "GET / HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{c[0]}));
+            defer freeHttp(r);
+            try testing.expectEqual(c[1], r.status);
+        }
+    }
+}
+
+test "server: owner and secret deployments never serve the token form" {
+    const rig = try Rig.init(.{}, owner_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    const none = try get(rig, "/", "");
+    defer freeHttp(none);
+    try testing.expectEqual(@as(u16, 403), none.status);
+    for ([_][]const u8{ "/login.js", "/login.html" }) |p| {
+        const r = try get(rig, p, "");
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 403), r.status);
+    }
+    // The owner gets the page itself at `/`.
+    const ok = try get(rig, "/", owner_hdrs);
+    defer freeHttp(ok);
+    try testing.expectEqual(@as(u16, 200), ok.status);
+    try testing.expectEqualStrings(assets.find("/").?.body, ok.body);
+    const rig2 = try Rig.initExtra(.{}, owner_cfg, .{ .tcp_loopback = 0 }, .{ .backend_secret = "0123456789abcdef0123456789abcdef" });
+    defer rig2.deinit();
+    const s2 = try get(rig2, "/0123456789abcdef0123456789abcdef/", "");
+    defer freeHttp(s2);
+    try testing.expectEqual(@as(u16, 403), s2.status);
+}
+
+test "server: the TCP port is held on 127.0.0.1 and ::1, without SO_REUSEPORT, and served on both" {
+    const io = testing.io;
+    var b = try bind(testing.allocator, io, .{ .tcp_loopback = 0 }, null);
+    var owned = true;
+    defer if (owned) b.deinit(io);
+    try testing.expect(b.port != 0 and b.listen.tcp_loopback == b.port);
+    var a4 = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(b.port) };
+    try testing.expectError(error.AddressInUse, a4.listen(io, .{}));
+    // A socket that sets SO_REUSEPORT too (as std's `reuse_address` does) cannot share it.
+    try testing.expectError(error.AddressInUse, a4.listen(io, .{ .reuse_address = true }));
+    const have6 = b.listener6 != null;
+    if (have6) {
+        var a6 = Io.net.IpAddress{ .ip6 = Io.net.Ip6Address.loopback(b.port) };
+        try testing.expectError(error.AddressInUse, a6.listen(io, .{}));
+        try testing.expectError(error.AddressInUse, a6.listen(io, .{ .reuse_address = true }));
+    } else try testing.expect(b.v6_missing != null);
+    b.deinit(io);
+    owned = false;
+
+    // A port whose ::1 another socket holds is refused, not served half.
+    if (have6) {
+        var other6 = Io.net.IpAddress{ .ip6 = Io.net.Ip6Address.loopback(0) };
+        var taken = try other6.listen(io, .{});
+        defer taken.deinit(io);
+        try testing.expectError(error.Ip6AddressInUse, bind(testing.allocator, io, .{ .tcp_loopback = taken.socket.address.getPort() }, null));
+    }
+
+    // Served on both, with the same checks.
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    if (rig.srv.listener6 == null) return;
+    var a6 = Io.net.IpAddress{ .ip6 = Io.net.Ip6Address.loopback(rig.srv.port) };
+    var hb: [96]u8 = undefined;
+    var rb: [256]u8 = undefined;
+    const ok = try httpRequest(try a6.connect(io, .{ .mode = .stream }), try std.fmt.bufPrint(&rb, "GET /app.js HTTP/1.1\r\nHost: [::1]\r\n{s}Connection: close\r\n\r\n", .{try std.fmt.bufPrint(&hb, "rweb-token: {s}\r\n", .{rig.token()})}));
+    defer freeHttp(ok);
+    try testing.expectEqual(@as(u16, 200), ok.status);
+    const no = try httpRequest(try a6.connect(io, .{ .mode = .stream }), "GET /app.js HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n");
+    defer freeHttp(no);
+    try testing.expectEqual(@as(u16, 403), no.status);
+}
+
+test "server: a refresh only ever adds own addresses, and keeps them when it fails" {
+    const rig = try Rig.init(.{}, owner_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    const from_old = "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.5\r\n";
+    const from_new = "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.77\r\n";
+    try expectRefusedWith(rig, from_old, .own_address);
+    const fine = try get(rig, "/", from_new);
+    freeHttp(fine);
+    try testing.expectEqual(@as(u16, 200), fine.status);
+    // Failures and nonsense keep the list.
+    try testing.expectEqual(Server.Refresh.failed, rig.srv.refreshOwnAddresses(error.TailscaleFailed));
+    try testing.expectEqual(Server.Refresh.invalid, rig.srv.refreshOwnAddresses(&.{}));
+    try testing.expectEqual(Server.Refresh.invalid, rig.srv.refreshOwnAddresses(&.{ "100.64.0.77", "not-an-ip" }));
+    try testing.expectEqual(Server.Refresh.unchanged, rig.srv.refreshOwnAddresses(&.{"::ffff:100.64.0.5"}));
+    try expectRefusedWith(rig, from_old, .own_address);
+    // A new address is added; the old one is still refused, though Tailscale no longer lists it.
+    try testing.expectEqual(Server.Refresh.added, rig.srv.refreshOwnAddresses(&.{ "100.64.0.77", "fd7a:115c:a1e0::77" }));
+    try expectRefusedWith(rig, from_new, .own_address);
+    try expectRefusedWith(rig, from_old, .own_address);
+    try testing.expectEqual(Server.Refresh.unchanged, rig.srv.refreshOwnAddresses(&.{"100.64.0.5"}));
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const now = try rig.srv.ownAddresses(arena_state.allocator());
+    try testing.expect(access.sameAddressList(now, &.{ "100.64.0.5", "100.64.0.77", "fd7a:115c:a1e0::77" }));
 }

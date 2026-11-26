@@ -22,12 +22,18 @@ fn bridgeExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: anytype,
     const ghostty = b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize }) orelse return null;
     const rex = b.createModule(.{ .root_source_file = b.path("src/rex/root.zig"), .target = target, .optimize = optimize });
     rex.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
-    const m = b.createModule(.{ .root_source_file = b.path("src/bridge/main.zig"), .target = target, .optimize = optimize, .strip = strip });
+    // libc: the bridge calls it directly (getpwuid, umask, ACLs on macOS); said here, not left to the
+    // dependencies.
+    const m = b.createModule(.{ .root_source_file = b.path("src/bridge/main.zig"), .target = target, .optimize = optimize, .strip = strip, .link_libc = true });
     m.addImport("rex", rex);
     m.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
     m.addOptions("build_options", opts);
     m.addAnonymousImport("git_commit", .{ .root_source_file = commit });
-    return b.addExecutable(.{ .name = "rweb", .root_module = m });
+    const exe = b.addExecutable(.{ .name = "rweb", .root_module = m });
+    // Linux: position independent, so the static musl binary is static-pie and its addresses are
+    // randomized at every start like a dynamic one's.
+    if (target.result.os.tag == .linux) exe.pie = true;
+    return exe;
 }
 
 /// "vt-1.0.1" from Ghostty's tag URL in build.zig.zon.
@@ -60,6 +66,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/bridge/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     bridge_mod.addImport("rex", rex);
     if (ghostty) |dep| bridge_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));

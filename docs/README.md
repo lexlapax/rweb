@@ -3,7 +3,8 @@
 ## Using rweb
 
 - [User guide](user-guide.md): install; reach it through Tailscale or an SSH tunnel; run it at boot or
-  login on Linux and macOS; several machines; using the page; file transfer; upgrade; troubleshooting.
+  login on Linux and macOS; several machines; using the page; file transfer; upgrade, stop or remove;
+  troubleshooting; every option.
 - [Changelog](../CHANGELOG.md): what changed in each version.
 - [Licence](../LICENSE): MIT.
 - [Third-party notices](../THIRD-PARTY-NOTICES.md): the software rweb contains or serves, with licences.
@@ -14,13 +15,27 @@
 
 - [Architecture](architecture.md): components, diagrams, request checks, data and input paths, the
   browser protocol, source layout, pinned dependencies.
-- [Security hardening](security-hardening-2026-11-23.md) and the [security review](security-review-2026-11-23.md)
-  before it: the threat model, every finding and its fix and test.
-- [Release reviews of 0.1.1](release-review-2026-11-25.md): release readiness and a security scan, each
-  finding's verdict, fix and test; the [second round](security-review-2026-11-25-round2.md) and the
-  [third](security-review-2026-11-25-round3.md): rescans plus internal adversarial reviews, each with its
-  plan by mechanism and every fix and test.
 - [File transfer](file-transfer.md): design, limits and threat model of the optional file transfer.
+
+## How it was reviewed
+
+Before the first release: a security review of the design, then five rounds on the release candidate,
+each with an external static security scan, a release-readiness review and an internal adversarial
+review in several parts. Every finding was checked against the code, and every fix has a test. Before
+each release the candidate is run live on macOS and Linux and tested from the simulators and a phone;
+the round's document records those runs.
+
+- [Security review](security-review-2026-11-23.md) and [security hardening](security-hardening-2026-11-23.md)
+  (before Phase 4): the threat model, every finding and its fix and test.
+- [Round 1](release-review-2026-11-25.md): release readiness and a security scan.
+- [Round 2](security-review-2026-11-25-round2.md): a rescan and the first internal adversarial review,
+  fixed by mechanism.
+- [Round 3](security-review-2026-11-25-round3.md): readiness, rescan and internal review.
+- [Round 4](security-review-2026-11-25-round4.md): readiness, rescan, internal review, and the live test
+  on macOS and Linux from Android and iOS browsers and a phone.
+- [Round 5](security-review-2026-11-26-round5.md): readiness, rescan and an internal review by variant
+  (endpoints, lookups, documented procedures); the command line redesigned around `rweb tailscale` and
+  `rweb ssh`; a second pass over that new code and a Zig idiom audit.
 
 ## Why it is built this way
 

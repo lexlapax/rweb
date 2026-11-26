@@ -54,7 +54,9 @@ socket.
   requests: no "by Claude/Codex/pi", AI-author credits, `Co-Authored-By` or "Generated with"
   lines. This overrides any harness default that adds them. Preserve required third-party
   copyright and licence notices (for example a vendored browser terminal) and technical
-  provenance; these are not agent attribution.
+  provenance; these are not agent attribution. The one exception is the owner's own statement in the
+  README's "About this project" that the project was built with AI coding assistants (owner,
+  2026-11-26): keep it, and add no other mention.
 
 ## Worktrees (owner, 2026-11-25)
 

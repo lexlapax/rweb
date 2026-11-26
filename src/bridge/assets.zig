@@ -21,6 +21,10 @@ pub const all = [_]Asset{
     .{ .path = "/keys.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/keys.js") },
     .{ .path = "/diag.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/diag.js") },
     .{ .path = "/app.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/app.css") },
+    // The token form (token mode only; see `server.loginAsset`).
+    .{ .path = "/login.html", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/login.html") },
+    .{ .path = "/login.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/login.js") },
+    .{ .path = "/login.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/login.css") },
     .{ .path = "/manifest.webmanifest", .content_type = "application/manifest+json", .body = @embedFile("web/manifest.webmanifest") },
     .{ .path = "/icons/favicon.svg", .content_type = "image/svg+xml", .body = @embedFile("web/icons/favicon.svg") },
     .{ .path = "/icons/favicon.ico", .content_type = "image/x-icon", .body = @embedFile("web/icons/favicon.ico") },
@@ -237,4 +241,32 @@ test "app.js has nothing after its main() call" {
     const last_nl = std.mem.lastIndexOfScalar(u8, trimmed, '\n') orelse 0;
     const last_line = std.mem.trim(u8, trimmed[last_nl..], " \t\r\n");
     try std.testing.expect(std.mem.startsWith(u8, last_line, "main().catch("));
+}
+
+test "the token form is static: relative embedded files, no inline code, a password field, no address for the token" {
+    const page = find("/login.html").?.body;
+    for ([_][]const u8{ "src=\"", "href=\"" }) |attr| {
+        var rest: []const u8 = page;
+        while (std.mem.indexOf(u8, rest, attr)) |i| {
+            rest = rest[i + attr.len ..];
+            const url = rest[0..std.mem.indexOfScalar(u8, rest, '"').?];
+            try std.testing.expect(url.len > 0 and url[0] != '/' and std.mem.indexOf(u8, url, "//") == null);
+            var buf: [96]u8 = undefined;
+            try std.testing.expect(find(try std.fmt.bufPrint(&buf, "/{s}", .{url})) != null);
+        }
+    }
+    var scripts = std.mem.splitSequence(u8, page, "<script");
+    _ = scripts.next();
+    while (scripts.next()) |s| try std.testing.expect(std.mem.startsWith(u8, s, " src=\""));
+    try std.testing.expect(std.mem.indexOf(u8, page, "<style") == null and std.mem.indexOf(u8, page, " style=") == null);
+    for ([_][]const u8{ " onclick=", " onsubmit=", " onload=", " oninput=" }) |h| try std.testing.expect(std.mem.indexOf(u8, page, h) == null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "type=\"password\"") != null);
+    // A form that submitted itself would put the token somewhere: it has no action, posts, and the
+    // page's CSP (`form-action 'none'`) blocks a submission anyway.
+    try std.testing.expect(std.mem.indexOf(u8, page, "action=") == null and std.mem.indexOf(u8, page, "method=\"post\"") != null);
+    const js = find("/login.js").?.body;
+    try std.testing.expect(std.mem.indexOf(u8, js, "'rweb-token'") != null);
+    for ([_][]const u8{ "location.search", "innerHTML", "eval(", "localStorage.", "sessionStorage.", "console." }) |bad| {
+        try std.testing.expect(std.mem.indexOf(u8, js, bad) == null);
+    }
 }
