@@ -16,7 +16,10 @@ socket.
 
 ## Project constraints
 
-- Keep this repository private.
+- This repository is public (owner, 2026-11-26). Nothing about the owner's machines, tailnet or
+  deployment goes into it: no host names, tailnet names, Serve ports of other services or private repo
+  names (use generic names such as `linux-box`, `desktop-mac`, `example.ts.net`). The owner's email
+  appears only as the maintainer in the README; commits use the GitHub no-reply address.
 - Follow the plan's phases in order. Phase 0 is a gate: if a browser terminal cannot render a
   live Rex terminal correctly, stop and report; the rest of the plan does not hold. Do not start
   a phase before the previous one's exit condition is met and recorded.

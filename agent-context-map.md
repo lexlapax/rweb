@@ -1,8 +1,20 @@
 # Agent context map
 
-Last updated: 2026-11-26 (laptop-mac: the 0.1.1 release commit; archives, tag and setup-repo pin follow; the GitHub Release waits for the decision on making the repository public).
+Last updated: 2026-11-26 (the repository is made public: its history was rewritten to generic host and tailnet names and a no-reply author; 0.1.1 is tagged on the release commit).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
+
+## 2026-11-26: public
+
+- Superlogical (Discord, 2026-11-22): no restrictions on Rex clients; please do not use Rex's dinosaur logo
+  (rweb's logo is its own).
+- The owner chose to rewrite this repository's history and make it public. In every file version and
+  commit message, the owner's tailnet name became `example.ts.net`, the hosts `linux-box`, `desktop-mac`,
+  `laptop-mac` and `gateway-box`, and the private setup repository `setup-repo`; every commit is authored
+  by the owner's GitHub no-reply address. The README names the maintainer. The pre-rewrite history is kept
+  only in the owner's own backup.
+- Deployment (the owner's, outside this repository): rweb is now each host's main Tailscale Serve
+  address (port 443).
 ## 2026-11-26: `f43ae8e` deployed
 
 - Deployed through setup-repo on laptop-mac, desktop-mac, linux-box and gateway-box (its pin `a9451b7`, its action
