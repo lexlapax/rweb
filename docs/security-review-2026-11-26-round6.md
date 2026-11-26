@@ -289,4 +289,6 @@ with the "you switched terminals" notice, and an open file picker closes at its 
 Checks on `c8fc37d`: macOS `zig build test` 401 passed, 11 skipped, 0 failed, the same in `ReleaseSafe`;
 web tests 44/44; release-base test 7 ok, 1 skipped. Linux `ReleaseSafe` with the live Rex (preview.22,
 revision 19) 409 passed, 3 skipped, 0 failed; web tests 44/44; `rex ls` unchanged. With the fix above:
-macOS 402 passed, 11 skipped, 0 failed in Debug and `ReleaseSafe`. Not run on the fix: Linux, a browser.
+macOS 402 passed, 11 skipped, 0 failed in Debug and `ReleaseSafe`; Linux `ReleaseSafe` with the live Rex
+410 passed, 3 skipped, 0 failed, `rex ls` unchanged. Not run on the fix: a browser. `tools/release.sh
+f43ae8e` then built both archives (tests in `ReleaseSafe` on the exported commit, checksums verified).
