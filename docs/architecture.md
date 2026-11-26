@@ -88,8 +88,17 @@ flowchart TB
 Every check is a pure function in `access.zig`, so each refusal has a test that shows it refusing. On
 Linux the unix socket is in a `0700` directory and accepts only root; on macOS the loopback listener
 answers anything without the secret with a bare 404. With an SSH tunnel the token rule replaces the
-owner rule: the token arrives once in the address, moves into an `HttpOnly`, `SameSite=Strict` cookie,
-and is removed from the address bar.
+owner rule: the token arrives once in the address (`/?token=`), and rweb answers with a redirect to
+`/s/<id>/`, where `<id>` is derived from the token and reveals nothing about it. The token moves into an
+`HttpOnly`, `SameSite=Strict` cookie scoped to that path, and leaves the address bar. A browser sends a
+cookie to every port of a host, so a cookie for `/` on `127.0.0.1` would also reach any other local web
+service you open, and two tunnels on two ports would overwrite each other's; scoped to its own path it
+reaches neither. The page uses relative addresses only, so it works under `/s/<id>/` and, behind Serve,
+at `/`.
+
+Before a request is read, it holds one of a few pending slots. When they are all taken, the oldest
+connection that has not sent a request yet is dropped for the new one: idle connections from a local
+process cannot keep the owner out, while Serve, which sends its request at once, gets through.
 
 ## Opening a terminal
 
@@ -157,7 +166,7 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 | `src/bridge/web/` | The page: `index.html`, `app.js`, `app.css`, `keys.js` (pure key and touch logic, tested with Node), `wterm-shim.js`, `diag.js`; `vendor/` holds xterm.js and wterm with their licences and checksums |
 | `src/fuzz.zig` | Fuzz targets for every parser that reads outside bytes (`zig build fuzz --fuzz`) |
 | `tests/web/` | Tests for the page's logic (`zig build web-test`) |
-| `tools/` | `dist.sh` and `release.sh` (release archives), `notices.py` (third-party notices) |
+| `tools/` | `dist.sh` and `release.sh` (release archives; `release-base.test.sh` checks its folder rules), `notices.py` (third-party notices) |
 | `spike/` | The Phase 0 proof of concept, kept for reference |
 
 ## Pinned dependencies

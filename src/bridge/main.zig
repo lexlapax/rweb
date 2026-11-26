@@ -42,6 +42,29 @@ test "the owner comes from the node's user, and a tagged node has none" {
     try std.testing.expectError(error.NoSelf, ownerFromStatus(a, "[]"));
 }
 
+test "malformed tailscale status is an error, never a crash" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const bad = [_][]const u8{
+        \\{"Self":{"UserID":"7"},"User":{"7":{"LoginName":"x@y"}}}
+        ,
+        \\{"Self":{"UserID":7},"User":[]}
+        ,
+        \\{"Self":{"UserID":7},"User":{"7":"x@y"}}
+        ,
+        \\{"Self":{"UserID":7},"User":{"7":{"LoginName":7}}}
+        ,
+        \\{"Self":[],"User":{}}
+        ,
+    };
+    for (bad) |j| try std.testing.expectError(error.NoSelf, ownerFromStatus(a, j));
+    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "[]"));
+    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "{\"Self\":7}"));
+    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "{\"Self\":{\"DNSName\":\".\"}}"));
+    try std.testing.expectEqualStrings("box.example.ts.net", try dnsNameFromStatus(a, "{\"Self\":{\"DNSName\":\"box.example.ts.net.\"}}"));
+}
+
 test "version text names the version, commit and Rex revisions" {
     const t = versionText();
     try std.testing.expect(std.mem.startsWith(u8, t, "rweb " ++ build_options.version ++ "\n"));
@@ -86,6 +109,16 @@ pub fn main(init: std.process.Init) !void {
         };
         try own.appendSlice(arena, found);
     }
+    // Every own address must be one the rule can compare, and an owner rule needs at least one
+    // unless the machine accepts its own address: fail closed rather than run without the rule.
+    for (own.items) |addr| if (!access.isAddress(addr)) {
+        std.debug.print("rweb: \"{s}\" is not an IP address; cannot refuse requests from this node\n", .{addr});
+        std.process.exit(2);
+    };
+    if ((parsed.owner != null or parsed.owner_from_tailscale) and !parsed.allow_own_address and own.items.len == 0) {
+        std.debug.print("rweb: no own address to refuse; pass --own-address or --allow-own-address\n", .{});
+        std.process.exit(2);
+    }
 
     // The owner: given, or this node's own Tailscale login.
     var owner = parsed.owner;
@@ -117,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
     // every user on the machine can see).
     const backend_secret: ?[]const u8 = if (parsed.backend_secret_file) |path| readSecretFile(arena, io, path, 32, true) catch |e| secretFileFailed(path, e) else null;
     var token = parsed.token;
-    if (parsed.token_file) |path| token = readSecretFile(arena, io, path, 16, false) catch |e| secretFileFailed(path, e);
+    if (parsed.token_file) |path| token = readSecretFile(arena, io, path, 16, true) catch |e| secretFileFailed(path, e);
     if (parsed.random_token) {
         var raw: [16]u8 = undefined;
         io.random(&raw);
@@ -231,11 +264,14 @@ fn ownerFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u
     const self = self_v.object;
     if (self.get("Tags")) |tags| if (tags == .array and tags.array.items.len > 0) return error.TaggedNode;
     const uid = self.get("UserID") orelse return error.NoSelf;
+    if (uid != .integer) return error.NoSelf;
     var key_buf: [24]u8 = undefined;
     const key = try std.fmt.bufPrint(&key_buf, "{d}", .{uid.integer});
-    const users = (v.object.get("User") orelse return error.NoSelf).object;
-    const user = (users.get(key) orelse return error.NoSelf).object;
-    const login = user.get("LoginName") orelse return error.NoSelf;
+    const users = v.object.get("User") orelse return error.NoSelf;
+    if (users != .object) return error.NoSelf;
+    const user = users.object.get(key) orelse return error.NoSelf;
+    if (user != .object) return error.NoSelf;
+    const login = user.object.get("LoginName") orelse return error.NoSelf;
     if (login != .string or login.string.len == 0) return error.NoSelf;
     return login.string;
 }
@@ -244,9 +280,16 @@ fn ownerFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u
 fn tailscaleDnsName(arena: std.mem.Allocator, io: Io) ![]const u8 {
     const res = try std.process.run(arena, io, .{ .argv = &.{ "tailscale", "status", "--json" } });
     if (res.term != .exited or res.term.exited != 0) return error.TailscaleFailed;
-    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, res.stdout, .{});
-    const self = (v.object.get("Self") orelse return error.NoSelf).object;
-    const dns = self.get("DNSName") orelse return error.NoSelf;
+    return dnsNameFromStatus(arena, res.stdout);
+}
+
+/// This node's MagicDNS name from `tailscale status --json`; any other shape is `NoSelf`.
+fn dnsNameFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u8 {
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, status_json, .{});
+    if (v != .object) return error.NoSelf;
+    const self_v = v.object.get("Self") orelse return error.NoSelf;
+    if (self_v != .object) return error.NoSelf;
+    const dns = self_v.object.get("DNSName") orelse return error.NoSelf;
     if (dns != .string) return error.NoSelf;
     const name = std.mem.trimEnd(u8, dns.string, ".");
     if (name.len == 0) return error.NoSelf;

@@ -43,8 +43,8 @@ const loadScript = src => new Promise((ok, no) => { const s = document.createEle
 let term = null, fitAddon = null, termKind = 'xterm', startupNote = null;
 if (kind === 'wterm') {
   try {
-    const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '/vendor/wterm.css'; document.head.append(l);
-    await loadScript('/vendor/wterm.js'); await loadScript('/wterm-shim.js');
+    const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = 'vendor/wterm.css'; document.head.append(l);
+    await loadScript('vendor/wterm.js'); await loadScript('wterm-shim.js');
     term = await window.makeWtermTerminal($('term'), {fontSize: state.fontSize});
     fitAddon = {proposeDimensions: () => term.proposeDimensions($('stage').clientWidth, $('stage').clientHeight)};
     termKind = 'wterm';
@@ -236,7 +236,7 @@ function renderStatus() {
 // 3 s, and if nothing has come back for 8 s give the socket up and open a new one at once. Typing
 // is refused until something arrives, so no keystroke is sent into a dead connection.
 function connect() {
-  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws${location.search}`);
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}ws${location.search}`);
   state.ws = ws; ws.binaryType = 'arraybuffer';
   const mine = () => state.ws === ws;          // a socket we abandoned must not act
   link.lastRx = performance.now(); link.healthy = false; renderStatus();
@@ -795,7 +795,7 @@ $('xf-hidden').onchange = e => { xf.hidden = e.target.checked; LS.set('showHidde
 function onXfer(m) {
   if (m.kind === 'download') {
     const a = document.createElement('a');
-    a.href = '/xfer/' + m.token; a.download = m.name; a.hidden = true;
+    a.href = 'xfer/' + m.token; a.download = m.name; a.hidden = true;
     document.body.append(a); a.click(); a.remove();
     notice(`Downloading ${m.name} (${fmtSize(m.size)})`);
     if ($('xferdlg').open) { $('xferdlg').close(); }
@@ -816,7 +816,7 @@ function pumpUploads() {
 }
 function putFile(file, token) {
   const req = new XMLHttpRequest();
-  req.open('PUT', '/xfer/' + token);
+  req.open('PUT', 'xfer/' + token);
   req.upload.onprogress = ev => { if (ev.lengthComputable) notice(`Uploading ${file.name} ${Math.round(100 * ev.loaded / ev.total)}%`); };
   const done = msg => { notice(msg); xf.current = null; pumpUploads(); };
   req.onload = () => {

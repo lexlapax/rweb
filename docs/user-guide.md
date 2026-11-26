@@ -192,9 +192,13 @@ On the laptop or phone:
 ssh -N -L 7700:127.0.0.1:7700 you@rex-machine
 ```
 
-Then open `http://127.0.0.1:7700/?token=<the token>` in that device's browser. The page moves the token
-into a session cookie and removes it from the address, so later visits in the same browser session are
-just `http://127.0.0.1:7700/`; after the browser forgets the cookie, open the address with the token again. On a phone, use an SSH app that supports local port forwarding and keep it open
+Then open `http://127.0.0.1:7700/?token=<the token>` in that device's browser. rweb moves you to
+`http://127.0.0.1:7700/s/<id>/` and the token into a session cookie for that path only, and removes it from
+the address. Bookmark that address: later visits in the same browser session need no token, and the
+`<id>` stays the same while the token file does. After the browser forgets the cookie, open the address
+with the token again. The cookie is never sent to other web services on your device, even ones on other
+`127.0.0.1` ports. The token file may hold only letters, digits, `-` and `_` (the command above makes such
+a token). On a phone, use an SSH app that supports local port forwarding and keep it open
 while you use the page. Keep the forwarded port on loopback (no `-g`, no `GatewayPorts`), or other devices
 on that network could reach it.
 
@@ -209,7 +213,7 @@ https://server.<tailnet>.ts.net:12443/    sessions on server
 ```
 
 Bookmark each, or add each to the phone's home screen. With SSH tunnels give each machine its own local
-port (`-L 7701:127.0.0.1:7700 you@desk`, `-L 7702:127.0.0.1:7700 you@server`). Rex sessions on one machine
+port (`-L 7701:127.0.0.1:7700 you@desk`, `-L 7702:127.0.0.1:7700 you@server`); each keeps its own sign-in. Rex sessions on one machine
 are not visible through another machine's rweb.
 
 ## 9. Using the page

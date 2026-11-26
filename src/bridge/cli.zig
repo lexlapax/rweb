@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const access = @import("access.zig");
 
 pub const usage =
     \\rweb: shows Rex terminal sessions in a web browser
@@ -91,6 +92,8 @@ pub const Error = error{
     UnknownOption,
     /// A loopback TCP listener with an owner rule needs `--backend-secret-file`.
     NeedBackendSecret,
+    /// `--own-address` that is not an IP address.
+    BadAddress,
 } || Allocator.Error;
 
 /// Parse `args` (without the program name). Slices in the result point into `args`, except
@@ -139,7 +142,10 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
         } else if (eql(u8, a, "--random-token")) {
             p.random_token = true;
         } else if (eql(u8, a, "--own-address")) {
-            try own.append(arena, try value(args, &i));
+            const v = try value(args, &i);
+            // An address that does not parse would match nothing and quietly turn the rule off.
+            if (!access.isAddress(v)) return error.BadAddress;
+            try own.append(arena, v);
         } else if (eql(u8, a, "--allow-own-address")) {
             p.allow_own_address = true;
         } else if (eql(u8, a, "--allow-peer-uid")) {
@@ -232,6 +238,13 @@ test "a unix socket needs an access rule and defaults to root as the only peer" 
     try testing.expect(p.detect_own_addresses); // fail closed: the own-address rule must be enforceable
     const q = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--allow-own-address" });
     try testing.expect(!q.detect_own_addresses);
+}
+
+test "an --own-address that is not an address stops startup" {
+    try testing.expectError(error.BadAddress, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--own-address", "not-an-ip" }));
+    try testing.expectError(error.BadAddress, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--own-address", "100.64.0.5", "--own-address", "" }));
+    const p = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--own-address", "100.64.0.5", "--own-address", "fd7a:115c:a1e0::5" });
+    try testing.expect(!p.detect_own_addresses); // the two addresses were kept: nothing to detect
 }
 
 test "loopback TCP without any rule gets a random token" {

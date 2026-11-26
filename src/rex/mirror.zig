@@ -54,6 +54,8 @@ pub const Mirror = struct {
 
     status: Status = .waiting_for_snapshot,
     snap: std.ArrayList(u8) = .empty,
+    /// Where the next snapshot record header starts in `snap` (0: the envelope is not checked yet).
+    snap_scan: usize = 0,
     term: ghostty_vt.Terminal = undefined,
     vt: ghostty_vt.TerminalStream = undefined,
     /// Set once the channel nonce is known.
@@ -148,19 +150,23 @@ pub const Mirror = struct {
             .waiting_for_snapshot => {},
         }
         if (m.splitter == null) return error.NoNonce;
+        // Every byte so far belongs to a record that ends within the limit (checked below), so the
+        // buffer can pass it only by the trailing bytes of one chunk.
+        if (m.snap.items.len > max_snapshot) return error.SnapshotTooLarge;
         try m.snap.appendSlice(m.gpa, bytes);
-        var reader: Io.Reader = .fixed(m.snap.items);
+        // Decode once, when the whole snapshot is here: finding its end from the record headers is
+        // cheap, while decoding the growing buffer after every chunk would cost quadratic time.
+        const end = (try snapshotEnd(m.snap.items, &m.snap_scan, max_snapshot)) orelse return;
+        var reader: Io.Reader = .fixed(m.snap.items[0..end]);
         var decoded = ghostty_vt.snapshot.decode(m.gpa, m.io, &reader, .{
             .max_continuation_bytes = 1 << 20,
         }) catch |e| switch (e) {
-            error.EndOfStream => {
-                if (m.snap.items.len > max_snapshot) return error.SnapshotTooLarge;
-                return; // wait for more bytes
-            },
+            error.EndOfStream => return error.BadSnapshot, // its own framing said it was complete
             else => return e,
         };
         defer decoded.deinit(m.gpa);
         const used = reader.seek;
+        if (used != end) return error.BadSnapshot;
         m.term = decoded.toOwned();
         m.vt = m.term.vtStream();
         switch (decoded.continuation) {
@@ -177,6 +183,35 @@ pub const Mirror = struct {
     }
 
     // Splitter sink.
+
+    /// The length of the snapshot at the start of `buf`, once all of it is there; null while more is
+    /// needed. Reads only the framing (a 10-byte envelope, then records of a 10-byte header, tag
+    /// u16 and payload length u32 little-endian plus a checksum, and the payload, up to the FINISH
+    /// record; see Ghostty's src/terminal/snapshot/main.zig), resuming at `scan.*`. A record that
+    /// would end past `limit` fails at once, before its bytes arrive.
+    pub fn snapshotEnd(buf: []const u8, scan: *usize, limit: usize) error{ BadSnapshot, SnapshotTooLarge }!?usize {
+        const envelope_len = 10;
+        const header_len = 10;
+        const finish_tag: u16 = 6;
+        if (scan.* == 0) {
+            if (buf.len < envelope_len) {
+                if (!std.mem.startsWith(u8, "GHOSTSNP", buf[0..@min(buf.len, 8)])) return error.BadSnapshot;
+                return null;
+            }
+            if (!std.mem.eql(u8, buf[0..8], "GHOSTSNP")) return error.BadSnapshot;
+            scan.* = envelope_len;
+        }
+        while (scan.* <= buf.len and buf.len - scan.* >= header_len) {
+            const h = buf[scan.*..][0..header_len];
+            const tag = std.mem.readInt(u16, h[0..2], .little);
+            const payload: u64 = std.mem.readInt(u32, h[2..6], .little);
+            const record_end = @as(u64, scan.*) + header_len + payload;
+            if (record_end > limit) return error.SnapshotTooLarge;
+            if (tag == finish_tag) return if (buf.len >= record_end) @intCast(record_end) else null;
+            scan.* = @intCast(record_end); // may be past `buf.len` while the payload arrives
+        }
+        return null;
+    }
     pub fn plain(m: *Mirror, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         m.vt.nextSlice(bytes);
@@ -567,6 +602,40 @@ test "mirror: not live until the snapshot has arrived" {
     defer m.deinit();
     try testing.expectError(error.NotLive, m.redraw(testing.allocator));
     try testing.expect(m.size() == null);
+}
+
+test "mirror: the snapshot's end is found from its framing, and a size over the limit fails early" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 9, 40, 5, "first line\r\n");
+    defer a.free(stream);
+    // The real snapshot: its end is where the decoder stops (the resize message follows it).
+    var scan: usize = 0;
+    const end = (try Mirror.snapshotEnd(stream, &scan, max_snapshot)).?;
+    var reader: Io.Reader = .fixed(stream);
+    var d = try ghostty_vt.snapshot.decode(a, testing.io, &reader, .{ .max_continuation_bytes = 1 << 20 });
+    d.deinit(a);
+    try testing.expectEqual(reader.seek, end);
+    // Fed in pieces, the end is found once, when the last piece arrives.
+    scan = 0;
+    for (1..end) |n| try testing.expect((try Mirror.snapshotEnd(stream[0..n], &scan, max_snapshot)) == null);
+    try testing.expectEqual(end, (try Mirror.snapshotEnd(stream[0..end], &scan, max_snapshot)).?);
+    // A limit smaller than the snapshot: refused, without waiting for the rest.
+    scan = 0;
+    try testing.expectError(error.SnapshotTooLarge, Mirror.snapshotEnd(stream[0..40], &scan, 30));
+    // A record header announcing 4 GiB: refused from its header alone, long before the limit's bytes.
+    var big: [20]u8 = undefined;
+    @memcpy(big[0..10], stream[0..10]);
+    std.mem.writeInt(u16, big[10..12], 3, .little);
+    std.mem.writeInt(u32, big[12..16], 0xffff_ffff, .little);
+    @memset(big[16..20], 0);
+    scan = 0;
+    try testing.expectError(error.SnapshotTooLarge, Mirror.snapshotEnd(&big, &scan, max_snapshot));
+    const m = try Mirror.init(a, testing.io, 9);
+    defer m.deinit();
+    try testing.expectError(error.SnapshotTooLarge, m.feed(&big));
+    // Not a snapshot at all, even one byte of it.
+    scan = 0;
+    try testing.expectError(error.BadSnapshot, Mirror.snapshotEnd("GHX", &scan, max_snapshot));
 }
 
 test "mirror: garbage instead of a snapshot fails cleanly" {

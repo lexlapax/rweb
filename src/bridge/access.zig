@@ -7,8 +7,9 @@
 //!   tests, may connect at all.
 //! - A request carrying `Tailscale-Funnel-Request` came from the public internet: refused.
 //! - `Tailscale-User-Login` must be the configured owner. Serve strips client-supplied copies of
-//!   it, but a loopback TCP listener cannot tell Serve from another local process; that
-//!   exposure is accepted and recorded for desktop-mac.
+//!   it, but a loopback TCP listener cannot tell Serve from another local process, so there the
+//!   owner rule stands only behind a backend secret (`--backend-secret-file`: a secret first path
+//!   segment that only Serve's configuration knows), checked in `server.zig` before this module.
 //! - `X-Forwarded-For` naming one of this node's own Tailscale addresses means a local process
 //!   asked Serve for the node's name and got the owner's identity: refused unless the machine's
 //!   setting allows it (single-user hosts). Addresses are compared as addresses, not as text
@@ -71,6 +72,8 @@ pub const Refusal = enum {
     bad_host,
     no_forwarded_for,
     bad_forwarded_for,
+    /// One of the configured own addresses is not an address: the rule cannot be applied.
+    bad_own_address,
 
     pub fn text(r: Refusal) []const u8 {
         return switch (r) {
@@ -87,6 +90,7 @@ pub const Refusal = enum {
             .bad_host => "host not allowed",
             .no_forwarded_for => "no X-Forwarded-For",
             .bad_forwarded_for => "X-Forwarded-For is not an address",
+            .bad_own_address => "a configured own address is not an address",
         };
     }
 };
@@ -122,6 +126,9 @@ pub fn decide(cfg: Config, request: Request) Decision {
     }
 
     if (!cfg.allow_own_address and cfg.own_addresses.len > 0) {
+        // A configured address that does not parse would silently match nothing: refuse instead.
+        // (Startup already rejects such addresses; this is the second line.)
+        for (cfg.own_addresses) |own| if (parseAddress(own) == null) return .{ .deny = .bad_own_address };
         const xff = request.header("x-forwarded-for") orelse return .{ .deny = .no_forwarded_for };
         var seen = false;
         var it = std.mem.tokenizeAny(u8, xff, ", ");
@@ -129,7 +136,7 @@ pub fn decide(cfg: Config, request: Request) Decision {
             seen = true;
             const a = parseAddress(addr) orelse return .{ .deny = .bad_forwarded_for };
             for (cfg.own_addresses) |own| {
-                const o = parseAddress(own) orelse continue;
+                const o = parseAddress(own).?; // checked above
                 if (sameAddress(a, o)) return .{ .deny = .own_address };
             }
         }
@@ -186,6 +193,12 @@ pub fn hostAllowed(allowed: []const []const u8, host: []const u8) bool {
 }
 
 const Ip = union(enum) { v4: [4]u8, v6: [16]u8 };
+
+/// Whether `text` is an IP address this module can compare (IPv4, IPv6, IPv4-mapped, with or
+/// without brackets or a zone).
+pub fn isAddress(text: []const u8) bool {
+    return parseAddress(text) != null;
+}
 
 /// An IP literal as bytes, with an IPv4-mapped IPv6 address turned into IPv4 and any zone dropped.
 fn parseAddress(text: []const u8) ?Ip {
@@ -404,6 +417,22 @@ test "the own-address rule compares addresses, and fails closed" {
     // A near miss is somebody else.
     const near = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "100.64.0.50" } };
     try testing.expectEqual(Decision.allow, decide(base_cfg, req(&near)));
+}
+
+test "an own address that is not an address refuses every request, not none" {
+    const login = Header{ .name = "Tailscale-User-Login", .value = owner };
+    const bad_cfg: Config = .{ .owner = owner, .own_addresses = &.{ "100.64.0.5", "not-an-ip" } };
+    // Even from the node's own address and from another node: the rule cannot be applied.
+    const own = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "100.64.0.5" } };
+    try expectDeny(.bad_own_address, bad_cfg, req(&own));
+    const other = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "100.64.0.9" } };
+    try expectDeny(.bad_own_address, bad_cfg, req(&other));
+    // The machine's explicit choice to accept its own address still stands.
+    var allow_cfg = bad_cfg;
+    allow_cfg.allow_own_address = true;
+    try testing.expectEqual(Decision.allow, decide(allow_cfg, req(&own)));
+    try testing.expect(isAddress("100.64.0.5") and isAddress("[fd7a:115c:a1e0::5%1]") and isAddress("::ffff:100.64.0.5"));
+    try testing.expect(!isAddress("") and !isAddress("100.64.0") and !isAddress("host.example") and !isAddress("100.64.0.5/32"));
 }
 
 test "a security header that appears twice is refused, in any case" {

@@ -39,7 +39,9 @@ pub const Options = struct {
     /// How long a new connection may take to send its request head.
     head_timeout_ms: u32 = 10_000,
     /// Connections that have not yet passed the access check, at most. The rest of
-    /// `max_connections` is for requests that did.
+    /// `max_connections` is for requests that did. When they are all taken, a new connection
+    /// evicts the oldest one that has not sent a request head yet, so idle connections from a
+    /// local process cannot keep the owner out (Serve sends its request at once).
     max_pending: u32 = 16,
 };
 
@@ -90,6 +92,10 @@ pub const Server = struct {
     /// reliable on its own).
     conns_mu: Io.Mutex = .init,
     conns: std.ArrayList(Io.net.Stream) = .empty,
+    /// Accepted connections that have not sent a request head yet, oldest first (under `conns_mu`).
+    waiting: std.ArrayList(Io.net.Stream) = .empty,
+    /// Connections evicted from `waiting`, for tests and logs.
+    evicted: std.atomic.Value(u32) = .init(0),
     /// Per-asset validators and gzip bodies, made on first use.
     cache_mu: Io.Mutex = .init,
     etags: [assets.all.len]?[34]u8 = @splat(null),
@@ -97,12 +103,19 @@ pub const Server = struct {
     /// Requests refused by `access`, and the last reason, for tests and logs.
     refusals: std.atomic.Value(u32) = .init(0),
     last_refusal: std.atomic.Value(u8) = .init(255),
+    /// With a token: the path the page is served under, `/s/<32 hex>`, derived from the token. The
+    /// token's cookie is scoped to it, because cookies are shared by every port on a host: an
+    /// unrelated service on another loopback port must never receive it, and two SSH tunnels on two
+    /// ports must not overwrite each other's cookie. Not a secret (the token is).
+    token_prefix_buf: [3 + 32]u8 = undefined,
+    token_prefix: ?[]const u8 = null,
 
     pub fn start(gpa: Allocator, io: Io, hub: *Hub, opts: Options) !*Server {
         if (opts.access.owner == null and opts.access.token == null) return error.AccessNotConfigured;
         const s = try gpa.create(Server);
         errdefer gpa.destroy(s);
         s.* = .{ .gpa = gpa, .io = io, .hub = hub, .opts = opts, .listener = undefined };
+        if (opts.access.token) |t| s.token_prefix = tokenPrefix(&s.token_prefix_buf, t);
         switch (opts.listen) {
             .unix => |path| {
                 try prepareSocketDir(io, path);
@@ -132,6 +145,7 @@ pub const Server = struct {
         if (s.accept_task) |*t| t.cancel(s.io);
         s.group.cancel(s.io);
         s.conns.deinit(s.gpa);
+        s.waiting.deinit(s.gpa);
         for (s.gz) |z| if (z) |bytes| s.gpa.free(bytes);
         s.listener.deinit(s.io);
         if (s.opts.listen == .unix) Io.Dir.deleteFileAbsolute(s.io, s.opts.listen.unix) catch {};
@@ -181,18 +195,52 @@ pub const Server = struct {
                     continue;
                 }
             };
-            if (s.active.load(.acquire) >= s.opts.max_connections or s.pending.load(.acquire) >= s.opts.max_pending) {
+            if (s.pending.load(.acquire) >= s.opts.max_pending) s.evictOldestWaiting();
+            // An evicted connection leaves `pending` when its task unwinds, which is at once; the
+            // hard limit only matters if eviction cannot keep up.
+            if (s.active.load(.acquire) >= s.opts.max_connections or s.pending.load(.acquire) >= 2 * s.opts.max_pending) {
+                conn.close(s.io);
+                continue;
+            }
+            s.conns_mu.lockUncancelable(s.io);
+            const listed = if (s.waiting.append(s.gpa, conn)) true else |_| false;
+            s.conns_mu.unlock(s.io);
+            if (!listed) {
                 conn.close(s.io);
                 continue;
             }
             _ = s.active.fetchAdd(1, .acq_rel);
             _ = s.pending.fetchAdd(1, .acq_rel);
             s.group.concurrent(s.io, handleConn, .{ s, conn }) catch {
+                s.conns_mu.lockUncancelable(s.io);
+                s.unlistWaiting(conn);
+                s.conns_mu.unlock(s.io);
                 _ = s.active.fetchSub(1, .acq_rel);
                 _ = s.pending.fetchSub(1, .acq_rel);
                 conn.close(s.io);
             };
         }
+    }
+
+    /// Shut the oldest connection that has not sent a request head; its task then ends and frees
+    /// its slot. A connection is unlisted (under `conns_mu`) before its task closes it, so the
+    /// stream shut here is always still open.
+    fn evictOldestWaiting(s: *Server) void {
+        s.conns_mu.lockUncancelable(s.io);
+        defer s.conns_mu.unlock(s.io);
+        if (s.waiting.items.len == 0) return;
+        const oldest = s.waiting.orderedRemove(0);
+        oldest.shutdown(s.io, .both) catch {};
+        _ = s.evicted.fetchAdd(1, .acq_rel);
+        log.info("pending connections full: dropped the oldest one that had sent no request", .{});
+    }
+
+    /// Caller holds `conns_mu`.
+    fn unlistWaiting(s: *Server, conn: Io.net.Stream) void {
+        for (s.waiting.items, 0..) |c, i| if (c.socket.handle == conn.socket.handle) {
+            _ = s.waiting.orderedRemove(i);
+            return;
+        };
     }
 
     /// Cuts a connection that has not sent a complete request head in time.
@@ -219,6 +267,7 @@ pub const Server = struct {
                 _ = s.conns.swapRemove(i);
                 break;
             };
+            s.unlistWaiting(conn);
             s.conns_mu.unlock(s.io);
             _ = s.active.fetchSub(1, .acq_rel);
             conn.close(s.io);
@@ -237,6 +286,9 @@ pub const Server = struct {
         var http = std.http.Server.init(&r.interface, &w.interface);
         var req = try http.receiveHead();
         head_done.store(true, .release);
+        s.conns_mu.lockUncancelable(s.io);
+        s.unlistWaiting(conn); // it has spoken: no longer the one to evict
+        s.conns_mu.unlock(s.io);
         const t_head = std.Io.Clock.awake.now(s.io).toMilliseconds();
         // The request log names only a path the bridge knows (never the secret prefix, a query,
         // or text a client chose, which could carry a token or forge log lines).
@@ -244,7 +296,7 @@ pub const Server = struct {
         defer log.info("request {s} {s} (head read at {d}, handled in {d} ms)", .{ @tagName(req.head.method), logged_path, t_head, std.Io.Clock.awake.now(s.io).toMilliseconds() - t_head });
 
         // ---- the backend secret, if there is one: first, and answered with a bare 404 ----
-        const rest: []const u8 = if (s.opts.backend_secret) |secret|
+        const outer: []const u8 = if (s.opts.backend_secret) |secret|
             (stripSecret(req.head.target, secret) orelse {
                 logged_path = "(wrong prefix)";
                 s.last_refusal.store(@intFromEnum(access.Refusal.wrong_peer), .release);
@@ -254,6 +306,16 @@ pub const Server = struct {
             })
         else
             req.head.target;
+        // ---- the token's path prefix: `/s/<id>/...` is served like `/...` ----
+        var under_prefix = false;
+        const rest: []const u8 = if (s.token_prefix) |pfx| if (stripPrefix(outer, pfx)) |inner| blk: {
+            under_prefix = true;
+            if (inner.len == 0 or inner[0] == '?') { // `/s/<id>`: the page needs its trailing slash
+                logged_path = "(prefix)";
+                return s.redirect(&req, pfx, inner, false, false);
+            }
+            break :blk inner;
+        } else outer else outer;
         const path_part = rest[0 .. std.mem.indexOfScalar(u8, rest, '?') orelse rest.len];
         const path = if (path_part.len == 0) "/" else path_part;
         logged_path = knownPath(path);
@@ -361,8 +423,58 @@ pub const Server = struct {
             try req.respond(tree, .{ .keep_alive = false, .extra_headers = &(security_headers ++ no_store ++ [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }}) });
             return;
         }
-        if (assets.indexOf(path)) |idx| return s.serveAsset(&req, idx, areq.query_token, hdrs[0..n]);
+        // The page opened with `?token=` outside its prefix: move to the prefix, where the token's
+        // cookie lives, and take the token out of the address.
+        if (s.token_prefix) |pfx| if (!under_prefix and areq.query_token != null and std.mem.eql(u8, path, "/")) {
+            return s.redirect(&req, pfx, rest[std.mem.indexOfScalar(u8, rest, '?') orelse rest.len ..], true, behindHttps(hdrs[0..n]));
+        };
+        if (assets.indexOf(path)) |idx| return s.serveAsset(&req, idx, if (under_prefix) areq.query_token else null, hdrs[0..n]);
         try req.respond("not found\n", .{ .status = .not_found, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+    }
+
+    const cookie_max = 640;
+
+    /// `rweb-token=<token>` scoped to the token's prefix. Null if it does not fit (it always does
+    /// for a token rweb accepts: at most a few hundred URL-safe characters).
+    fn tokenCookie(s: *Server, buf: []u8, secure: bool) ?[]const u8 {
+        return std.fmt.bufPrint(buf, "rweb-token={s}; Path={s}/; HttpOnly; SameSite=Strict{s}", .{ s.opts.access.token.?, s.token_prefix.?, if (secure) "; Secure" else "" }) catch null;
+    }
+
+    /// Redirect to `<prefix>/` keeping `query` without its `token`. With `set_cookie`, also store the
+    /// token in its prefix-scoped cookie and delete the site-wide cookie that rweb 0.1.0 set.
+    fn redirect(s: *Server, req: *std.http.Server.Request, prefix: []const u8, query: []const u8, set_cookie: bool, secure: bool) !void {
+        var loc_buf: [1024]u8 = undefined;
+        var lw: std.Io.Writer = .fixed(&loc_buf);
+        lw.print("{s}/", .{prefix}) catch unreachable;
+        if (query.len > 1) {
+            var first = true;
+            var it = std.mem.tokenizeScalar(u8, query[1..], '&');
+            while (it.next()) |kv| {
+                if (std.mem.eql(u8, kv, "token") or std.mem.startsWith(u8, kv, "token=")) continue;
+                lw.print("{s}{s}", .{ if (first) "?" else "&", kv }) catch {
+                    lw.end = prefix.len + 1; // too long: drop the query
+                    break;
+                };
+                first = false;
+            }
+        }
+        var cookie_buf: [cookie_max]u8 = undefined;
+        var hb: [16]std.http.Header = undefined;
+        var extra: [4]std.http.Header = undefined;
+        var n: usize = 0;
+        extra[n] = .{ .name = "location", .value = lw.buffered() };
+        n += 1;
+        extra[n] = no_store[0];
+        n += 1;
+        if (set_cookie) {
+            if (s.tokenCookie(&cookie_buf, secure)) |ck| {
+                extra[n] = .{ .name = "set-cookie", .value = ck };
+                n += 1;
+            }
+            extra[n] = .{ .name = "set-cookie", .value = "rweb-token=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict" };
+            n += 1;
+        }
+        try req.respond("", .{ .status = if (set_cookie) .see_other else .found, .keep_alive = false, .extra_headers = withSecurity(&hb, extra[0..n]) });
     }
 
     fn etagFor(s: *Server, idx: usize) []const u8 {
@@ -392,15 +504,11 @@ pub const Server = struct {
     fn serveAsset(s: *Server, req: *std.http.Server.Request, idx: usize, query_token: ?[]const u8, headers: []const access.Header) !void {
         const a = assets.all[idx];
         const is_root = std.mem.eql(u8, a.path, "/");
-        // A page opened with `?token=` keeps the token in a same-site cookie, so its scripts,
-        // styles and socket need no query string. That response is never a 304.
-        var cookie_buf: [160]u8 = undefined;
-        var behind_https = false;
-        for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-proto") and std.ascii.eqlIgnoreCase(h.value, "https")) {
-            behind_https = true;
-        };
-        const cookie: ?[]const u8 = if (s.opts.access.token != null and query_token != null and is_root)
-            std.fmt.bufPrint(&cookie_buf, "rweb-token={s}; Path=/; HttpOnly; SameSite=Strict{s}", .{ query_token.?, if (behind_https) "; Secure" else "" }) catch null
+        // A page opened with `?token=` under its prefix keeps the token in a cookie scoped to that
+        // prefix, so its scripts, styles and socket need no query string. Never a 304.
+        var cookie_buf: [cookie_max]u8 = undefined;
+        const cookie: ?[]const u8 = if (s.token_prefix != null and query_token != null and is_root)
+            s.tokenCookie(&cookie_buf, behindHttps(headers))
         else
             null;
 
@@ -703,6 +811,32 @@ pub fn stripSecret(target: []const u8, secret: []const u8) ?[]const u8 {
     return rest;
 }
 
+/// `/s/` and the first 16 bytes of SHA-256("rweb cookie path" NUL token), in hex. Stable for a token
+/// (a bookmark survives a restart with the same token file), different for each token, and it tells
+/// nothing about the token.
+pub fn tokenPrefix(buf: *[3 + 32]u8, secret: []const u8) []const u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update("rweb cookie path\x00");
+    h.update(secret);
+    const digest = h.finalResult();
+    buf[0..3].* = "/s/".*;
+    buf[3..].* = std.fmt.bytesToHex(digest[0..16].*, .lower);
+    return buf;
+}
+
+/// `target` without `prefix`, if it starts with it as a whole path segment.
+pub fn stripPrefix(target: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, target, prefix)) return null;
+    const rest = target[prefix.len..];
+    if (rest.len != 0 and rest[0] != '/' and rest[0] != '?') return null;
+    return rest;
+}
+
+fn behindHttps(headers: []const access.Header) bool {
+    for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-proto") and std.ascii.eqlIgnoreCase(h.value, "https")) return true;
+    return false;
+}
+
 /// The path to write in the log: one the bridge serves, or a fixed word. Never client text.
 fn knownPath(path: []const u8) []const u8 {
     if (assets.indexOf(path)) |i| return assets.all[i].path;
@@ -845,10 +979,17 @@ fn get(r: Rig, path: []const u8, headers: []const u8) !Http {
 
 const token_cfg: access.Config = .{ .token = token };
 
+/// The page's address under the test token's prefix, with the token: `/s/<id>/?token=...`.
+fn pagePath(buf: []u8) []const u8 {
+    var pb: [35]u8 = undefined;
+    return std.fmt.bufPrint(buf, "{s}/?token={s}", .{ tokenPrefix(&pb, token), token }) catch unreachable;
+}
+
 test "server: assets are served with a strict content security policy" {
     const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
     defer rig.deinit();
-    const h = try get(rig, "/?token=" ++ token, "");
+    var ppb: [128]u8 = undefined;
+    const h = try get(rig, pagePath(&ppb), "");
     defer freeHttp(h);
     try testing.expectEqual(@as(u16, 200), h.status);
     try testing.expect(std.mem.indexOf(u8, h.body, "<title>rweb</title>") != null);
@@ -917,14 +1058,15 @@ test "server: assets are compressed, validated and cached, so a phone loads them
     try testing.expectEqual(@as(u16, 200), other.status);
 
     // The page itself is revalidated, and a token page is never a 304 (it sets the cookie).
-    const page = try get(rig, "/?token=" ++ token, "");
+    var ppb: [128]u8 = undefined;
+    const page = try get(rig, pagePath(&ppb), "");
     defer freeHttp(page);
     try testing.expectEqualStrings("private, no-cache", headerValue(page.head, "cache-control").?);
     try testing.expect(headerValue(page.head, "set-cookie") != null);
     const page_tag = headerValue(page.head, "etag").?;
     const hdr2 = try std.fmt.allocPrint(testing.allocator, "If-None-Match: {s}\r\n", .{page_tag});
     defer testing.allocator.free(hdr2);
-    const page2 = try get(rig, "/?token=" ++ token, hdr2);
+    const page2 = try get(rig, pagePath(&ppb), hdr2);
     defer freeHttp(page2);
     try testing.expectEqual(@as(u16, 200), page2.status);
 
@@ -933,6 +1075,71 @@ test "server: assets are compressed, validated and cached, so a phone loads them
     defer freeHttp(forbidden);
     try testing.expectEqual(@as(u16, 403), forbidden.status);
     try testing.expectEqualStrings("no-store", headerValue(forbidden.head, "cache-control").?);
+}
+
+test "server: the token cookie is scoped to the token's own path, never to the whole host" {
+    // Cookies are shared by every port on a host: a cookie for `/` on 127.0.0.1 would also go to any
+    // other loopback service the browser visits, and two tunnels would overwrite each other's.
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    var pb: [35]u8 = undefined;
+    const pfx = tokenPrefix(&pb, token);
+    try testing.expect(std.mem.startsWith(u8, pfx, "/s/") and pfx.len == 35);
+    try testing.expect(std.mem.indexOf(u8, pfx, token) == null);
+    var pb2: [35]u8 = undefined;
+    try testing.expect(!std.mem.eql(u8, pfx, tokenPrefix(&pb2, "another-token-0123456789")));
+
+    // Opening `/?token=` moves to the prefix, keeps other parameters, drops the token, sets the
+    // prefix-scoped cookie and deletes 0.1.0's site-wide one.
+    const r = try get(rig, "/?dbg=1&token=" ++ token ++ "&term=xterm", "");
+    defer freeHttp(r);
+    try testing.expectEqual(@as(u16, 303), r.status);
+    var lb: [128]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&lb, "{s}/?dbg=1&term=xterm", .{pfx}), headerValue(r.head, "location").?);
+    try testing.expect(std.mem.indexOf(u8, r.head, token ++ "&") == null and std.mem.indexOf(u8, headerValue(r.head, "location").?, token) == null);
+    var cb: [160]u8 = undefined;
+    const want_cookie = try std.fmt.bufPrint(&cb, "rweb-token={s}; Path={s}/; HttpOnly; SameSite=Strict", .{ token, pfx });
+    try testing.expect(std.mem.indexOf(u8, r.head, want_cookie) != null);
+    try testing.expect(std.mem.indexOf(u8, r.head, "rweb-token=; Path=/; Max-Age=0") != null);
+    try testing.expect(std.mem.indexOf(u8, r.head, "Path=/;") == null or std.mem.indexOf(u8, r.head, "Max-Age=0") != null);
+
+    // A wrong token is refused before any redirect.
+    const bad = try get(rig, "/?token=wrong", "");
+    defer freeHttp(bad);
+    try testing.expectEqual(@as(u16, 403), bad.status);
+
+    // `/s/<id>` without its slash gets one (relative paths need it); no cookie is set there.
+    const ns = try get(rig, pfx, "");
+    defer freeHttp(ns);
+    try testing.expectEqual(@as(u16, 302), ns.status);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&lb, "{s}/", .{pfx}), headerValue(ns.head, "location").?);
+    try testing.expect(headerValue(ns.head, "set-cookie") == null);
+
+    // Under the prefix the cookie authenticates the page, its files, the tree and the socket.
+    var hb: [96]u8 = undefined;
+    const ck = try std.fmt.bufPrint(&hb, "Cookie: rweb-token={s}\r\n", .{token});
+    for ([_][]const u8{ "/", "/app.js", "/vendor/wterm.js", "/api/tree" }) |p| {
+        var ub: [96]u8 = undefined;
+        const page = try get(rig, try std.fmt.bufPrint(&ub, "{s}{s}", .{ pfx, p }), ck);
+        defer freeHttp(page);
+        try testing.expectEqual(@as(u16, 200), page.status);
+    }
+    var wb: [96]u8 = undefined;
+    const c = try rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), try std.fmt.bufPrint(&wb, "{s}/ws", .{pfx}), null, "Origin: http://localhost\r\nCookie: rweb-token=" ++ token ++ "\r\n");
+    c.deinit(testing.allocator);
+    // Without the cookie or token, under the prefix: refused.
+    var ub2: [96]u8 = undefined;
+    const no = try get(rig, try std.fmt.bufPrint(&ub2, "{s}/app.js", .{pfx}), "");
+    defer freeHttp(no);
+    try testing.expectEqual(@as(u16, 403), no.status);
+    // A path that only begins like the prefix is not under it.
+    var ub3: [96]u8 = undefined;
+    const longer = try get(rig, try std.fmt.bufPrint(&ub3, "{s}x/app.js", .{pfx}), ck);
+    defer freeHttp(longer);
+    try testing.expectEqual(@as(u16, 404), longer.status);
+    try testing.expect(stripPrefix("/s/ab/x", "/s/ab").?.len == 2);
+    try testing.expect(stripPrefix("/s/abc", "/s/ab") == null);
+    try testing.expectEqualStrings("?q", stripPrefix("/s/ab?q", "/s/ab").?);
 }
 
 test "server: refuses a request with no token or the wrong one" {
@@ -1322,7 +1529,8 @@ test "server: the diagnostic pages are off unless asked for, and never log a que
         defer freeHttp(h);
         try testing.expectEqual(@as(u16, 404), h.status);
     }
-    const ok = try get(rig, "/?token=" ++ token, "");
+    var ppb: [128]u8 = undefined;
+    const ok = try get(rig, pagePath(&ppb), "");
     defer freeHttp(ok);
     try testing.expectEqual(@as(u16, 200), ok.status);
 }
@@ -1335,18 +1543,39 @@ test "server: a connection that never sends a request is cut, and cannot fill th
     defer idle1.close(testing.io);
     const idle2 = try rig.tcp();
     defer idle2.close(testing.io);
-    try testing.io.sleep(.fromMilliseconds(100), .awake);
-    // The slots for unauthenticated connections are full: a third is turned away at once.
-    const third = try rig.tcp();
-    var buf: [64]u8 = undefined;
-    var rd = third.reader(testing.io, &buf);
-    try testing.expectError(error.EndOfStream, rd.interface.takeByte());
-    third.close(testing.io);
-    // After the deadline the idle ones are gone and a real request is served.
     try testing.io.sleep(.fromMilliseconds(600), .awake);
-    const ok = try get(rig, "/?token=" ++ token, "");
+    // After the deadline the idle ones are gone and a real request is served.
+    var ppb: [128]u8 = undefined;
+    const ok = try get(rig, pagePath(&ppb), "");
     defer freeHttp(ok);
     try testing.expectEqual(@as(u16, 200), ok.status);
+}
+
+test "server: idle connections filling the pending slots do not keep a real request out" {
+    // Two pending slots and a long head deadline: without eviction, two idle sockets would hold
+    // every new connection off for the whole deadline, and a process reconnecting would forever.
+    const rig = try Rig.initExtra(.{}, token_cfg, .{ .tcp_loopback = 0 }, .{ .max_pending = 2, .head_timeout_ms = 30_000 });
+    defer rig.deinit();
+    var idle: [6]Io.net.Stream = undefined;
+    for (&idle) |*c| {
+        c.* = try rig.tcp();
+        try testing.io.sleep(.fromMilliseconds(20), .awake);
+    }
+    defer for (idle) |c| c.close(testing.io);
+    // A real request still gets through, at once, and more than once.
+    for (0..3) |_| {
+        var ppb: [128]u8 = undefined;
+        const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
+        const ok = try get(rig, pagePath(&ppb), "");
+        defer freeHttp(ok);
+        try testing.expectEqual(@as(u16, 200), ok.status);
+        try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 5_000);
+    }
+    try testing.expect(rig.srv.evicted.load(.acquire) >= 4);
+    // The oldest idle connection was the one dropped.
+    var buf: [16]u8 = undefined;
+    var rd = idle[0].reader(testing.io, &buf);
+    try testing.expectError(error.EndOfStream, rd.interface.takeByte());
 }
 
 test "server: a unix socket path that is a file, or in use, is never replaced" {

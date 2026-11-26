@@ -636,7 +636,31 @@ pub const Hub = struct {
         h.mu.lockUncancelable(h.io);
         defer h.mu.unlock(h.io);
         const term = if (h.terminals.get(key)) |t| t else blk: {
-            const t = try h.createTerminalLocked(sid, bid);
+            try h.ensureAttachedLocked(sid);
+            // Opening waits for Rex's snapshot (longer for a long history): not while holding `mu`,
+            // which every other viewer needs. Another viewer may open the same terminal meanwhile;
+            // then the first one registered is kept and the other is closed.
+            h.mu.unlock(h.io);
+            const fresh = h.newTerminal(sid, bid);
+            h.mu.lockUncancelable(h.io);
+            const t = try fresh;
+            if (h.closing) {
+                h.destroyTerminal(t);
+                return error.Closing;
+            }
+            if (h.terminals.get(key)) |other| {
+                h.destroyTerminal(t);
+                break :blk other;
+            }
+            const k = h.gpa.dupe(u8, key) catch |e| {
+                h.destroyTerminal(t);
+                return e;
+            };
+            h.terminals.put(h.gpa, k, t) catch |e| {
+                h.gpa.free(k);
+                h.destroyTerminal(t);
+                return e;
+            };
             break :blk t;
         };
         term.refs += 1;
@@ -648,10 +672,10 @@ pub const Hub = struct {
         try h.subscribeTo(v, term);
     }
 
-    /// Caller holds `mu`. Opens a stream and waits for the first snapshot.
-    fn createTerminalLocked(h: *Hub, sid: []const u8, bid: []const u8) !*Terminal {
+    /// Opens a stream and waits for the first snapshot. Called without `mu`; the session must be
+    /// attached. The caller registers the terminal.
+    fn newTerminal(h: *Hub, sid: []const u8, bid: []const u8) !*Terminal {
         const gpa = h.gpa;
-        try h.ensureAttachedLocked(sid);
 
         const t = try gpa.create(Terminal);
         errdefer gpa.destroy(t);
@@ -669,12 +693,6 @@ pub const Hub = struct {
         t.mirror = live.mirror;
         t.data = live.data;
         t.input = try Input.open(gpa, h.io, rex.input.Sender.forControl(h.ctl), sid, bid);
-        errdefer t.input.close();
-
-        var kb: [512]u8 = undefined;
-        const key = try gpa.dupe(u8, try terminalKey(&kb, sid, bid));
-        errdefer gpa.free(key);
-        try h.terminals.put(gpa, key, t);
         return t;
     }
 
@@ -1220,6 +1238,54 @@ test "hub: two viewers share one terminal and one stream; the last to leave clos
     hs.hub.mu.lockUncancelable(testing.io);
     try testing.expectEqual(@as(u32, 1), hs.hub.terminals.count());
     hs.hub.mu.unlock(testing.io);
+    hs.hub.removeViewer(b);
+    hs.hub.mu.lockUncancelable(testing.io);
+    try testing.expectEqual(@as(u32, 0), hs.hub.terminals.count());
+    hs.hub.mu.unlock(testing.io);
+}
+
+test "hub: a terminal whose snapshot is slow does not hold up other viewers" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    hs.f.mu.lockUncancelable(testing.io);
+    hs.f.hold_data_ms = 1500;
+    hs.f.mu.unlock(testing.io);
+    // One viewer opens the terminal and waits for its snapshot...
+    var opening = try testing.io.concurrent(Harness.openViewer, .{hs});
+    try testing.io.sleep(.fromMilliseconds(200), .awake);
+    // ...while the hub keeps answering everyone else.
+    const t0 = std.Io.Clock.awake.now(testing.io).toMilliseconds();
+    const tree = hs.hub.treeJson();
+    if (tree) |t| testing.allocator.free(t);
+    const other = try hs.hub.addViewer();
+    hs.hub.removeViewer(other);
+    const waited = std.Io.Clock.awake.now(testing.io).toMilliseconds() - t0;
+    try testing.expect(waited < 500);
+    const v = try opening.await(testing.io);
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    hs.hub.mu.lockUncancelable(testing.io);
+    try testing.expectEqual(@as(u32, 1), hs.hub.terminals.count());
+    hs.hub.mu.unlock(testing.io);
+}
+
+test "hub: two viewers opening one terminal at once end up sharing one" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    hs.f.mu.lockUncancelable(testing.io);
+    hs.f.hold_data_ms = 300;
+    hs.f.mu.unlock(testing.io);
+    var fa = try testing.io.concurrent(Harness.openViewer, .{hs});
+    var fb = try testing.io.concurrent(Harness.openViewer, .{hs});
+    const a = try fa.await(testing.io);
+    const b = try fb.await(testing.io);
+    for ([_]*Viewer{ a, b }) |v| (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    hs.hub.mu.lockUncancelable(testing.io);
+    try testing.expectEqual(@as(u32, 1), hs.hub.terminals.count());
+    hs.hub.mu.unlock(testing.io);
+    try hs.f.feed(hs.block_id, "hi-there");
+    for ([_]*Viewer{ a, b }) |v| (try waitFrame(v, hasHi)).?.deinit(testing.allocator);
+    hs.hub.removeViewer(a);
     hs.hub.removeViewer(b);
     hs.hub.mu.lockUncancelable(testing.io);
     try testing.expectEqual(@as(u32, 0), hs.hub.terminals.count());

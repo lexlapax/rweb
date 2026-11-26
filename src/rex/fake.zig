@@ -69,6 +69,8 @@ pub const Fake = struct {
     live_streams: std.ArrayList(Io.net.Stream) = .empty,
     stopping: bool = false,
     event_seq: u64 = 0,
+    /// Wait this long before sending a new data stream's first bytes (a slow snapshot), for tests.
+    hold_data_ms: u32 = 0,
 
     /// Listen on a fresh socket under /tmp and start serving.
     pub fn start(gpa: Allocator, io: Io) !*Fake {
@@ -687,6 +689,12 @@ pub const Fake = struct {
             std.mem.writeInt(u64, welcome[24..32], stream.nonce, .little);
             try c.writeFrame(.binary, &welcome);
         }
+
+        // A slow snapshot, if a test asked for one.
+        f.mu.lockUncancelable(f.io);
+        const hold = f.hold_data_ms;
+        f.mu.unlock(f.io);
+        if (hold > 0) try f.io.sleep(.fromMilliseconds(hold), .awake);
 
         // Serve the stream until the connection fails or is dropped.
         var chunk: [65536]u8 = undefined;

@@ -4,7 +4,8 @@
 away from your Rex machines.** Open your Rex sessions in a phone, tablet or laptop browser, answer the
 prompt that is waiting, run the quick command, and go. Not affiliated with Superlogical.
 
-Version 0.1.0. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+What changed in each version, and the current one: [CHANGELOG.md](CHANGELOG.md). `rweb --version` names
+the version you have.
 
 ## Why
 
@@ -57,8 +58,8 @@ You need Rex running, [Tailscale](https://tailscale.com/download) on the Rex mac
 
 ```sh
 shasum -a 256 -c SHA256SUMS --ignore-missing     # Linux: sha256sum -c SHA256SUMS --ignore-missing
-tar -xzf rweb-0.1.0-<platform>.tar.gz
-mkdir -p ~/.local/bin && install -m 0755 rweb-0.1.0-<platform>/rweb ~/.local/bin/rweb
+tar -xzf rweb-<version>-<platform>.tar.gz
+mkdir -p ~/.local/bin && install -m 0755 rweb-<version>-<platform>/rweb ~/.local/bin/rweb
 ```
 
 Linux (a unix socket that only Tailscale can reach):
@@ -121,6 +122,6 @@ which it is built. The software it contains or serves keeps its own licences:
 
 ## Status
 
-0.1.0 is in daily use on Linux and macOS. Rex is a preview: rweb pins the Rex API revisions it speaks
+rweb is in daily use on Linux and macOS. Rex is a preview: rweb pins the Rex API revisions it speaks
 (see `rweb --version`) and is tested against each Rex update. Release archives: macOS on Apple silicon,
 and Linux x86-64 (static, any distribution). Windows support will come later.

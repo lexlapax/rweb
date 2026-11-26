@@ -12,8 +12,24 @@ the Rex API revisions it speaks.
 - User guide: tagged machines.
 - Licence: MIT, the same as Ghostty and libghostty-vt; `LICENSE` is in the repository and the release
   archives.
+- SSH tunnel: the token's cookie is now scoped to the page's own path, `/s/<id>/`, which `/?token=`
+  redirects to. Before, it was scoped to the whole host, and a browser sends a host's cookies to every
+  port: another web service on `127.0.0.1` could receive the token, and two tunnels on two ports
+  overwrote each other's sign-in. Bookmark the address you land on. The page uses relative addresses.
+- A token file may hold only letters, digits, `-` and `_` (the user guide's command makes such tokens).
+- `--own-address` must be an IP address; before, a malformed one quietly turned off the refusal of
+  requests from the machine itself. Discovered addresses are checked too, and the access check refuses
+  everything if an own address cannot be compared.
+- Opening a terminal decodes Rex's snapshot once, when all of it has arrived (found from its framing),
+  instead of after every chunk; the 256 MiB limit holds for complete snapshots too and fails from a
+  record's header, before its bytes arrive. Opening no longer blocks other browsers while it waits.
+- When every pending connection slot is taken, the oldest connection that has not sent a request is
+  dropped for the new one, so idle local connections cannot lock the owner out.
+- Malformed `tailscale status --json` is an error at startup, never a crash.
+- `tools/release.sh` refuses a release folder that is a link or another user's, and makes its own
+  private (`0700`) before building in it.
 
-## 0.1.0 (not yet released)
+## 0.1.0 (2026-11-25, built and installed; not published)
 
 The first numbered version: the bridge and page as used daily on Linux and macOS, plus the fixes from
 the first days of that use.

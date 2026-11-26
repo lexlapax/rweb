@@ -14,6 +14,8 @@
   browser protocol, source layout, pinned dependencies.
 - [Security hardening](security-hardening-2026-11-23.md) and the [security review](security-review-2026-11-23.md)
   before it: the threat model, every finding and its fix and test.
+- [Release reviews of 0.1.1](release-review-2026-11-25.md): release readiness and a security scan, each
+  finding's verdict, fix and test.
 - [File transfer](file-transfer.md): design, limits and threat model of the optional file transfer.
 
 ## Why it is built this way

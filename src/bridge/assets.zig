@@ -114,8 +114,12 @@ test "the page references only files that are embedded, and carries no inline co
             rest = rest[i + attr.len ..];
             const end = std.mem.indexOfScalar(u8, rest, '"').?;
             const url = rest[0..end];
-            try std.testing.expect(url.len > 0 and (url[0] == '/' or url[0] == '#'));
-            if (url[0] == '/') try std.testing.expect(find(url) != null);
+            // Relative, so the page also works under a path prefix (the SSH-tunnel cookie path).
+            try std.testing.expect(url.len > 0 and url[0] != '/' and std.mem.indexOf(u8, url, "//") == null);
+            if (url[0] != '#') {
+                var buf: [96]u8 = undefined;
+                try std.testing.expect(find(try std.fmt.bufPrint(&buf, "/{s}", .{url})) != null);
+            }
             refs += 1;
         }
     }
@@ -126,6 +130,19 @@ test "the page references only files that are embedded, and carries no inline co
     while (scripts.next()) |s| try std.testing.expect(std.mem.startsWith(u8, s, " src=\""));
     try std.testing.expect(std.mem.indexOf(u8, page, " onclick=") == null);
     try std.testing.expect(std.mem.indexOf(u8, page, "<style") == null);
+}
+
+test "page scripts load and connect by relative paths only" {
+    // A root-absolute path would leave the SSH-tunnel path prefix, and its path-scoped cookie, behind.
+    for ([_][]const u8{ "/app.js", "/wterm-shim.js", "/lab.js", "/labsel.js", "/lab", "/labsel" }) |name| {
+        const body = find(name).?.body;
+        for ([_][]const u8{ "'/vendor/", "'/xfer/", "'/wterm-shim", "`/api/", "'/api/", "}/ws", "'/labws", "src=\"/", "href=\"/" }) |bad| {
+            if (std.mem.indexOf(u8, body, bad) != null) {
+                std.debug.print("{s} contains {s}\n", .{ name, bad });
+                return error.AbsolutePath;
+            }
+        }
+    }
 }
 
 test "the page script uses no browser pop-ups and no HTML injection" {

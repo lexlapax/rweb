@@ -10,7 +10,7 @@
 //   over by the page, to be sent to Rex as key events.
 window.makeWtermTerminal = async function (host, {fontSize}) {
   const {WTerm, GhosttyCore} = window.RwebWterm;
-  const core = await GhosttyCore.load({wasmPath: '/vendor/ghostty-vt.wasm'});
+  const core = await GhosttyCore.load({wasmPath: 'vendor/ghostty-vt.wasm'});
   // No auto-sizing: the grid is Rex's, and changes only when Rex says so.
   const handlers = {data: () => {}};
   const wt = new WTerm(host, {core, cols: 80, rows: 24, autoResize: false, cursorBlink: true, scrollbackLines: 10000, onData: d => handlers.data(d), onBinary: () => {}});

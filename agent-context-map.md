@@ -1,7 +1,21 @@
 # Agent context map
 
-Last updated: 2026-11-25 (desktop-mac). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
+Last updated: 2026-11-25 (laptop-mac: release-review fixes). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-25: release reviews of `7a53f54` and their fixes
+
+Two independent reviews ran on `7a53f54` (release readiness by agy on linux-box; a security scan by
+OpenAI Daybreak). Every finding was checked against the code and accepted; fixes, verdicts and tests are
+in [docs/release-review-2026-11-25.md](docs/release-review-2026-11-25.md): private release folder
+(`tools/release-base.test.sh`), SSH-tunnel cookie scoped to `/s/<id>/` with a redirect (the page uses
+relative addresses), `--own-address` validated and fail-closed, snapshot framed and decoded once plus
+terminal open outside `Hub.mu`, eviction of the oldest idle pending connection, version-agnostic README,
+typed Tailscale JSON parsing. Checked on laptop-mac: unit 150/159 (9 skipped), live ReleaseSafe 206/207
+(gated restart skipped), web 17/17, Chrome and iOS-Simulator Mobile Safari in tunnel mode. Not yet
+checked: the page through Serve from another device (with the next deployment). **Next:** the owner has
+both reviews look at the fix commit; no version, GitHub Release or deployment until the owner says so.
+Left on purpose: a stream restart (supervisor) still opens under `Hub.mu` (bounded, Rex-caused).
 
 ## 2026-11-25: next work agreed
 

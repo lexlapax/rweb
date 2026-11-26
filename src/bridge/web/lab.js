@@ -7,7 +7,7 @@ const out = document.getElementById('out');
 const log = s => { out.textContent += s + '\n'; };
 const DURATION_MS = 40000, TICK_MS = 1000;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const wsUrl = p => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${p}${location.search}`;
+const wsUrl = p => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}${p}${location.search}`;
 
 function summarize(name, s) {
   const rtts = s.rtts.slice().sort((a, b) => a - b);
@@ -17,7 +17,7 @@ function summarize(name, s) {
     (s.pushGapMax !== undefined ? `, longest silence from the server: ${Math.round(s.pushGapMax)} ms` : '') +
     (s.error ? `, ERROR ${s.error}` : '');
   log(line);
-  fetch(`/api/lab/result?v=${encodeURIComponent(name)}&sent=${s.sent}&ans=${s.rtts.length}&worst=${Math.round(rtts[rtts.length - 1] || 0)}` +
+  fetch(`api/lab/result?v=${encodeURIComponent(name)}&sent=${s.sent}&ans=${s.rtts.length}&worst=${Math.round(rtts[rtts.length - 1] || 0)}` +
     `&slow=${rtts.filter(x => x > 2000).length}&gap=${Math.round(s.pushGapMax || 0)}`, {cache: 'no-store'}).catch(() => {});
 }
 
@@ -25,7 +25,7 @@ async function wsVariant(name, binary) {
   const s = {sent: 0, rtts: [], pushGapMax: 0};
   const sentAt = new Map();
   let lastPush = null;
-  const ws = new WebSocket(wsUrl('/labws'));
+  const ws = new WebSocket(wsUrl('labws'));
   ws.binaryType = 'arraybuffer';
   const opened = new Promise(res => { ws.onopen = res; ws.onerror = () => { s.error = 'socket error'; res(); }; });
   ws.onmessage = ev => {
@@ -57,7 +57,7 @@ async function httpVariant(name) {
   const pending = [];
   while (performance.now() < end) {
     const seq = ++s.sent, t0 = performance.now();
-    pending.push(fetch(`/api/lab/hb?seq=${seq}`, {cache: 'no-store'}).then(r => r.text()).then(() => { s.rtts.push(performance.now() - t0); }).catch(() => {}));
+    pending.push(fetch(`api/lab/hb?seq=${seq}`, {cache: 'no-store'}).then(r => r.text()).then(() => { s.rtts.push(performance.now() - t0); }).catch(() => {}));
     await sleep(TICK_MS);
   }
   await Promise.race([Promise.allSettled(pending), sleep(5000)]);
