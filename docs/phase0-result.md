@@ -3,8 +3,8 @@
 Done on 2026-11-21 on linux-box. The Rex server restart and typing from a real phone were checked
 on 2026-11-22 with the owner's approval. **The gate passes.** Route 1 from the plan (a libghostty-vt mirror
 in the bridge, with VT redraws sent to xterm.js) shows a live Rex terminal correctly. Routes 2
-and 3 were not needed; the plan said to stop at the first route that passes. The spike is in
-[`spike/`](../spike/): throwaway code, not the base for Phase 1.
+and 3 were not needed; the plan said to stop at the first route that passes. The spike was throwaway
+code, not the base for Phase 1, and has since been removed from the tree (see "Reproducing").
 
 ## Versions
 
@@ -149,21 +149,10 @@ screen was compared, including blank ones. Unless noted otherwise, each check be
     has no touch selection. The frontend needs its own way to copy, such as a select mode that
     shows the screen and scrollback as plain text for the phone's own selection.
 
-## Reproducing
+## Reproducing (retired)
 
-```sh
-cd spike
-zig build -Doptimize=ReleaseSafe
-./zig-out/bin/rweb-spike --port 7690 --capture /path/outside/the/repo/cap.bin
-# open the printed URL; add &input=key for hybrid input, &swallow=0 for the negative control
-# stop with: touch /path/outside/the/repo/cap.bin.stop
-python3 compare.py SESSION BLOCK /path/outside/the/repo/cap.bin.screen.json
-# Kitty keyboard check, run inside the test terminal: python3 kittyprobe.py 8
-# Rex delivery rate for a test block: python3 -I rate_probe.py SESSION BLOCK SECONDS
-# phone: with the owner's approval, add --origin https://<host>:10443 --ts-user <owner login>,
-# run `tailscale serve --https=10443 http://127.0.0.1:7690` in the foreground, stop it afterwards
-# restarts rex.service: every program in every Rex session ends. Only with the owner's approval.
-python3 -I restart_probe.py
-```
-
-Captured streams contain real terminal output and stay out of Git.
+The spike was removed from the tree on 2026-11-25 (fourth review round): it loaded xterm.js from a CDN
+without integrity checks into a page that could type into a real Rex, and Phase 0 needs no rerun. Its
+code, probes and run instructions are in Git history; the last commit that has `spike/` is `c5fd3c1`
+(`git show c5fd3c1:docs/phase0-result.md` for the old instructions, `git archive c5fd3c1 spike` for the
+code). Do not run it against a real Rex; the bridge in `src/` supersedes it.

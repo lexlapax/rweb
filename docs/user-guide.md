@@ -266,7 +266,8 @@ machine are not visible through another machine's rweb.
   pretend the paste ended and type the rest as commands. Text a phone keyboard inserts in one go (its
   clipboard suggestion, say) is treated as a paste too. If the text has several lines and the program has
   not turned on bracketed paste (plain `sh`, an old shell, some REPLs), each line would run as it arrives,
-  so the page shows the text and asks first. A paste is at most 32 KB. "Text copied in the terminal" shows
+  so the page shows the text and asks first (the page goes by what the program announced: a program that
+claims bracketed paste and does not handle it is not caught). A paste is at most 32 KB. "Text copied in the terminal" shows
   what a program put on the clipboard, without control characters; any program can set it.
 - **Reconnecting** is automatic: after sleep or a network change the page reconnects and redraws.
 
@@ -303,12 +304,12 @@ Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.lo
 | `cannot find Rex's socket` | Rex is not running, or its socket is elsewhere: start Rex, or pass `--rex-socket`. |
 | `this node is a tagged Tailscale device` | Use `--owner` and `--allow-host` instead of `--owner-from-tailscale` (section 4, tagged machines). |
 | `cannot find tailscale in …` | Tailscale is not where rweb looks (section 4): pass `--tailscale /absolute/path`. |
-| `will not run tailscale at …` | That program, or a folder above it, can be changed by another account (see below); install Tailscale in the usual place or pass another `--tailscale`. |
+| `will not run tailscale at …` | That program, or a folder above it, can be changed by another account (see below). rweb does not try the other install locations after a refusal: fix that one, or pass `--tailscale` with another. |
 | `cannot tell this node's Tailscale addresses` | Tailscale is down, or not signed in. |
 | `cannot reach Rex at …: WrongPeer` | The socket rweb found is served by another user, not your Rex: rweb refuses it. Check `--rex-socket` and `XDG_RUNTIME_DIR`. |
 | `--owner needs --allow-host NAME` | Add `--allow-host <machine>.<tailnet>.ts.net` (section 4, tagged machines). |
 | `--token must be at least 16 characters` | Use a token file made with the command in section 7 instead. |
-| `cannot use secret file …` or `cannot use upload folder …` | The message names the file or folder and the folder where the check failed. `SymLink`: point the option at the real file. `TooOpen` or `NotOwned`: `chmod 600` the file (`700` a folder) and make sure it is yours. `FolderWritableByOthers`, `FolderWritableByGroup` or `FolderNotOurs`: a folder above it can be changed by another user (see below); move the file somewhere under your home folder. |
+| `cannot use secret file …` or `cannot use upload folder …` | The message names the file or folder and the folder where the check failed. `SymLink`: point the option at the real file. `TooOpen` or `NotOwned`: `chmod 600` the file (`700` a folder) and make sure it is yours. `FolderWritableByOthers`, `FolderWritableByGroup` or `FolderNotOurs`: a folder above it can be changed by another user (see below); move the file somewhere under your home folder. `AclGivesOthersWrite`, `AclGivesOthersAccess` or `AclUnreadable`: an access control list lets another user in (`getfacl` on Linux, `ls -le` on macOS shows it; remove that entry). `FuseFilesystem`, `MountNotOurs` or `MountIgnoresOwnership`: it is on a file system another user controls; use a folder on your own disk. |
 | `--listen-unix … need an absolute path`, `SymLink`, `SocketDirNotOurs` or `SocketDirNotPrivate` | The unix socket's path must be absolute with no links on it (on macOS `/tmp` is a link), in a `0700` folder of yours, under folders only you or root can change; use the runtime folder from section 5. |
 | The page keeps reconnecting while others work | rweb takes at most 32 browser connections at once and answers more with 503 "too many viewers"; close other tabs. |
 | 403 "request from this node's own address" | You opened the page on the Rex machine itself. Use another device. |
@@ -325,7 +326,11 @@ Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.lo
 folder and the `tailscale` program must be such that no other account could change them: each is opened
 without following links and checked on what was opened, and every folder above it must belong to you or
 root and not be writable by others (a sticky folder such as `/tmp` is fine). A folder its group can write
-to is fine when that group holds nobody but you (Linux's usual group of one per user), and on macOS when
-it is the `admin` group, whose members can become root anyway. On macOS, access control lists are not
-looked at: do not add ones that let other accounts write to these folders. rweb also checks that the Rex
-socket it connects to is served by your own user.
+to is fine only when that group holds nobody but you: on Linux, your own group of one (named like you, with
+no other members, on a system whose accounts all come from `/etc/passwd` and `/etc/group`); on macOS, a
+group with no other member, or the `admin` group, whose members can become root anyway. Access control
+lists count too: an entry that lets another user change one of these (or read a private one) is refused,
+while entries that only deny (such as macOS's default on your home folder) are fine. A file system another
+user mounted (FUSE on Linux, a disk image on macOS) or one that ignores ownership is refused. Network file
+systems (NFS, SMB) are judged by what they report locally; their server's own permissions are not visible.
+rweb also checks that the Rex socket it connects to is served by your own user.

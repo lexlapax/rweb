@@ -153,6 +153,10 @@ pub const Fake = struct {
     resume_window_ms: u32 = 60_000,
     /// Drop a resumed data connection right after its WELCOME, without a byte of the stream.
     drop_resumes: bool = false,
+    /// Control connections stop reading (after their WELCOME) while this is set, so what a
+    /// client writes piles up in the socket: for tests of write deadlines. A connection already
+    /// waiting for a message reads that one first. Change it under `mu` once serving.
+    stall_control_reads: bool = false,
     /// Data connections that resumed a stream (WELCOME sent), for tests.
     data_resumes: u32 = 0,
     /// Close statuses data clients sent, newest last, for tests (at most 64 kept).
@@ -208,6 +212,12 @@ pub const Fake = struct {
         const n = @min(out.len, f.data_close_codes.items.len);
         @memcpy(out[0..n], f.data_close_codes.items[0..n]);
         return out[0..n];
+    }
+
+    fn controlStalled(f: *Fake) bool {
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        return f.stall_control_reads and !f.stopping;
     }
 
     pub fn dataResumes(f: *Fake) u32 {
@@ -583,6 +593,7 @@ pub const Fake = struct {
         });
 
         while (true) {
+            while (f.controlStalled()) f.io.sleep(.fromMilliseconds(10), .awake) catch return;
             const m = try c.readMessage(gpa);
             defer gpa.free(m.data);
             switch (m.opcode) {

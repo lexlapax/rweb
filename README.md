@@ -107,8 +107,8 @@ browser and Rex can make it hold in memory. Design and reviews:
 zig build -Doptimize=ReleaseSafe     # zig-out/bin/rweb
 zig build test                        # unit tests; REX_SOCKET=<socket> adds live tests (they make and close their own sessions)
 zig build web-test                    # the page's logic (needs Node)
-zig build dist                        # release archives for macOS arm64 and Linux x86-64 in zig-out/dist
-tools/release.sh [COMMIT]             # the same, reproducibly, from a clean export of one commit
+zig build dist                        # archives of this working tree (uncommitted edits included) in zig-out/dist
+tools/release.sh [COMMIT]             # release archives: one commit's clean export, tested, built with the pinned Zig
 ```
 
 ## Documentation
@@ -121,6 +121,29 @@ tools/release.sh [COMMIT]             # the same, reproducibly, from a clean exp
 | [Licence](LICENSE) | MIT |
 | [Third-party notices](THIRD-PARTY-NOTICES.md) | Software rweb contains or serves, with licences |
 | [All documents](docs/README.md) | Plan, design research, security review and test records (in the source repository) |
+
+## About this project
+
+I built rweb for my own workflow. I work across several machines joined by Tailscale and moved my
+terminal work to Rex: my previous setup served me well, but Rex offers more to look forward to, Windows
+support among it. The one thing missing was an occasional look at my terminal sessions from a phone or a
+tablet.
+
+Rather than build something large, I settled on the smallest thing that does the job: a web proxy that
+is as plain as possible, one per machine, each reached over Tailscale. It reuses what the Rex ecosystem
+already provides and follows its practices: libghostty for the terminal on the machine and its
+WebAssembly build in the browser, Rex's own protocols, and Zig, the language Ghostty, libghostty and Rex
+use.
+
+It was made for my purposes, but I have kept it as general as I could so that others can use it too. If
+Superlogical, or anyone else, comes up with something better, I may pause or stop work on rweb at that
+point. It is released under the MIT licence, like libghostty.
+
+rweb is a one-person project, so please do not expect me to take pull requests. You are free to fork it
+and improve it. When I see changes elsewhere that would help, I will try to merge them, rework them or
+bring them in some other way.
+
+Thank you to Superlogical for Rex.
 
 ## Licence
 

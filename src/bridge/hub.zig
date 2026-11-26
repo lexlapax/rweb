@@ -369,15 +369,18 @@ pub const Terminal = struct {
     }
 };
 
-/// `text` without ESC (0x1b) and without the C1 controls (U+0080 to U+009F, encoded C2 80 to C2 9F,
-/// and a bare 0x9b byte). Caller frees.
+/// `text` without ESC and without the C1 controls (U+0080 to U+009F, which UTF-8 encodes as C2 80 to
+/// C2 9F). Every other character is kept whole: bytes 0x80 to 0x9F are also the continuation bytes of
+/// ordinary characters (’ € ß emoji), so only the two-byte C1 sequences are removed. The result is valid
+/// UTF-8 when `text` is (the browser's JSON always is); `error.InvalidUtf8` otherwise. Caller frees.
 fn cleanPaste(gpa: Allocator, text: []const u8) ![]u8 {
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
     var out = try std.ArrayList(u8).initCapacity(gpa, text.len);
     errdefer out.deinit(gpa);
     var i: usize = 0;
     while (i < text.len) {
         const c = text[i];
-        if (c == 0x1b or (c >= 0x80 and c <= 0x9f)) {
+        if (c == 0x1b) {
             i += 1;
             continue;
         }
@@ -460,7 +463,7 @@ pub const Hub = struct {
     /// The session tree as JSON, and its generation (goes up with every new tree).
     tree: ?*SharedText = null,
     tree_gen: u64 = 0,
-    /// The hub-wide budget for work done under a mirror's lock (opening, redraws, Copy), over all
+    /// The hub-wide budget for work done under a mirror's lock (redraws, Copy), over all
     /// viewers. Guarded by `rate_mu`.
     rate_mu: Io.Mutex = .init,
     work_window_start: i64 = 0,
@@ -617,9 +620,11 @@ pub const Hub = struct {
         };
     }
 
+    /// Work under a mirror's lock counted against the hub-wide budget. Opening is not: one viewer's
+    /// open is already limited by its own allowance, and a refused open costs the user their view.
     fn underMirrorLock(msg: protocol.Msg) bool {
         return switch (msg) {
-            .open, .redraw, .more_history, .text => true,
+            .redraw, .more_history, .text => true,
             else => false,
         };
     }
@@ -656,7 +661,10 @@ pub const Hub = struct {
         if (!h.allowRate(v, msg)) {
             // A refused open still leaves the terminal being viewed: the page has already switched
             // its view, and typing must not go to a terminal it no longer shows.
-            if (msg == .open) h.unsubscribe(v);
+            if (msg == .open) {
+                h.unsubscribe(v);
+                return h.refuseOpen(v, msg.open.session, msg.open.block, "too many requests", true, true);
+            }
             const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = @tagName(msg), .msg = "too many requests", .rate = true }, .{}) catch return;
             defer h.gpa.free(text);
             return v.pushText(text);
@@ -688,7 +696,10 @@ pub const Hub = struct {
                 h.api.termAction(term.session_id, term.block_id, @tagName(act)) catch |e| h.fail(v, "term_action", e);
             },
             .tree => h.sendTree(v),
-            .open => |o| h.openTerminal(v, o.session, o.block) catch |e| h.fail(v, "open", e),
+            // A refusal names the terminal it was for, so a page that has moved on can ignore it, and
+            // says whether it may pass (Rex not answering, a snapshot that did not come) or not (Rex
+            // refused: no such terminal).
+            .open => |o| h.openTerminal(v, o.session, o.block) catch |e| h.refuseOpen(v, o.session, o.block, @errorName(e), false, e != error.RexError),
             .close_view => h.unsubscribe(v),
             .redraw => {
                 v.mu.lockUncancelable(h.io);
@@ -819,6 +830,12 @@ pub const Hub = struct {
         v.push(.copy, out);
     }
 
+    fn refuseOpen(h: *Hub, v: *Viewer, session: []const u8, block: []const u8, msg: []const u8, rate: bool, transient: bool) void {
+        const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = "open", .session = session, .block = block, .msg = msg, .rate = rate, .transient = transient }, .{}) catch return;
+        defer h.gpa.free(text);
+        v.pushText(text);
+    }
+
     fn fail(h: *Hub, v: *Viewer, what: []const u8, e: anyerror) void {
         const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = what, .msg = @errorName(e) }, .{}) catch return;
         defer h.gpa.free(text);
@@ -846,11 +863,17 @@ pub const Hub = struct {
             .paste => |p| {
                 // ESC and C1 never go through: a pasted "end of paste" would type the rest. The page
                 // removes them too; this is the second line.
-                const clean = cleanPaste(h.gpa, p.text) catch return;
+                const clean = cleanPaste(h.gpa, p.text) catch |e| return h.fail(v, "paste", e);
                 defer h.gpa.free(clean);
                 // Without bracketed paste a program reads a pasted newline as Enter: several lines
                 // would run one by one. The page asks the user, then sends `force`.
-                if (!p.force and std.mem.indexOfAny(u8, clean, "\r\n") != null and !term.mirror.bracketedPaste()) {
+                // Read under `tmu`: a stream restart swaps (and frees) the mirror.
+                const bracketed = blk: {
+                    term.tmu.lockUncancelable(h.io);
+                    defer term.tmu.unlock(h.io);
+                    break :blk term.mirror.bracketedPaste();
+                };
+                if (!p.force and std.mem.indexOfAny(u8, clean, "\r\n") != null and !bracketed) {
                     const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = "paste", .code = "confirm_multiline", .msg = "this program does not take pastes as one block; each line would run on its own" }, .{}) catch return;
                     defer h.gpa.free(text);
                     return v.pushText(text);
@@ -1371,12 +1394,12 @@ pub const Hub = struct {
         switch (e) {
             .disconnected => h.broadcastRexState(false),
             .connected => |c| {
+                // Generations up to the one `open` used are already set up (its own first connection
+                // included): nothing to announce or re-read.
+                if (c.generation <= h.seen_generation) return;
+                h.seen_generation = c.generation;
                 h.broadcastRexState(true);
-                // Generations up to the one `open` used are already set up.
-                if (c.generation > h.seen_generation) {
-                    h.seen_generation = c.generation;
-                    if (!c.resumed) h.reattachAfterRestart();
-                }
+                if (!c.resumed) h.reattachAfterRestart();
                 h.markTreeDirty();
             },
             .dropped => h.markTreeDirty(),
@@ -1457,7 +1480,7 @@ pub const Hub = struct {
     /// it does.
     fn closeTerminalLocked(h: *Hub, t: *Terminal, reason: []const u8) bool {
         h.unregisterLocked(t);
-        const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "closed", .block = t.block_id, .reason = reason }, .{}) catch null;
+        const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "closed", .session = t.session_id, .block = t.block_id, .reason = reason }, .{}) catch null;
         defer if (text) |x| h.gpa.free(x);
         // Detach every viewer and empty the list in one step under `vmu`: a subscribe in progress
         // either finishes before (and is emptied out) or finds `term` cleared (and adds nothing).
@@ -1894,7 +1917,12 @@ test "hub: opening a terminal that does not exist is an error frame" {
     const v = try hs.hub.addViewer();
     defer hs.hub.removeViewer(v);
     hs.hub.handle(v, .{ .open = .{ .session = "session:nope", .block = "block:nope" } });
-    (try waitFrame(v, isError)).?.deinit(testing.allocator);
+    const e = (try waitFrame(v, isError)).?;
+    defer e.deinit(testing.allocator);
+    // It names the terminal, and Rex's refusal is not something to retry.
+    try testing.expect(std.mem.indexOf(u8, e.data, "\"session\":\"session:nope\"") != null);
+    try testing.expect(std.mem.indexOf(u8, e.data, "\"block\":\"block:nope\"") != null);
+    try testing.expect(std.mem.indexOf(u8, e.data, "\"transient\":false") != null);
 }
 
 fn isClosed(d: []const u8, bin: bool) bool {
@@ -2245,11 +2273,18 @@ test "hub: a multi-line paste needs confirming when the program has no bracketed
     (try waitFrame(v, hasText("three\nfour"))).?.deinit(testing.allocator);
 }
 
-test "hub: cleanPaste removes ESC and C1, in both encodings, and keeps everything else" {
+test "hub: cleanPaste removes ESC and C1 and keeps every other character whole" {
     const a = testing.allocator;
-    const out = try cleanPaste(a, "a\x1bb\xc2\x9bc\x9bd\xc2\xa0e\u{00e9}\t\n");
+    const out = try cleanPaste(a, "a\x1bb\xc2\x9bc\xc2\xa0e\u{00e9}\t\n");
     defer a.free(out);
-    try testing.expectEqualStrings("abcd\xc2\xa0e\u{00e9}\t\n", out);
+    try testing.expectEqualStrings("abc\xc2\xa0e\u{00e9}\t\n", out);
+    // Characters whose UTF-8 holds bytes 0x80 to 0x9f are ordinary text, not C1 controls.
+    const text = "it\u{2019}s \u{201c}fine\u{201d} \u{2014} 5\u{20ac} Stra\u{00df}e \u{0410}\u{0411} \u{1f600} \u{65e5}\u{672c}";
+    const kept = try cleanPaste(a, text);
+    defer a.free(kept);
+    try testing.expectEqualStrings(text, kept);
+    // A bare 0x9b is not UTF-8: refused, never sent half-cleaned.
+    try testing.expectError(error.InvalidUtf8, cleanPaste(a, "x\x9by"));
 }
 
 test "hub: a viewer that falls behind is redrawn at most once a second" {

@@ -24,6 +24,7 @@ const state = {
   latched: {ctrl: false, alt: false, shift: false},
   fontSize: K.clampFont(LS.get('fontSize', K.FONT_DEFAULT)),
   exited: null, tried: false,             // tried: the remembered terminal has been looked for
+  restore: null,                          // {attempt, timer}: `current` is being restored (see `openRetry`)
 };
 const link = {lastRx: performance.now(), healthy: false};
 
@@ -350,7 +351,7 @@ function connect() {
   ws.onopen = () => {
     if (!mine()) return;
     state.retry = 500; link.lastRx = performance.now();
-    if (state.current) send({t: 'open', session: state.current.session, block: state.current.block});
+    if (state.current) { startRestore(); send({t: 'open', session: state.current.session, block: state.current.block}); }
     renderStatus();
   };
   ws.onclose = () => {
@@ -383,7 +384,7 @@ setInterval(() => {
 function handleMessage(m) {
   switch (m.t) {
     case 'mode': setDebug(K.debugOn(dbgAsked, m)); state.canDownload = !!m.download; state.canUpload = !!m.upload; state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
-    case 'rex': state.rexUp = m.up; renderStatus(); break;
+    case 'rex': state.rexUp = m.up; renderStatus(); if (m.up) retryOpenNow(); break;
     case 'tree': {
       state.tree = m.sessions; renderAll(); maybeRestore();
       const pn = state.pendingNew;                               // a terminal was just added with +: switch to it
@@ -394,7 +395,7 @@ function handleMessage(m) {
       // Another terminal's (the bridge had not switched yet, or has left this one): not drawn here, and
       // nothing is typed until this terminal's own `opened` arrives.
       if (!sameTerm(m, state.current)) { state.opened = false; break; }
-      state.opened = true;
+      state.opened = true; stopRestore();
       state.info = null; renderInfo(); pollInfo();
       state.cols = m.cols; state.rows = m.rows; state.historyRows = m.history_rows;
       state.exited = (m.exited !== undefined && m.exited !== null) ? m.exited : null;
@@ -406,7 +407,8 @@ function handleMessage(m) {
     case 'theme': if (ready()) applyTheme(m); break;
     case 'info': if (ready()) { state.info = m; renderInfo(); } break;
     case 'exited': if (ready()) { state.exited = m.code; renderStatus(); } break;
-    case 'closed': showEmpty('That terminal was closed.'); break;
+    // A late `closed` for a terminal the page has left since is not about the one it shows (H3).
+    case 'closed': if (K.aboutTerm(m, state.current)) showEmpty('That terminal was closed.'); break;
     case 'notice': notice(m.msg); break;
     case 'error': onError(m); break;
     case 'text': openCopy(m.text, m.truncated); break;
@@ -427,9 +429,11 @@ function handleMessage(m) {
 // let go here, so nothing waits for an answer that will not come.
 function onError(m) {
   const f = m.for, msg = String(m.msg || 'refused');
-  // The bridge left the terminal it was on, so the page shows none. An old bridge's unnamed rate
-  // refusal while a terminal is opening is taken as that open's: it is the only message sent then.
-  if (f === 'open' || (f === 'rate' && state.current && !state.opened)) { openRefused(msg); return; }
+  // A refused open names the terminal it asked for; one for a terminal the page has left since is
+  // ignored (H3). An old bridge's unnamed rate refusal while a terminal is opening is taken as that
+  // open's: it is the only message sent then.
+  if (f === 'open') { openRefused(m, msg); return; }
+  if (f === 'rate' && state.current && !state.opened) { openRefused({for: 'open', rate: true}, msg); return; }
   if (f === 'paste' && m.code === 'confirm_multiline') { askMultiline(msg); return; }
   // The bridge closes the connection after this one; the page reconnects as usual.
   if (f === 'message') { notice(`Not sent: the message was ${msg}`); return; }
@@ -448,18 +452,43 @@ function onError(m) {
   }
   notice(`${f}: ${msg}`);
 }
-function openRefused(msg) {
+// The bridge left the terminal it was on, so the page shows none, unless the refusal is for another
+// terminal (ignored) or one that may pass while the terminal is restored after a (re)connect (retried,
+// keeping the terminal and the one this device remembers: H4).
+function openRefused(m, msg) {
+  const what = K.openRefusal(m, state.current, !!state.restore);
+  if (what === 'ignore') return;
+  if (what === 'retry') { openRetry(m); return; }
   forgetLast(state.current);
   clearView('Pick a terminal from the list.');
   notice(`Cannot open that terminal: ${msg}`);
 }
-function sameTerm(a, b) { return !!a && !!b && String(a.session) === String(b.session) && String(a.block) === String(b.block); }
+// Restoring `current` after a (re)connect: a transient or rate refusal of its open is retried with
+// backoff (keys.js `openRetryDelay`) while the socket is up. It stops on success (`opened`), on a
+// refusal that will not pass, when the person picks a terminal, or when the view is cleared.
+function startRestore() { stopRestore(); state.restore = {attempt: 0, timer: 0}; }
+function stopRestore() { if (state.restore) clearTimeout(state.restore.timer); state.restore = null; }
+function openRetry(m) {
+  const r = state.restore; clearTimeout(r.timer);
+  const text = m.transient !== true && m.rate === true ? 'Too many requests; retrying…' : 'Rex is not answering; retrying…';
+  notice(text);
+  if ($('stage').hidden) $('empty').textContent = text;
+  r.timer = setTimeout(() => { r.timer = 0; retryOpen(r); }, K.openRetryDelay(r.attempt++));
+}
+function retryOpen(r) {
+  if (state.restore !== r || !state.current || state.opened) return;
+  if (!state.ws || state.ws.readyState !== 1) return;     // the next connection opens it again
+  send({t: 'open', session: state.current.session, block: state.current.block});
+}
+// Rex is back: a waiting retry goes now.
+function retryOpenNow() { const r = state.restore; if (r && r.timer) { clearTimeout(r.timer); r.timer = 0; retryOpen(r); } }
+function sameTerm(a, b) { return K.sameTerm(a, b); }
 // The terminal this device reopens on load is forgotten when it is `t`.
 function forgetLast(t) { if (t && sameTerm(LS.get('last', null), t)) LS.set('last', null); }
 
 function showEmpty(text) { forgetLast(state.current); clearView(text); }
 function clearView(text) {
-  state.info = null; renderInfo(); forgetPaste();
+  state.info = null; renderInfo(); forgetPaste(); stopRestore();
   state.current = null; state.opened = false; state.exited = null;
   $('stage').hidden = true; $('keys').hidden = true; $('empty').hidden = false; $('empty').textContent = text;
   renderAll(); updateControls(); renderStatus();
@@ -579,8 +608,10 @@ function updateControls() {
   const hi = $('pop-hist'); if (hi) hi.disabled = !ready() || state.historyRows === 0;
 }
 
-function openBlock(session, block) {
+// `restoring`: reopening the terminal this device had open (see `openRetry`), not the person's choice.
+function openBlock(session, block, restoring) {
   lastFit = '';
+  if (restoring) startRestore(); else stopRestore();
   state.current = {session, block}; state.opened = false; state.exited = null; LS.set('last', state.current);
   forgetPaste();
   term.reset(); clearLatched(); softReset();
@@ -595,7 +626,7 @@ function maybeRestore() {
   const last = LS.get('last', null);
   if (!last || state.current) return;
   const exists = state.tree.some(s => s.id === last.session && s.blocks.some(b => b.id === last.block));
-  if (exists) openBlock(last.session, last.block);
+  if (exists) openBlock(last.session, last.block, true);
 }
 
 // ---- list drawer ----
@@ -644,7 +675,7 @@ $('more').onclick = () => openPop($('more'), pop => {
   clip.append(el('small', 'hint', 'What vim, tmux or similar last copied'));
   item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !ready() || state.observe;
   if (state.canDownload) item(pop, 'Download a file…', () => { closePop(); openFiles(); }, 'pop-dl').disabled = !ready() || state.observe;
-  if (state.canUpload) item(pop, 'Upload files…', () => { closePop(); $('upfile').click(); }, 'pop-ul').disabled = !ready() || state.observe;
+  if (state.canUpload) item(pop, 'Upload files…', () => { closePop(); xf.pick = state.current ? {session: state.current.session, block: state.current.block} : null; $('upfile').click(); }, 'pop-ul').disabled = !ready() || state.observe;
   item(pop, 'Clear screen', () => { closePop(); send({t: 'term_action', action: 'clear'}); }).disabled = !ready() || state.observe;
   item(pop, 'Reset terminal…', async () => { closePop(); if (await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'}) && ready()) send({t: 'term_action', action: 'reset'}); }).disabled = !ready() || state.observe;
   const sz = el('div', 'sizer'); sz.append(el('span', '', 'Text size'));
@@ -898,7 +929,9 @@ if (startupNote) notice(startupNote);
 // Only offered when the bridge was started with it on. A download is asked for over the socket; the
 // answer is a one-time address the page opens as an ordinary download. An upload sends the file in
 // one request to a one-time address; the bridge saves it in its upload folder and pastes the path.
-const xf = {dir: '', home: '', entries: [], hidden: LS.get('showHidden', false), queue: [], current: null};
+// Each queued upload is {file, term}: `term` is the terminal shown when the files were chosen (`pick`,
+// set when Upload is chosen from the menu), and the file goes to that terminal or nowhere (H6).
+const xf = {dir: '', home: '', entries: [], hidden: LS.get('showHidden', false), queue: [], current: null, pick: null};
 
 function fmtSize(n) {
   if (!Number.isFinite(n)) return '';
@@ -965,19 +998,30 @@ function onXfer(m) {
     notice(`Downloading ${m.name} (${fmtSize(m.size)})`);
     if ($('xferdlg').open) { $('xferdlg').close(); }
   } else if (m.kind === 'upload' && xf.current) {
-    putFile(xf.current, m.token);
+    // The token is good only for the terminal it was asked for; the page has switched since.
+    if (!sameTerm(xf.current.term, state.current)) { xf.current = null; return pumpUploads(true); }
+    putFile(xf.current.file, m.token);
   }
 }
 
 $('upfile').onchange = e => {
-  for (const f of e.target.files) xf.queue.push(f);
+  const term = xf.pick || (state.current && {session: state.current.session, block: state.current.block});
+  xf.pick = null;
+  if (term) for (const file of e.target.files) xf.queue.push({file, term});
   e.target.value = '';
   pumpUploads();
 };
-function pumpUploads() {
-  if (xf.current || !xf.queue.length || !canType()) return;
+// `stopped`: an upload was already dropped for another terminal (say so even if none is queued).
+function pumpUploads(stopped) {
+  if (xf.current) return;
+  if (xf.queue.length && canType()) {
+    const p = K.partitionUploads(xf.queue, state.current);
+    if (p.drop.length) { xf.queue = p.keep; stopped = true; }
+  }
+  if (stopped) notice('Upload stopped: you switched terminals');
+  if (!xf.queue.length || !canType()) return;
   xf.current = xf.queue.shift();
-  send({t: 'ul', name: xf.current.name, size: xf.current.size});
+  send({t: 'ul', name: xf.current.file.name, size: xf.current.file.size});
 }
 // The bridge refused the upload waiting for its token. Refused for the rate, the file goes back to the
 // front of the queue and is asked for again a second later (three times at most); otherwise it is
@@ -988,7 +1032,7 @@ function ulRefused(msg, rate) {
   const tries = (ulRefused.tries.get(f) || 0) + 1;
   if (rate && tries <= 3) { ulRefused.tries.set(f, tries); xf.queue.unshift(f); setTimeout(pumpUploads, 1100); return; }
   ulRefused.tries.delete(f);
-  notice(`Cannot upload ${f.name}: ${msg}`);
+  notice(`Cannot upload ${f.file.name}: ${msg}`);
   pumpUploads();
 }
 ulRefused.tries = new WeakMap();

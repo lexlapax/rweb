@@ -238,6 +238,7 @@ pub const Control = struct {
         cn.owns_stream = true;
         if (w.max_message) |mm| c.max_message = mm;
         cn.max_message = c.max_message;
+        cn.write_timeout_ms = ws.write_timeout_ms; // pongs; a call's request has its own deadline
         if (c.token) |t| gpa.free(t);
         c.token = w.token;
         c.conn = cn;
@@ -462,11 +463,14 @@ pub const Control = struct {
         });
         defer gpa.free(req);
         if (req.len > max_message) return error.MessageTooLarge;
-        const wrote = cn.writeFrame(.text, req);
+        // The request must be written within the call's own timeout: a Rex that stops reading
+        // gets its connection shut (by the write's deadline) rather than holding this task.
+        const wrote = cn.writeFrameTimeout(.text, req, timeout_ms);
         // A failed write may have left part of a frame on the socket, and every frame after it
         // would be read as garbage: shut it, so the reader drops the connection and reconnects.
-        // (`writers` keeps the connection alive until `releaseWriter`.)
-        if (wrote) |_| {} else |_| cn.stream.shutdown(c.io, .both) catch {};
+        // (`writers` keeps the connection alive until `releaseWriter`.) Only a write that could
+        // not start its deadline wrote nothing.
+        if (wrote) |_| {} else |e| if (e != error.ConcurrencyUnavailable) cn.stream.shutdown(c.io, .both) catch {};
         c.releaseWriter();
         writing = false;
         wrote catch return error.ConnectionLost;
@@ -1029,6 +1033,45 @@ test "control: a write that fails part-way drops the connection, and it reconnec
         try c.conn.?.stream.shutdown(testing.io, .send);
     }
     try testing.expectError(error.ConnectionLost, c.call("session.list", null));
+    var reconnected = false;
+    var tries: u32 = 0;
+    while (!reconnected and tries < 50) : (tries += 1) {
+        const e = (try c.nextEvent(100)) orelse continue;
+        defer e.deinit(a);
+        if (e == .connected and e.connected.generation == 2) reconnected = true;
+    }
+    try testing.expect(reconnected);
+    var r = try c.call("session.list", null);
+    r.deinit();
+}
+
+test "control: a Rex that stops reading cannot hold a call's write past the call's timeout" {
+    const a = testing.allocator;
+    const f = try fake.Fake.start(a, testing.io);
+    defer f.deinit();
+    // The fake reads the hello and answers it, then reads nothing more.
+    f.stall_control_reads = true;
+    const c = try Control.open(a, testing.io, .{ .socket_path = f.path, .call_timeout_ms = 300 });
+    defer c.close();
+    var first = (try c.nextEvent(1000)).?;
+    first.deinit(a);
+    try testing.expectEqual(@as(?u32, ws.write_timeout_ms), c.conn.?.write_timeout_ms); // pongs
+    // A request far larger than the socket buffers (but within the message limit): its write
+    // blocks once they are full, and the call's own timeout shuts the connection.
+    const filler = try a.alloc(u8, 900 * 1024);
+    defer a.free(filler);
+    @memset(filler, 'x');
+    const body = try std.fmt.allocPrint(a, "{{\"label\":\"{s}\"}}", .{filler});
+    defer a.free(body);
+    const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
+    try testing.expectError(error.ConnectionLost, c.call("session.create", body));
+    try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 5000);
+    {
+        f.mu.lockUncancelable(testing.io);
+        defer f.mu.unlock(testing.io);
+        f.stall_control_reads = false;
+    }
+    // The reader saw the shut socket and reconnected; calls work again.
     var reconnected = false;
     var tries: u32 = 0;
     while (!reconnected and tries < 50) : (tries += 1) {

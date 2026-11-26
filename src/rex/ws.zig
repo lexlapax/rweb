@@ -123,6 +123,10 @@ pub const Client = Conn;
 /// How long a handshake (the HTTP upgrade and the protocol's first messages) may take.
 pub const handshake_timeout_ms: u32 = 10_000;
 
+/// How long a frame written to Rex may take when its call has no timeout of its own (pongs, a
+/// data stream's frames): see `Conn.write_timeout_ms`.
+pub const write_timeout_ms: u32 = 10_000;
+
 /// Largest message read during a handshake (the control WELCOME, a data WELCOME or REJECT):
 /// every connection has a limit from its first read, raised once the handshake is done.
 pub const handshake_max_message: u64 = 64 * 1024;
@@ -229,10 +233,33 @@ pub const ControlRate = struct {
     times: [max_control_per_second]i64 = undefined,
     next: usize = 0,
     seen: usize = 0,
+    /// For a limit above `max_control_per_second` (tests and the fuzzer only): frames counted in
+    /// whole seconds from `bucket_start_ms`.
+    bucket_start_ms: i64 = std.math.minInt(i64),
+    bucket_count: u64 = 0,
 
     /// Count a control frame at `now_ms`; false if it is one too many for the last second.
     pub fn allow(r: *ControlRate, now_ms: i64) bool {
-        if (r.seen >= max_control_per_second and now_ms - r.times[r.next] < 1000) return false;
+        return r.allowUpTo(now_ms, max_control_per_second);
+    }
+
+    /// As `allow`, with at most `limit` frames a second. Up to `max_control_per_second` the window
+    /// slides; above it (only tests and the fuzzer raise it) it is counted in whole seconds.
+    pub fn allowUpTo(r: *ControlRate, now_ms: i64, limit: u32) bool {
+        if (limit > max_control_per_second) {
+            if (now_ms -| r.bucket_start_ms >= 1000) {
+                r.bucket_start_ms = now_ms;
+                r.bucket_count = 0;
+            }
+            if (r.bucket_count >= limit) return false;
+            r.bucket_count += 1;
+            return true;
+        }
+        // The frame `limit` back from the newest, when there have been that many.
+        if (r.seen >= limit) {
+            const oldest = r.times[(r.next + max_control_per_second - limit) % max_control_per_second];
+            if (limit == 0 or now_ms - oldest < 1000) return false;
+        }
         r.times[r.next] = now_ms;
         r.next = (r.next + 1) % max_control_per_second;
         if (r.seen < max_control_per_second) r.seen += 1;
@@ -258,9 +285,16 @@ pub const Conn = struct {
     subprotocol: []const u8 = "",
     /// Largest message accepted, after reassembly.
     max_message: u64 = 64 * 1024 * 1024,
-    /// Ping and pong frames in the last second: past `max_control_per_second` the connection is a
-    /// protocol error.
+    /// Ping and pong frames in the last second: past `control_limit` the connection is a protocol
+    /// error.
     control_rate: ControlRate = .{},
+    /// Most ping and pong frames a second. Only tests and the fuzzer change it (the fuzzer raises
+    /// it so an input can be a long run of control frames).
+    control_limit: u32 = max_control_per_second,
+    /// Longest a frame written with `writeFrame` may take; past it the stream is shut (see
+    /// `writeFrameTimeout`). Null: no deadline (a browser connection, whose writes the bridge
+    /// bounds itself). Connections to Rex set it once their handshake is done.
+    write_timeout_ms: ?u32 = null,
     /// Ping and pong frames read so far, for a caller that counts them against its own limits
     /// (`readMessage` answers and drops them).
     control_frames: u64 = 0,
@@ -424,17 +458,33 @@ pub const Conn = struct {
         gpa.destroy(c);
     }
 
-    /// Send one frame (masked by a client). Safe to call from several tasks. A frame is written
-    /// whole or not at all as far as cancellation goes: the task cannot be cancelled inside it
-    /// (a half-written frame would corrupt every frame after it). An error from the stream can
-    /// still leave part of a frame written: the connection is then unusable, and the caller
-    /// must drop it.
+    /// Send one frame (masked by a client), within `write_timeout_ms` if set. Safe to call from
+    /// several tasks. A frame is written whole or not at all as far as cancellation goes: the
+    /// task cannot be cancelled inside it (a half-written frame would corrupt every frame after
+    /// it). An error from the stream can still leave part of a frame written: the connection is
+    /// then unusable, and the caller must drop it.
     pub fn writeFrame(c: *Conn, op: Opcode, data: []const u8) !void {
+        return c.writeFrameTimeout(op, data, c.write_timeout_ms);
+    }
+
+    /// As `writeFrame`, with its own deadline: if the frame is not written within `timeout_ms`
+    /// (null: no deadline) of taking the write lock, the stream is shut, which fails this write
+    /// (`error.WriteTimeout`) and every read and write after it, so the connection's owner drops
+    /// it and reconnects. A peer that stops reading cannot hold a writer, or the tasks queued
+    /// behind it, for longer. `error.ConcurrencyUnavailable` (no task for the deadline) means
+    /// nothing was written and the connection is unchanged.
+    pub fn writeFrameTimeout(c: *Conn, op: Opcode, data: []const u8, timeout_ms: ?u32) !void {
         const old_protection = c.io.swapCancelProtection(.blocked);
         defer _ = c.io.swapCancelProtection(old_protection);
         c.write_mutex.lockUncancelable(c.io);
         defer c.write_mutex.unlock(c.io);
+        var dog: ?Watchdog = if (timeout_ms) |t| try Watchdog.start(c.io, c.stream, t) else null;
+        const wrote = c.writeFrameLocked(op, data);
+        if (dog) |*d| if (d.stopFired(c.io)) return error.WriteTimeout;
+        return wrote;
+    }
 
+    fn writeFrameLocked(c: *Conn, op: Opcode, data: []const u8) !void {
         const w = c.w;
         var mask: [4]u8 = .{ 0, 0, 0, 0 };
         if (c.is_client) c.io.random(&mask);
@@ -460,7 +510,7 @@ pub const Conn = struct {
 
     fn countControl(c: *Conn) error{Protocol}!void {
         c.control_frames +|= 1;
-        if (!c.control_rate.allow(Io.Clock.awake.now(c.io).toMilliseconds())) return error.Protocol;
+        if (!c.control_rate.allowUpTo(Io.Clock.awake.now(c.io).toMilliseconds(), c.control_limit)) return error.Protocol;
     }
 
     /// Read one complete message, answering pings. Close frames are returned.
@@ -815,6 +865,102 @@ test "writeFrame: a task cancelled inside a frame still writes it whole" {
     defer gpa.free(m.data);
     try std.testing.expectEqual(Opcode.binary, m.opcode);
     try std.testing.expectEqualSlices(u8, payload, m.data);
+}
+
+/// A connected client and server `Conn` over a fresh unix socket pair, for tests.
+const TestPair = struct {
+    l: TestListener = .{},
+    client: Conn = undefined,
+    server: Conn = undefined,
+
+    fn init(p: *TestPair, io: Io) !void {
+        try p.l.init(io);
+        const cs = try connectUnix(io, p.l.path);
+        const ss = try p.l.server.accept(io);
+        p.client = .{ .io = io, .stream = cs, .reader = undefined, .writer = undefined, .owns_stream = false };
+        p.client.reader = cs.reader(io, &p.client.read_buf);
+        p.client.writer = cs.writer(io, &p.client.write_buf);
+        p.client.r = &p.client.reader.interface;
+        p.client.w = &p.client.writer.interface;
+        p.server = .{ .io = io, .stream = ss, .reader = undefined, .writer = undefined, .is_client = false, .owns_stream = false, .max_message = 8 << 20 };
+        p.server.reader = ss.reader(io, &p.server.read_buf);
+        p.server.writer = ss.writer(io, &p.server.write_buf);
+        p.server.r = &p.server.reader.interface;
+        p.server.w = &p.server.writer.interface;
+    }
+
+    fn deinit(p: *TestPair, io: Io) void {
+        p.client.stream.close(io);
+        p.server.stream.close(io);
+        p.l.deinit(io);
+    }
+};
+
+test "writeFrame: a peer that stops reading cannot hold a write past its deadline" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var p: TestPair = .{};
+    try p.init(io);
+    defer p.deinit(io);
+
+    // Within its deadline, a frame goes through as before.
+    p.client.write_timeout_ms = 10_000;
+    try p.client.writeFrame(.text, "on time");
+    const m = try p.server.readMessage(gpa);
+    defer gpa.free(m.data);
+    try std.testing.expectEqualStrings("on time", m.data);
+
+    // The server stops reading; a frame far larger than the socket buffers blocks, and its
+    // deadline shuts the stream instead of leaving the writer (and the write lock) held.
+    const payload = try gpa.alloc(u8, 8 << 20);
+    defer gpa.free(payload);
+    @memset(payload, 'x');
+    p.client.write_timeout_ms = 200;
+    const t0 = Io.Clock.awake.now(io).toMilliseconds();
+    try std.testing.expectError(error.WriteTimeout, p.client.writeFrame(.binary, payload));
+    try std.testing.expect(Io.Clock.awake.now(io).toMilliseconds() - t0 < 5000);
+    // The connection is shut: the next write fails at once, whatever its own deadline.
+    try std.testing.expect(std.meta.isError(p.client.writeFrameTimeout(.text, "late", 60_000)));
+    // And the peer sees the end of the stream after the part of the frame that got through.
+    try std.testing.expect(std.meta.isError(p.server.readMessage(gpa)));
+}
+
+test "control frames: the limit can be raised (for the fuzzer), and a lowered one holds" {
+    const gpa = std.testing.allocator;
+    var sink: std.Io.Writer.Allocating = .init(gpa);
+    defer sink.deinit();
+    var r: std.Io.Reader = undefined;
+    var pings: std.ArrayList(u8) = .empty;
+    defer pings.deinit(gpa);
+    for (0..1000) |_| {
+        const f = try maskedFrame(gpa, 0x9, true, "");
+        defer gpa.free(f);
+        try pings.appendSlice(gpa, f);
+    }
+    const t = try maskedFrame(gpa, 0x1, true, "after");
+    defer gpa.free(t);
+    try pings.appendSlice(gpa, t);
+    // Raised: a thousand pings in a row, then the message.
+    var c = memConn(pings.items, &sink.writer, &r, false);
+    c.control_limit = std.math.maxInt(u32);
+    const m = try c.readMessage(gpa);
+    defer gpa.free(m.data);
+    try std.testing.expectEqualStrings("after", m.data);
+    try std.testing.expectEqual(@as(u64, 1000), c.control_frames);
+    // Raised to a number: that many and no more in a second.
+    var c2 = memConn(pings.items, &sink.writer, &r, false);
+    c2.control_limit = 500;
+    try std.testing.expectError(error.Protocol, c2.readMessage(gpa));
+    try std.testing.expectEqual(@as(u64, 501), c2.control_frames);
+    // Lowered below the default: the sliding window uses it.
+    var c3 = memConn(pings.items, &sink.writer, &r, false);
+    c3.control_limit = 3;
+    try std.testing.expectError(error.Protocol, c3.readMessage(gpa));
+    try std.testing.expectEqual(@as(u64, 4), c3.control_frames);
+    var rate: ControlRate = .{};
+    for (0..3) |_| try std.testing.expect(rate.allowUpTo(100, 3));
+    try std.testing.expect(!rate.allowUpTo(1099, 3));
+    try std.testing.expect(rate.allowUpTo(1100, 3));
 }
 
 test "live: control hello against a real Rex (needs REX_SOCKET)" {

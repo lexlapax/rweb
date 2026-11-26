@@ -7,6 +7,7 @@
 - [Changelog](../CHANGELOG.md): what changed in each version.
 - [Licence](../LICENSE): MIT.
 - [Third-party notices](../THIRD-PARTY-NOTICES.md): the software rweb contains or serves, with licences.
+- [Contributing](../CONTRIBUTING.md): a one-person project; forks are welcome, pull requests are not taken.
 
 ## How it works
 

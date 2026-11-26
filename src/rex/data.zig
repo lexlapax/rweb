@@ -69,12 +69,20 @@ pub const Data = struct {
     reader: ?Io.Future(void) = null,
     /// The last close status seen, for tests and logs.
     last_close: u16 = 0,
-    /// Resumes since `received` last moved: the count `received` had when the streak began, when
-    /// it began, and how long to wait before the next try. A stream that keeps dropping without
-    /// delivering a byte runs out of its resume window instead of resuming forever.
+    /// Resumes since the stream last showed it works: the count `received` had when the streak
+    /// began, when it began, and how long to wait before the next try. A stream that keeps
+    /// dropping without delivering a byte runs out of its resume window instead of resuming
+    /// forever. A connection that delivered a byte, or stayed up for `resume_stable_ms`, ends the
+    /// streak, so an idle terminal dropped now and then resumes every time.
     streak_received: u64 = std.math.maxInt(u64),
     streak_start_ms: i64 = 0,
     resume_backoff_ms: u64 = 0,
+    /// When the current connection's handshake finished.
+    conn_up_ms: i64 = 0,
+    /// How long a connection must stay up to end a resume streak (tests shorten it).
+    resume_stable_ms: u32 = default_resume_stable_ms,
+
+    pub const default_resume_stable_ms: u32 = 5_000;
 
     pub const OpenError = error{ Rejected, BadHandshake } || Allocator.Error;
 
@@ -142,11 +150,12 @@ pub const Data = struct {
         if (d.conn) |c| {
             // A 1000 close ends the stream on Rex's side (otherwise it stays resumable until its
             // window passes). The frame goes first, while the socket still works; a watchdog
-            // cuts the socket if Rex does not take it in time. Holding `conn_mu` keeps the
-            // reader from replacing the connection meanwhile.
+            // cuts the socket if Rex does not take it in time, counting from now (so a pong
+            // still being written by the reader does not lengthen it). Holding `conn_mu` keeps
+            // the reader from replacing the connection meanwhile.
             if (ws.Watchdog.start(d.io, c.stream, close_write_ms)) |dog_| {
                 var dog = dog_;
-                c.writeFrame(.close, &.{ 0x03, 0xe8 }) catch {};
+                c.writeFrameTimeout(.close, &.{ 0x03, 0xe8 }, null) catch {};
                 dog.stop(d.io);
             } else |_| {}
             // Then shut it: cancelling a task blocked in a read is not reliable, but a read on a
@@ -199,7 +208,9 @@ pub const Data = struct {
         if (d.closing.load(.acquire)) return error.Canceled; // closed while connecting
         c.owns_stream = true;
         c.max_message = wire.data_max_message;
+        c.write_timeout_ms = ws.write_timeout_ms; // pongs
         d.conn = c;
+        d.conn_up_ms = Io.Clock.awake.now(d.io).toMilliseconds();
     }
 
     fn setConnecting(d: *Data, stream: ?Io.net.Stream) error{Canceled}!void {
@@ -270,9 +281,9 @@ pub const Data = struct {
     }
 
     /// Resume with the latest token and the exact count, retrying until the window passes. The
-    /// window counts from the first resume since `received` last moved, so a server that takes
-    /// every resume and drops it again without sending a byte cannot keep the stream resuming
-    /// forever; and resumes that bring nothing back off as failed tries do.
+    /// window counts from the first resume of the streak (see `streak_received`), so a server that
+    /// takes every resume and drops it again at once without sending a byte cannot keep the
+    /// stream resuming forever; and resumes that bring nothing back off as failed tries do.
     fn tryResume(d: *Data) bool {
         d.conn_mu.lockUncancelable(d.io);
         const old = d.conn;
@@ -280,7 +291,8 @@ pub const Data = struct {
         d.conn_mu.unlock(d.io);
         if (old) |c| c.deinit(d.gpa);
         const window: i64 = if (d.resume_window_ms == 0) 60_000 else d.resume_window_ms;
-        if (d.received != d.streak_received) {
+        const up_ms = Io.Clock.awake.now(d.io).toMilliseconds() - d.conn_up_ms;
+        if (d.received != d.streak_received or up_ms >= d.resume_stable_ms) {
             d.streak_received = d.received;
             d.streak_start_ms = Io.Clock.awake.now(d.io).toMilliseconds();
             d.resume_backoff_ms = 0;
@@ -661,6 +673,32 @@ test "data: a server that takes every resume and drops it again runs out of the 
     // Each resume that brought nothing back waited longer than the one before.
     const resumes = s.f.dataResumes();
     try testing.expect(resumes >= 1 and resumes <= 8);
+}
+
+test "data: an idle stream dropped twice, further apart than the resume window, resumes both times" {
+    const a = testing.allocator;
+    const s = try Setup.init();
+    defer s.deinit();
+    s.f.resume_window_ms = 400;
+    var cap: Capture = .{ .gpa = a, .io = testing.io };
+    defer cap.deinit();
+    const d = try Data.openTerminal(a, testing.io, s.ctl, s.session_id, s.block_id, cap.sink());
+    defer d.close();
+    try cap.waitFor("\"type\":\"resize\"");
+    try testing.expectEqual(@as(u32, 400), d.resume_window_ms);
+    d.resume_stable_ms = 100; // instead of 5 s, so the test is short; read only when a connection drops
+    for (1..3) |n| {
+        s.f.dropDataConnections();
+        var tries: u32 = 0;
+        while (s.f.dataResumes() < n and tries < 400) : (tries += 1) try testing.io.sleep(.fromMilliseconds(5), .awake);
+        try testing.expectEqual(@as(u32, @intCast(n)), s.f.dataResumes());
+        // No output meanwhile: only the time the resumed connection stayed up ends the streak.
+        try testing.io.sleep(.fromMilliseconds(600), .awake);
+        try testing.expectEqual(@as(?End, null), cap.ended());
+    }
+    try s.f.feed(s.block_id, "still here");
+    try cap.waitFor("still here");
+    try testing.expectEqual(@as(?End, null), cap.ended());
 }
 
 test "data: close sends a 1000 close frame that reaches the server" {

@@ -45,8 +45,9 @@ pub const usage =
     \\Behaviour:
     \\  --rex-socket PATH         Rex's unix socket (default: the Mac app's, else XDG_RUNTIME_DIR's)
     \\  --tailscale PATH          the tailscale program to ask for this node's login, name and
-    \\                            addresses (absolute; default: a fixed list of install locations,
-    \\                            never PATH). It and its folders must be root's or yours
+    \\                            addresses (absolute; default: the first of a fixed list of
+    \\                            install locations that exists, never PATH). It and its folders
+    \\                            must be root's or yours, and no ACL may let another user change them
     \\  --observe-only            never write, resize or change anything in Rex
     \\  --history-lines N         scrollback rows sent when a terminal opens (default 1000)
     \\  --debug-input             log what browsers send (typed text included): for testing a keyboard, never for deployment

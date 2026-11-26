@@ -7,7 +7,9 @@
 # The compiler is the pinned official Zig, `zig-<minimum_zig_version>` from PATH, when it is installed
 # (package managers' builds of the same version compile differently); otherwise `zig`, with a warning.
 # Usage: tools/release.sh [COMMIT]   (default: HEAD; run inside the repository)
-# Result: the archives and SHA256SUMS in zig-out/release/<version>/ of the current checkout. A version
+# It runs the tests on the exported commit first and packs nothing if they fail. It is the only way to
+# make release archives: `zig build dist` alone packs the working tree, uncommitted edits included.
+# Result: the archives, SHA256SUMS and BUILDINFO in zig-out/release/<version>/ of the current checkout. A version
 # that has a folder there already is not built again; remove the folder on purpose to rebuild it.
 #
 # The fixed path is in a shared /tmp, so the base folder must be ours alone before anything is put in
@@ -44,15 +46,29 @@ git -C "$top" archive "$commit" | tar -x -C "$build"
 want=$(sed -n 's/^ *\.minimum_zig_version = "\(.*\)",$/\1/p' "$build/build.zig.zon")
 if command -v "zig-$want" >/dev/null 2>&1; then
   zig=zig-$want
-else
+elif [ "${RWEB_RELEASE_ANY_ZIG:-}" = 1 ]; then
   zig=zig
-  echo "warning: zig-$want (official Zig $want) is not on PATH; building with $(command -v zig) $(zig version)" >&2
+  echo "warning: zig-$want (official Zig $want) is not on PATH; building with $(command -v zig) $(zig version), as RWEB_RELEASE_ANY_ZIG=1 allows" >&2
+else
+  die "zig-$want (official Zig $want) is not on PATH. Release archives are built with it (other builds of the
+same version compile differently). Install it, or set RWEB_RELEASE_ANY_ZIG=1 to build with $(command -v zig || echo zig) anyway."
 fi
 echo "building with $zig $("$zig" version) ($(command -v "$zig"))"
+# The tests run on exactly what is packed (the exported commit), never against a real Rex: the live
+# tests need REX_SOCKET, which is removed here.
+(cd "$build" && env -u REX_SOCKET ZIG_GLOBAL_CACHE_DIR="$base/zig-cache" "$zig" build test) || die "the tests failed on $commit; nothing was packed"
 (cd "$build" && ZIG_GLOBAL_CACHE_DIR="$base/zig-cache" "$zig" build dist -Dcommit="$commit")
 mkdir -p "$top/zig-out/release"
 mkdir "$out" || die "$out appeared during the build; nothing was copied into it"
 cp "$build"/zig-out/dist/rweb-*.tar.gz "$build/zig-out/dist/SHA256SUMS" "$out/"
+# What built it, for anyone comparing archives later.
+{
+  echo "version $version"
+  echo "commit $commit"
+  echo "zig $("$zig" version) ($(command -v "$zig"))"
+  echo "host $(uname -s) $(uname -m)"
+  echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$out/BUILDINFO"
 rm -rf "$build"
 echo "rweb $version from $commit, built with $zig $("$zig" version):"
 cat "$out/SHA256SUMS"

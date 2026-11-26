@@ -8,6 +8,33 @@
 //! One mutex guards everything. The data reader task feeds it; viewers call `redraw` and the
 //! getters. Observer callbacks run under the mutex on the feeding task, so they must be
 //! quick and must not call back into the mirror.
+//!
+//! A renderer, not a full terminal: it keeps what a viewer is shown and turns off what rweb
+//! never shows, so a program's output cannot make it hold more than this per terminal
+//! (pinned Ghostty, checked against its source):
+//!
+//! - Snapshot: at most `max_snapshot` bytes (256 MiB) while it arrives, with a continuation of
+//!   at most 1 MiB, and at most `max_resize_cells` cells (and `max_resize_axis` a side), checked
+//!   from its first record before it is decoded and again after.
+//! - Scrollback: at most `max_scrollback_lines` (10,000) rows and `max_scrollback_bytes`
+//!   (32 MiB) of pages, or Rex's own limits where they are smaller (Ghostty keeps at least one
+//!   page of history, and prunes whole pages, so the effective bound is the larger of these and
+//!   one page). The alternate screen has no scrollback.
+//! - Kitty graphics: off. The snapshot is decoded with an image storage limit of 0 (Ghostty's
+//!   "off": images in it are dropped and live commands do nothing), and the APC handler ignores
+//!   kitty graphics and glyph protocol commands, so their bytes are not even buffered.
+//! - Other APC strings: dropped as they arrive (Ghostty's default, `unknown_max_bytes` 0).
+//! - OSC strings: at most `max_control_string` (64 KiB) for those Ghostty buffers on the heap
+//!   (clipboard OSC 52 and the like; Ghostty's default is 8 MiB); every other OSC uses a fixed
+//!   2 KiB buffer, and unknown ones are dropped. Kitty clipboard writes (OSC 5522) are refused
+//!   without buffering, as the mirror has no clipboard. Kitty drag and drop (OSC 72) keeps at
+//!   most two MIME lists of 1 MiB each (Ghostty's fixed limit).
+//! - DCS strings (XTGETTCAP, tmux control mode lines): at most `max_control_string` (Ghostty's
+//!   default is 1 MiB); DECRQSS has a small fixed buffer.
+//! - A string that passes its bound is dropped, and the parser returns to ordinary output at its
+//!   terminator (or a CAN or SUB). The bytes still reach observers unchanged.
+//! - Redraw: at most `max_redraw_bytes` (16 MiB) per call (`redraw_budget`); Copy text: at most
+//!   8 times its `max_bytes` formatted (see `plainTextAllCells`).
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,8 +50,22 @@ const log = std.log.scoped(.rex_mirror);
 pub const max_snapshot = 256 * 1024 * 1024;
 
 /// Largest terminal side, and most cells, a Rex resize may ask for; any other resize is ignored.
+/// A snapshot of a larger terminal fails as `error.BadSnapshot`.
 pub const max_resize_axis: u32 = 4096;
 pub const max_resize_cells: u32 = 1_048_576;
+
+/// Most scrollback a mirror keeps, whatever Rex allows (see the top of this file).
+pub const max_scrollback_lines: usize = 10_000;
+pub const max_scrollback_bytes: usize = 32 * 1024 * 1024;
+
+/// Most bytes of one OSC or DCS string the VT parser buffers.
+pub const max_control_string: usize = 64 * 1024;
+
+/// Most bytes one redraw may take (see `Mirror.redrawLockedInfo`).
+pub const max_redraw_bytes: usize = 16 * 1024 * 1024;
+
+/// Copy text is formatted into at most this many times its `max_bytes`.
+pub const copy_format_factor: usize = 8;
 
 pub fn resizeAllowed(cols: u32, rows: u32) bool {
     if (cols < 1 or rows < 1 or cols > max_resize_axis or rows > max_resize_axis) return false;
@@ -85,6 +126,8 @@ pub const Mirror = struct {
     snapshot_bytes: usize = 0,
     /// Why the stream ended, once it has (see `data.End`).
     ended: ?data.End = null,
+    /// Most bytes one redraw may take; tests lower it.
+    redraw_budget: usize = max_redraw_bytes,
 
     /// A mirror that learns its nonce from the data connection's welcome (see `sink`).
     pub fn initPending(gpa: Allocator, io: Io) !*Mirror {
@@ -183,10 +226,18 @@ pub const Mirror = struct {
         try m.snap.appendSlice(m.gpa, bytes);
         // Decode once, when the whole snapshot is here: finding its end from the record headers is
         // cheap, while decoding the growing buffer after every chunk would cost quadratic time.
-        const end = (try snapshotEnd(m.snap.items, &m.snap_scan, max_snapshot)) orelse return;
+        const end = (try snapshotEnd(m.snap.items, &m.snap_scan, max_snapshot)) orelse {
+            // A terminal larger than a resize may make is refused from its first record, before
+            // the rest arrives and long before anything is allocated for it.
+            if (wire.snapshotSize(m.snap.items)) |sz| if (!resizeAllowed(sz.cols, sz.rows)) return error.BadSnapshot;
+            return;
+        };
+        if (wire.snapshotSize(m.snap.items)) |sz| if (!resizeAllowed(sz.cols, sz.rows)) return error.BadSnapshot;
         var reader: Io.Reader = .fixed(m.snap.items[0..end]);
         var decoded = ghostty_vt.snapshot.decode(m.gpa, m.io, &reader, .{
             .max_continuation_bytes = 1 << 20,
+            // Off: images in the snapshot are dropped, and live kitty commands do nothing.
+            .kitty_image_storage_limit = 0,
         }) catch |e| switch (e) {
             error.EndOfStream => return error.BadSnapshot, // its own framing said it was complete
             else => return e,
@@ -194,8 +245,13 @@ pub const Mirror = struct {
         defer decoded.deinit(m.gpa);
         const used = reader.seek;
         if (used != end) return error.BadSnapshot;
+        // The decoder's own word on the size, whatever the first record looked like.
+        const dt = &decoded.terminal.?;
+        if (!resizeAllowed(dt.cols, dt.rows)) return error.BadSnapshot;
         m.term = decoded.toOwned();
+        capScrollback(&m.term);
         m.vt = m.term.vtStream();
+        limitStream(&m.vt);
         m.term_made = true;
         switch (decoded.continuation) {
             .ground => {},
@@ -212,6 +268,26 @@ pub const Mirror = struct {
 
     /// See `wire.snapshotEnd`.
     pub const snapshotEnd = wire.snapshotEnd;
+
+    /// Keep at most `max_scrollback_lines` and `max_scrollback_bytes` of scrollback, or Rex's own
+    /// limits (from the snapshot) where they are smaller.
+    fn capScrollback(t: *ghostty_vt.Terminal) void {
+        const primary = t.screens.get(.primary) orelse return;
+        const limits = &primary.pages.limits; // Rex's explicit limits; maxInt for none
+        t.setScrollbackMaxBytes(@min(limits.bytes.explicit, max_scrollback_bytes));
+        t.setScrollbackMaxLines(@min(limits.lines.explicit, max_scrollback_lines));
+    }
+
+    /// Turn off what the mirror never shows, and bound the strings the parser buffers (see the
+    /// top of this file). Before any byte reaches the stream, the snapshot's continuation included.
+    fn limitStream(vt: *ghostty_vt.TerminalStream) void {
+        vt.handler.apc_handler.enable(.kitty, false);
+        vt.handler.apc_handler.enable(.glyph, false);
+        vt.handler.apc_handler.unknown_max_bytes = 0;
+        vt.parser.osc_parser.max_allocating_bytes = max_control_string;
+        vt.parser.osc_parser.unknown_max_bytes = 0;
+        vt.handler.dcs_handler.max_bytes = max_control_string;
+    }
 
     // Splitter sink.
 
@@ -328,9 +404,18 @@ pub const Mirror = struct {
         return out.?;
     }
 
+    /// What a redraw carried.
+    pub const Redrawn = struct {
+        /// Rows of scrollback above the visible primary screen it carries.
+        history_rows: u32,
+        /// Fewer than `opts` asked for (and the history had): the byte budget did not hold them.
+        history_cut: bool,
+    };
+
     /// Build a redraw and hand it to `deliver` while the mirror is still locked, so nothing the
     /// mirror receives afterwards can be missed or repeated by whoever switches to it (live
     /// output reaches observers under the same lock). `deliver` must not call into the mirror.
+    /// As `redrawLockedInfo`, without saying how much history it carried.
     pub fn redrawLocked(
         m: *Mirror,
         gpa: Allocator,
@@ -338,12 +423,44 @@ pub const Mirror = struct {
         ctx: *anyopaque,
         deliver: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
     ) !void {
+        _ = try m.redrawLockedInfo(gpa, opts, ctx, deliver);
+    }
+
+    /// As `redrawLocked`, saying how many history rows the redraw carried. A redraw is at most
+    /// `redraw_budget` bytes: one that would pass it is built again with half the history rows,
+    /// down to none (the visible screen alone); if even that does not fit, `error.RedrawTooLarge`
+    /// and nothing is delivered.
+    pub fn redrawLockedInfo(
+        m: *Mirror,
+        gpa: Allocator,
+        opts: RedrawOptions,
+        ctx: *anyopaque,
+        deliver: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
+    ) !Redrawn {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return error.NotLive;
-        var out: Io.Writer.Allocating = .init(gpa);
-        defer out.deinit();
-        const w = &out.writer;
+        const have = m.historyRowsLocked();
+        const wanted: u32 = if (historyCap(opts, m.term.cols)) |c| @min(c, have) else have;
+        var rows = wanted;
+        while (true) {
+            var out: Budget = .init(gpa, m.redraw_budget);
+            defer out.deinit();
+            m.formatRedraw(&out.writer, rows) catch |e| {
+                if (out.oom) return error.OutOfMemory;
+                if (!out.over) return e;
+                if (rows == 0) return error.RedrawTooLarge;
+                rows /= 2;
+                continue;
+            };
+            try deliver(ctx, out.written());
+            return .{ .history_rows = rows, .history_cut = rows < wanted };
+        }
+    }
+
+    /// The redraw with `rows` history rows above the visible primary screen, into `w` (flushed).
+    /// Under `mu`.
+    fn formatRedraw(m: *Mirror, w: *Io.Writer, rows: u32) Io.Writer.Error!void {
         try w.writeAll("\x1bc"); // RIS: start the viewer from a clean terminal
         // The formatter draws only the active screen. While a full-screen program has the
         // alternate screen, draw the primary screen first; the modes that follow switch the
@@ -352,23 +469,21 @@ pub const Mirror = struct {
             if (m.term.screens.get(.primary)) |primary| {
                 var pf: ghostty_vt.formatter.ScreenFormatter = .init(primary, redraw_opts);
                 pf.extra = .all;
-                pf.content = .{ .selection = capSelection(primary, opts, m.term.cols) };
+                pf.content = .{ .selection = historySelection(primary, rows) };
                 try pf.format(w);
             }
         }
         var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, redraw_opts);
         f.extra = .all;
-        if (m.term.screens.active_key == .primary) f.content = .{ .selection = capSelection(m.term.screens.active, opts, m.term.cols) };
+        if (m.term.screens.active_key == .primary) f.content = .{ .selection = historySelection(m.term.screens.active, rows) };
         try f.format(w);
-        try deliver(ctx, out.written());
+        try w.flush();
     }
 
-    /// The part of `screen` to draw: the visible rows plus at most `history_lines` above them, and
-    /// at most `history_cells` cells of them at `cols` columns.
-    fn capSelection(screen: *ghostty_vt.Screen, opts: RedrawOptions, cols: u16) ?ghostty_vt.Selection {
-        const n = historyCap(opts, cols) orelse return null;
+    /// The visible rows of `screen` and `n` rows of history above them (all there is, if fewer).
+    fn historySelection(screen: *ghostty_vt.Screen, n: u32) ?ghostty_vt.Selection {
         const top = screen.pages.getTopLeft(.active);
-        const start = top.up(n) orelse return null; // less history than the cap: everything
+        const start = top.up(n) orelse screen.pages.getTopLeft(.screen);
         const end = screen.pages.getBottomRight(.screen) orelse return null;
         return ghostty_vt.Selection.init(start, end, false);
     }
@@ -385,9 +500,13 @@ pub const Mirror = struct {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return 0;
+        return m.historyRowsLocked();
+    }
+
+    fn historyRowsLocked(m: *Mirror) u32 {
         const primary = m.term.screens.get(.primary) orelse return 0;
         const total = primary.pages.total_rows;
-        return if (total > m.term.rows) total - m.term.rows else 0;
+        return @intCast(@min(if (total > m.term.rows) total - m.term.rows else 0, std.math.maxInt(u32)));
     }
 
     pub const PlainAll = struct { text: []u8, truncated: bool };
@@ -402,27 +521,42 @@ pub const Mirror = struct {
 
     /// As `plainTextAll`, also formatting at most `max_cells` cells: rows times the columns at
     /// the time of the call, read under the mirror's lock (so a resize between asking for the
-    /// size and this call cannot make the cap wrong). Null for no cap in cells.
+    /// size and this call cannot make the cap wrong). Null for no cap in cells. At most
+    /// `copy_format_factor` times `max_bytes` are formatted: rows whose text would pass that are
+    /// formatted again from half as many rows (the last ones), down to none.
     pub fn plainTextAllCells(m: *Mirror, gpa: Allocator, max_bytes: usize, max_rows_in: u32, max_cells: ?u64) !PlainAll {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return error.NotLive;
-        const max_rows: u32 = if (max_cells) |cells| @intCast(@min(max_rows_in, cells / @max(m.term.cols, 1))) else max_rows_in;
+        var max_rows: u32 = if (max_cells) |cells| @intCast(@min(max_rows_in, cells / @max(m.term.cols, 1))) else max_rows_in;
         const screen = m.term.screens.active;
-        const rows_cut = screen.pages.total_rows > max_rows;
-        if (max_rows == 0) return .{ .text = try gpa.alloc(u8, 0), .truncated = rows_cut };
-        var out: Io.Writer.Allocating = .init(gpa);
-        errdefer out.deinit();
-        var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, .{ .emit = .plain, .unwrap = true, .trim = true });
-        if (rows_cut) f.content = .{ .selection = lastRows(screen, max_rows) };
-        try f.format(&out.writer);
-        const all = out.written();
-        if (all.len <= max_bytes) return .{ .text = try out.toOwnedSlice(), .truncated = rows_cut };
-        var start = all.len - max_bytes;
-        while (start < all.len and all[start - 1] != '\n') start += 1; // begin at a line start
-        const kept = try gpa.dupe(u8, all[start..]);
-        out.deinit();
-        return .{ .text = kept, .truncated = true };
+        var rows_cut = screen.pages.total_rows > max_rows;
+        if (!rows_cut) max_rows = @intCast(screen.pages.total_rows); // so halving it cuts at once
+        const budget = std.math.mul(usize, max_bytes, copy_format_factor) catch std.math.maxInt(usize);
+        while (true) {
+            if (max_rows == 0) return .{ .text = try gpa.alloc(u8, 0), .truncated = rows_cut };
+            var out: Budget = .init(gpa, budget);
+            defer out.deinit();
+            var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, .{ .emit = .plain, .unwrap = true, .trim = true });
+            if (rows_cut) f.content = .{ .selection = lastRows(screen, max_rows) };
+            formatAll(&f, &out.writer) catch |e| {
+                if (out.oom) return error.OutOfMemory;
+                if (!out.over) return e;
+                max_rows /= 2;
+                rows_cut = true;
+                continue;
+            };
+            const all = out.written();
+            if (all.len <= max_bytes) return .{ .text = try out.toOwnedSlice(), .truncated = rows_cut };
+            var start = all.len - max_bytes;
+            while (start < all.len and all[start - 1] != '\n') start += 1; // begin at a line start
+            return .{ .text = try gpa.dupe(u8, all[start..]), .truncated = true };
+        }
+    }
+
+    fn formatAll(f: *ghostty_vt.formatter.TerminalFormatter, w: *Io.Writer) Io.Writer.Error!void {
+        try f.format(w);
+        try w.flush();
     }
 
     /// The last `n` (at least 1) rows of `screen`, starting at a line start: a row that continues a
@@ -449,6 +583,67 @@ pub const Mirror = struct {
     }
 };
 
+/// A writer into memory that fails (`error.WriteFailed`, with `over` set) rather than hold more
+/// than `limit` bytes, so formatting cheap input into expensive output stops at a budget.
+const Budget = struct {
+    gpa: Allocator,
+    list: std.ArrayList(u8) = .empty,
+    limit: usize,
+    /// A write failed because it would pass `limit`.
+    over: bool = false,
+    /// A write failed for want of memory.
+    oom: bool = false,
+    writer: Io.Writer,
+
+    fn init(gpa: Allocator, limit: usize) Budget {
+        return .{ .gpa = gpa, .limit = limit, .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} } };
+    }
+
+    fn deinit(b: *Budget) void {
+        b.list.deinit(b.gpa);
+    }
+
+    /// What was written. Valid until `deinit` or `toOwnedSlice`.
+    fn written(b: *Budget) []const u8 {
+        return b.list.items;
+    }
+
+    fn toOwnedSlice(b: *Budget) Allocator.Error![]u8 {
+        return b.list.toOwnedSlice(b.gpa);
+    }
+
+    /// Room for `n` more bytes, or fail.
+    fn room(b: *Budget, n: usize) Io.Writer.Error!void {
+        if (n > b.limit - b.list.items.len) {
+            b.over = true;
+            return error.WriteFailed;
+        }
+        b.list.ensureUnusedCapacity(b.gpa, n) catch {
+            b.oom = true;
+            return error.WriteFailed;
+        };
+    }
+
+    fn drain(w: *Io.Writer, parts: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const b: *Budget = @alignCast(@fieldParentPtr("writer", w));
+        // No buffer of its own (`buffer` is empty), so everything arrives in `parts`.
+        var n: usize = 0;
+        for (parts[0 .. parts.len - 1]) |d| {
+            try b.room(d.len);
+            b.list.appendSliceAssumeCapacity(d);
+            n += d.len;
+        }
+        const pattern = parts[parts.len - 1];
+        const total = std.math.mul(usize, pattern.len, splat) catch {
+            b.over = true;
+            return error.WriteFailed;
+        };
+        try b.room(total);
+        for (0..splat) |_| b.list.appendSliceAssumeCapacity(pattern);
+        return n + total;
+    }
+};
+
 // ---- tests ----
 
 const testing = std.testing;
@@ -456,14 +651,22 @@ const fake = @import("fake.zig");
 const Control = @import("control.zig").Control;
 
 fn makeStream(gpa: Allocator, nonce: u64, cols: u16, rows: u16, program_output: []const u8) ![]u8 {
-    var t = try ghostty_vt.Terminal.init(testing.io, gpa, .{ .cols = cols, .rows = rows });
+    return makeStreamOpts(gpa, nonce, .{ .cols = cols, .rows = rows }, program_output, null);
+}
+
+/// A stream from Rex: the snapshot of a terminal made with `opts` that ran `program_output`, then
+/// a resize message. `check`, if set, looks at that terminal before it is encoded.
+fn makeStreamOpts(gpa: Allocator, nonce: u64, opts: ghostty_vt.Terminal.Options, program_output: []const u8, check: ?*const fn (t: *ghostty_vt.Terminal) anyerror!void) ![]u8 {
+    var t = try ghostty_vt.Terminal.init(testing.io, gpa, opts);
     defer t.deinit(gpa);
     var vt = t.vtStream();
+    defer vt.deinit();
     vt.nextSlice(program_output);
+    if (check) |c| try c(&t);
     var aw: Io.Writer.Allocating = .init(gpa);
     errdefer aw.deinit();
     try ghostty_vt.snapshot.encode(gpa, &aw.writer, &t, .{ .continuation = .ground });
-    try aw.writer.print("\x1b_rex1;{d};{{\"type\":\"resize\",\"cols\":{d},\"rows\":{d},\"owner\":null}}\x1b\\", .{ nonce, cols, rows });
+    try aw.writer.print("\x1b_rex1;{d};{{\"type\":\"resize\",\"cols\":{d},\"rows\":{d},\"owner\":null}}\x1b\\", .{ nonce, opts.cols, opts.rows });
     return aw.toOwnedSlice();
 }
 
@@ -1156,4 +1359,356 @@ test "mirror: Copy text and redraw history can be capped in cells" {
     try testing.expectEqual(@as(?u32, 5), Mirror.historyCap(.{ .history_lines = 5, .history_cells = 20 * 40 }, 40));
     try testing.expectEqual(@as(?u32, 20), Mirror.historyCap(.{ .history_lines = 50, .history_cells = 20 * 40 }, 40));
     try testing.expectEqual(@as(?u32, null), Mirror.historyCap(.{}, 40));
+}
+
+/// Bytes `fa` has handed out and not had back.
+fn liveBytes(fa: *const std.testing.FailingAllocator) usize {
+    return fa.allocated_bytes - fa.freed_bytes;
+}
+
+/// Feed `bytes` in pieces of `step`.
+fn feedChunked(m: *Mirror, bytes: []const u8, step: usize) !void {
+    var off: usize = 0;
+    while (off < bytes.len) : (off += step) try m.feed(bytes[off..@min(bytes.len, off + step)]);
+}
+
+fn expectText(m: *Mirror, needle: []const u8) !void {
+    const text = try m.plainText(testing.allocator);
+    defer testing.allocator.free(text);
+    if (std.mem.indexOf(u8, text, needle) == null) {
+        std.debug.print("\nmissing {s} in:\n{s}\n", .{ needle, text });
+        return error.TestExpectedText;
+    }
+}
+
+const kitty_image = "\x1b_Ga=T,f=24,s=1,v=1,i=7,q=2;AAAA\x1b\\"; // a 1x1 RGB image, shown
+
+test "mirror: a snapshot that carried kitty images decodes, without them" {
+    const a = testing.allocator;
+    const Check = struct {
+        fn hasImage(t: *ghostty_vt.Terminal) anyerror!void {
+            try testing.expectEqual(@as(usize, 1), t.screens.active.kitty_images.images.count());
+        }
+    };
+    const stream = try makeStreamOpts(a, 3, .{ .cols = 30, .rows = 5 }, "before " ++ kitty_image ++ " after\r\n", Check.hasImage);
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 3);
+    defer m.deinit();
+    try m.feed(stream);
+    try testing.expectEqual(Status.live, m.getStatus());
+    try expectText(m, "after");
+    try testing.expectEqual(@as(usize, 0), m.term.screens.active.kitty_images.images.count());
+    try testing.expectEqual(@as(usize, 0), m.term.screens.active.kitty_images.total_limit);
+}
+
+test "mirror: kitty graphics and glyph commands in live output are dropped unbuffered and unapplied" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 4, 40, 6, "");
+    defer a.free(stream);
+    var fa = std.testing.FailingAllocator.init(a, .{});
+    const m = try Mirror.init(fa.allocator(), testing.io, 4);
+    defer m.deinit();
+    try m.feed(stream);
+    const base = liveBytes(&fa);
+
+    // A whole image command: nothing stored.
+    try m.feed(kitty_image);
+    try testing.expectEqual(@as(usize, 0), m.term.screens.active.kitty_images.images.count());
+    // A long unterminated transmission, in pieces: nothing buffered (Ghostty would hold up to
+    // 65 MiB of it with the kitty handler on).
+    try m.feed("\x1b_Ga=t,f=24,s=1024,v=1024,i=9;");
+    const blob = try a.alloc(u8, 4 << 20);
+    defer a.free(blob);
+    @memset(blob, 'A');
+    try feedChunked(m, blob, 64 * 1024);
+    try testing.expect(liveBytes(&fa) - base < 64 * 1024);
+    try m.feed("\x1b\\");
+    // Many placements: nothing stored either.
+    var buf: [64]u8 = undefined;
+    for (0..10_000) |i| try m.feed(try std.fmt.bufPrint(&buf, "\x1b_Ga=p,i=7,p={d},q=2\x1b\\", .{i + 1}));
+    try testing.expectEqual(@as(usize, 0), m.term.screens.active.kitty_images.images.count());
+    // A glyph protocol registration, unterminated and long: not buffered.
+    try m.feed("\x1b_25a1;");
+    try feedChunked(m, blob[0 .. 2 << 20], 64 * 1024);
+    try testing.expect(liveBytes(&fa) - base < 64 * 1024);
+    try m.feed("\x1b\\after the strings");
+    try expectText(m, "after the strings");
+    try testing.expect(liveBytes(&fa) - base < 64 * 1024);
+}
+
+test "mirror: scrollback is capped at 10,000 lines and 32 MiB, or Rex's smaller limits" {
+    const a = testing.allocator;
+    {
+        // Rex says unlimited: the mirror's own caps.
+        const stream = try makeStreamOpts(a, 5, .{ .cols = 40, .rows = 5, .max_scrollback_bytes = null, .max_scrollback_lines = null }, "", null);
+        defer a.free(stream);
+        const m = try Mirror.init(a, testing.io, 5);
+        defer m.deinit();
+        try m.feed(stream);
+        const limits = &m.term.screens.get(.primary).?.pages.limits;
+        try testing.expectEqual(max_scrollback_lines, limits.lines.explicit);
+        try testing.expectEqual(max_scrollback_bytes, limits.bytes.explicit);
+        // 12,000 lines of output keep at most 10,000 of history.
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(a);
+        for (0..12_000) |i| try out.print(a, "line-{d:0>5}\r\n", .{i});
+        try m.feed(out.items);
+        const kept = m.historyRows();
+        try testing.expect(kept <= max_scrollback_lines and kept > 1000);
+        try expectText(m, "line-11999");
+        // A reset (RIS) keeps the caps.
+        try m.feed("\x1bc");
+        try testing.expectEqual(max_scrollback_lines, limits.lines.explicit);
+        try testing.expectEqual(max_scrollback_bytes, limits.bytes.explicit);
+    }
+    {
+        // Rex's own limits, smaller than the mirror's: kept.
+        const stream = try makeStreamOpts(a, 6, .{ .cols = 40, .rows = 5, .max_scrollback_bytes = 1 << 20, .max_scrollback_lines = 500 }, "", null);
+        defer a.free(stream);
+        const m = try Mirror.init(a, testing.io, 6);
+        defer m.deinit();
+        try m.feed(stream);
+        const limits = &m.term.screens.get(.primary).?.pages.limits;
+        try testing.expectEqual(@as(usize, 500), limits.lines.explicit);
+        try testing.expectEqual(@as(usize, 1 << 20), limits.bytes.explicit);
+    }
+}
+
+test "mirror: OSC and DCS strings are bounded, split anywhere, and output after them renders" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 7, 40, 6, "");
+    defer a.free(stream);
+    var fa = std.testing.FailingAllocator.init(a, .{});
+    const m = try Mirror.init(fa.allocator(), testing.io, 7);
+    defer m.deinit();
+    try m.feed(stream);
+    const base = liveBytes(&fa);
+    const blob = try a.alloc(u8, 2 << 20);
+    defer a.free(blob);
+    @memset(blob, 'A');
+    const slack = 2 * max_control_string; // the bound, and the growing buffer's last step
+
+    // OSC 52 (a clipboard write, which Ghostty buffers on the heap: 8 MiB by default), 2 MiB in
+    // odd-sized pieces, ended by ESC \ split across two feeds.
+    try m.feed("\x1b]52;c;");
+    try feedChunked(m, blob, 4093);
+    try testing.expect(liveBytes(&fa) - base < slack);
+    try m.feed("\x1b");
+    try m.feed("\\one");
+    try expectText(m, "one");
+    // The same ended by BEL.
+    try m.feed("\x1b]52;c;");
+    try feedChunked(m, blob, 65537);
+    try testing.expect(liveBytes(&fa) - base < slack);
+    try m.feed("\x07two");
+    try expectText(m, "onetwo");
+    // DCS (XTGETTCAP, buffered up to 1 MiB by default).
+    try m.feed("\x1bP+q");
+    try feedChunked(m, blob, 3001);
+    try testing.expect(liveBytes(&fa) - base < slack);
+    try m.feed("\x1b");
+    try m.feed("\\three");
+    try expectText(m, "onetwothree");
+    // A string cancelled by CAN, then ordinary output.
+    try m.feed("\x1b]52;c;AAAA\x18four");
+    try expectText(m, "onetwothreefour");
+    // A short OSC still works: the title.
+    try m.feed("\x1b]2;rweb title\x1b");
+    try m.feed("\\");
+    try testing.expectEqualStrings("rweb title", m.term.getTitle().?);
+    try testing.expect(liveBytes(&fa) - base < slack);
+}
+
+test "mirror: a snapshot of a terminal larger than a resize may make fails as a bad snapshot" {
+    const a = testing.allocator;
+    // Within the axis limit but over the cell limit: 2048 x 1024.
+    const big = try makeStreamOpts(a, 8, .{ .cols = 2048, .rows = 1024 }, "", null);
+    defer a.free(big);
+    try testing.expectEqual(wire.SnapshotSize{ .cols = 2048, .rows = 1024 }, wire.snapshotSize(big).?);
+    {
+        const m = try Mirror.init(a, testing.io, 8);
+        defer m.deinit();
+        try testing.expectError(error.BadSnapshot, m.feed(big));
+    }
+    {
+        // Refused from its first record: before the rest of it arrives.
+        const m = try Mirror.init(a, testing.io, 8);
+        defer m.deinit();
+        try testing.expectError(error.BadSnapshot, m.feed(big[0..64]));
+    }
+    {
+        // Exactly at the limit (1024 x 1024): fine.
+        const at = try makeStreamOpts(a, 9, .{ .cols = 1024, .rows = 1024 }, "corner", null);
+        defer a.free(at);
+        const m = try Mirror.init(a, testing.io, 9);
+        defer m.deinit();
+        try m.feed(at);
+        try testing.expectEqual(Mirror.Size{ .cols = 1024, .rows = 1024 }, m.size().?);
+    }
+}
+
+/// `rows` rows of output where every cell has its own colour (style-dense) or its own link
+/// (hyperlink-dense), each row ending with its number.
+fn denseOutput(a: Allocator, rows: usize, cols: usize, links: bool) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    for (0..rows) |r| {
+        for (0..cols - 6) |c| {
+            if (links) {
+                try out.print(a, "\x1b]8;;https://example.com/{d}/{d}/", .{ r, c });
+                try out.appendNTimes(a, 'p', 150);
+                try out.appendSlice(a, "\x1b\\x\x1b]8;;\x1b\\");
+            } else {
+                try out.print(a, "\x1b[38;2;{d};{d};{d};48;2;{d};{d};{d};1;3;4mx", .{ r % 256, c % 256, (r + c) % 256, c % 256, r % 256, (r * c) % 256 });
+            }
+        }
+        try out.print(a, "\x1b[0m{d:0>5}\r\n", .{r});
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "mirror: a redraw stays within its byte budget by carrying less history, down to the screen alone" {
+    const a = testing.allocator;
+    for ([_]bool{ false, true }) |links| {
+        const stream = try makeStreamOpts(a, 10, .{ .cols = 80, .rows = 10, .max_scrollback_bytes = null, .max_scrollback_lines = null }, "", null);
+        defer a.free(stream);
+        const m = try Mirror.init(a, testing.io, 10);
+        defer m.deinit();
+        try m.feed(stream);
+        const rows: usize = if (links) 60 else 400; // a link costs far more than a colour
+        const out = try denseOutput(a, rows, 80, links);
+        defer a.free(out);
+        try m.feed(out);
+        try testing.expect(m.historyRows() >= rows - 10);
+
+        // With room for everything, everything comes.
+        const Cap = struct {
+            gpa: Allocator,
+            bytes: ?[]u8 = null,
+            fn take(ctx: *anyopaque, b: []const u8) !void {
+                const c: *@This() = @ptrCast(@alignCast(ctx));
+                if (c.bytes) |old| c.gpa.free(old);
+                c.bytes = try c.gpa.dupe(u8, b);
+            }
+        };
+        var cap: Cap = .{ .gpa = a };
+        defer if (cap.bytes) |b| a.free(b);
+        const full = try m.redrawLockedInfo(a, .{}, &cap, Cap.take);
+        try testing.expectEqual(@as(u32, @intCast(m.historyRows())), full.history_rows);
+        try testing.expect(!full.history_cut);
+        const full_len = cap.bytes.?.len;
+        try testing.expect(full_len > 200 * 1024); // dense indeed
+
+        // A budget of a fifth of that: less history, within the budget, the screen intact.
+        m.redraw_budget = full_len / 5;
+        const less = try m.redrawLockedInfo(a, .{}, &cap, Cap.take);
+        try testing.expect(less.history_cut and less.history_rows < full.history_rows);
+        try testing.expect(cap.bytes.?.len <= m.redraw_budget);
+        var alt = false;
+        const text = try replay(a, cap.bytes.?, 80, 10, &alt);
+        defer a.free(text);
+        var last: [5]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, text, try std.fmt.bufPrint(&last, "{d:0>5}", .{rows - 1})) != null);
+        // The default path (no report) obeys the budget too.
+        const plain = try m.redrawWith(a, .{ .history_lines = 300 });
+        defer a.free(plain);
+        try testing.expect(plain.len <= m.redraw_budget);
+
+        // Room for the screen alone: no history at all.
+        m.redraw_budget = max_redraw_bytes;
+        const alone = try m.redrawWith(a, .{ .history_lines = 0 });
+        defer a.free(alone);
+        m.redraw_budget = alone.len;
+        const screen = try m.redrawLockedInfo(a, .{}, &cap, Cap.take);
+        try testing.expectEqual(@as(u32, 0), screen.history_rows);
+        try testing.expect(screen.history_cut);
+        // Not even that: an error, and nothing delivered.
+        m.redraw_budget = 1024;
+        if (cap.bytes) |b| a.free(b);
+        cap.bytes = null;
+        try testing.expectError(error.RedrawTooLarge, m.redrawLockedInfo(a, .{}, &cap, Cap.take));
+        try testing.expect(cap.bytes == null);
+    }
+}
+
+/// An allocator that remembers the largest single block it was asked for (to see how large a
+/// buffer grew).
+const Largest = struct {
+    child: Allocator,
+    largest: usize = 0,
+
+    fn allocator(l: *Largest) Allocator {
+        return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, al: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.largest = @max(l.largest, len);
+        return l.child.rawAlloc(len, al, ra);
+    }
+    fn resize(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, len: usize, ra: usize) bool {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.largest = @max(l.largest, len);
+        return l.child.rawResize(mem, al, len, ra);
+    }
+    fn remap(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.largest = @max(l.largest, len);
+        return l.child.rawRemap(mem, al, len, ra);
+    }
+    fn free(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, ra: usize) void {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.child.rawFree(mem, al, ra);
+    }
+};
+
+test "mirror: Copy text is formatted within 8 times its byte cap and keeps the end" {
+    const a = testing.allocator;
+    for ([_]bool{ false, true }) |links| {
+        const stream = try makeStreamOpts(a, 11, .{ .cols = 80, .rows = 10, .max_scrollback_bytes = null, .max_scrollback_lines = null }, "", null);
+        defer a.free(stream);
+        const m = try Mirror.init(a, testing.io, 11);
+        defer m.deinit();
+        try m.feed(stream);
+        const rows: usize = if (links) 60 else 400; // a link costs far more than a colour
+        const out = try denseOutput(a, rows, 80, links);
+        defer a.free(out);
+        try m.feed(out);
+        // About 81 bytes a row of text: a cap of 1000 bytes formats at most 8000.
+        var big: Largest = .{ .child = a };
+        const cut = try m.plainTextAllCells(big.allocator(), 1000, 100_000, null);
+        defer a.free(cut.text);
+        try testing.expect(cut.truncated and cut.text.len <= 1000);
+        try testing.expect(big.largest <= 2 * copy_format_factor * 1000); // the buffer's growth step included
+        var last: [5]u8 = undefined;
+        try testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, cut.text, "\n"), try std.fmt.bufPrint(&last, "{d:0>5}", .{rows - 1})));
+        try testing.expect(cut.text[0] == 'x'); // a line start
+        // A cap that holds everything: everything.
+        const all = try m.plainTextAllCells(a, 1 << 20, 100_000, null);
+        defer a.free(all.text);
+        try testing.expect(!all.truncated);
+        try testing.expect(std.mem.indexOf(u8, all.text, "00000") != null);
+    }
+    // Grapheme-dense text (marks on each character: more bytes than cells) is bounded the same way.
+    const stream = try makeStream(a, 12, 40, 5, "");
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 12);
+    defer m.deinit();
+    try m.feed(stream);
+    var g: std.ArrayList(u8) = .empty;
+    defer g.deinit(a);
+    for (0..300) |r| {
+        for (0..2) |_| {
+            try g.append(a, 'e');
+            for (0..8) |_| try g.appendSlice(a, "\xcc\x81");
+        }
+        try g.print(a, "{d:0>5}\r\n", .{r});
+    }
+    try m.feed(g.items);
+    // About 40 bytes a row of text, 305 rows: a cap of 500 bytes formats at most 4000.
+    var big: Largest = .{ .child = a };
+    const cut = try m.plainTextAllCells(big.allocator(), 500, 100_000, null);
+    defer a.free(cut.text);
+    try testing.expect(cut.truncated and cut.text.len <= 500);
+    try testing.expect(big.largest <= 2 * copy_format_factor * 500);
+    try testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, cut.text, "\n"), "00299"));
 }

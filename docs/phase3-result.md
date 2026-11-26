@@ -127,6 +127,16 @@ What was done:
   `src/bridge/web/vendor/`: `wterm.js` (245 KB, 84 KB compressed, sha256 `fbe16525…bd1b`),
   `wterm.css` (`01be4dbf…0f66`), `ghostty-vt.wasm` (600 KB, 200 KB compressed, `1fa4e703…e3a2`),
   `LICENSE-wterm.txt` (Apache-2.0, same text for all three packages).
+- Provenance, as far as it is known (recorded 2026-11-25, fourth review round): the full hashes of the vendored
+  files are in `src/bridge/web/vendor/SHA256SUMS`, and a test fails if an embedded file does not match. Not
+  recorded at the time, so not reproducible today: the full tarball hashes (above, shortened), npm's
+  `dist.integrity` strings, the bundle's `entry.mjs` and where esbuild 0.25.12 came from. `wterm.js` also
+  embeds a 55,081-byte WebAssembly module (SHA-256 `471458b1…e57f`) from the wterm packages, and
+  `ghostty-vt.wasm` is a prebuilt from `@wterm/ghostty` of unrecorded Ghostty version. xterm.js was fetched
+  from jsDelivr and hashed on first download, not checked against npm's integrity. Planned for Phase 6
+  (before anyone else runs rweb): commit the entry file and a script that fetches the packages by integrity
+  and rebuilds the bundle, and build `ghostty-vt.wasm` from the pinned Ghostty, so each vendored file can be
+  rebuilt and compared.
 - The page's security policy now allows WebAssembly (`'wasm-unsafe-eval'` in `script-src`): a
   change for the security review.
 - `wterm-shim.js` gives wterm the small xterm-like surface `app.js` uses. wterm hands its own

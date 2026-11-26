@@ -261,8 +261,9 @@ Before either: the owner's open feedback items ([feedback.md](feedback.md)) and 
 5. **setup-repo** (done 2026-11-25: installs the pinned archive, build fallback kept; live on laptop-mac,
    desktop-mac and linux-box). The pin becomes version plus SHA-256 per platform; the hook downloads,
    verifies and installs, keeps the previous build for rollback, and keeps building from source
-   as a fallback. The runbook's update path becomes: tag, `zig build dist`, release, bump the
-   pin, apply.
+   as a fallback. The runbook's update path becomes: tag, `tools/release.sh <commit>` (it tests and
+   builds that commit's clean export with the pinned Zig; `zig build dist` alone packs the working tree),
+   release, bump the pin, apply.
 
 gateway-box (owner, 2026-11-25) gets rweb only once this phase's release binaries exist; it has no module yet.
 
@@ -290,7 +291,11 @@ Then:
    macOS binaries would need signing and notarization), a Linux tarball with a systemd user unit,
    and an AUR package.
 4. **Release process.** Tagged releases with checksums and notes; a stated Rex
-   version/revision support range.
+   version/revision support range; signed checksums.
+5. **Rebuildable browser code.** Every vendored file rebuilt from recorded sources and compared: the wterm
+   bundle from its packages fetched by npm integrity with a committed entry file and build script,
+   `ghostty-vt.wasm` built from the pinned Ghostty, xterm.js checked against npm's integrity
+   (see `phase3-result.md`, "Provenance").
 
 Exit: someone else installs it from a published channel on Linux and macOS and reaches their own
 Rex from a phone, following only the docs.

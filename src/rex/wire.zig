@@ -122,6 +122,19 @@ pub fn snapshotEnd(buf: []const u8, scan: *usize, limit: usize) error{ BadSnapsh
     return null;
 }
 
+pub const SnapshotSize = struct { cols: u16, rows: u16 };
+
+/// The terminal size a snapshot declares in its first record (TERMINAL, whose payload begins with
+/// the columns and rows, u16 little-endian), once the first 24 bytes are here; null before that,
+/// or when the first record is something else (the decoder refuses that snapshot itself).
+pub fn snapshotSize(buf: []const u8) ?SnapshotSize {
+    const terminal_tag: u16 = 1;
+    if (buf.len < 24 or !std.mem.eql(u8, buf[0..8], "GHOSTSNP")) return null;
+    if (std.mem.readInt(u16, buf[10..12], .little) != terminal_tag) return null;
+    if (std.mem.readInt(u32, buf[12..16], .little) < 4) return null;
+    return .{ .cols = std.mem.readInt(u16, buf[20..22], .little), .rows = std.mem.readInt(u16, buf[22..24], .little) };
+}
+
 // ---- tests ----
 
 const testing = std.testing;
@@ -181,4 +194,17 @@ test "decodeTicket" {
     const t = try decodeTicket("AAECAwQFBgcICQoLDA0ODw");
     try testing.expectEqual(@as(u8, 15), t[15]);
     try testing.expectError(error.BadHandshake, decodeTicket("short"));
+}
+
+test "snapshotSize reads the first record's size, and only from a TERMINAL record" {
+    var b: [24]u8 = @splat(0);
+    @memcpy(b[0..8], "GHOSTSNP");
+    std.mem.writeInt(u16, b[10..12], 1, .little);
+    std.mem.writeInt(u32, b[12..16], 103, .little);
+    std.mem.writeInt(u16, b[20..22], 80, .little);
+    std.mem.writeInt(u16, b[22..24], 24, .little);
+    try testing.expectEqual(SnapshotSize{ .cols = 80, .rows = 24 }, snapshotSize(&b).?);
+    try testing.expect(snapshotSize(b[0..23]) == null);
+    std.mem.writeInt(u16, b[10..12], 2, .little);
+    try testing.expect(snapshotSize(&b) == null);
 }

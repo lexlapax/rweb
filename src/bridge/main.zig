@@ -313,29 +313,27 @@ pub const Refused = struct { path: []const u8, why: anyerror, at: []const u8 };
 pub const Probe = union(enum) { ok: []const u8, missing, refused: Refused };
 pub const Choice = union(enum) { ok: []const u8, none, refused: Refused };
 
-/// Which `tailscale` to run. A given path is the only one tried. Otherwise the candidates in order:
-/// the first that exists and passes `probe`; when none passes, the first refusal (a program that
-/// exists but fails its checks is named, never skipped silently), or `none` when none exists.
+/// Which `tailscale` to run. A given path is the only one tried. Otherwise the candidates in order,
+/// stopping at the first that exists: it is used if it passes `probe` and is the answer's refusal if
+/// not. A refused program is never passed over for a later place, which could hold a wrapper that
+/// runs the refused one. `none` when no candidate exists.
 pub fn chooseTailscale(given: ?[]const u8, candidates: []const []const u8, ctx: anytype, comptime probe: fn (@TypeOf(ctx), []const u8) Probe) Choice {
     if (given) |g| return switch (probe(ctx, g)) {
         .ok => |p| .{ .ok = p },
         .missing => .{ .refused = .{ .path = g, .why = error.FileNotFound, .at = g } },
         .refused => |r| .{ .refused = r },
     };
-    var first: ?Refused = null;
     for (candidates) |c| switch (probe(ctx, c)) {
         .ok => |p| return .{ .ok = p },
         .missing => {},
-        .refused => |r| if (first == null) {
-            first = r;
-        },
+        .refused => |r| return .{ .refused = r },
     };
-    return if (first) |r| .{ .refused = r } else .none;
+    return .none;
 }
 
 const SystemProbe = struct { arena: std.mem.Allocator, io: Io };
 
-/// The program at `path`, checked by `xfer.checkedProgram`.
+/// The program at `path`, checked by `xfer.checkedProgram`: `ok` holds the exact path to run.
 fn systemProbe(ctx: SystemProbe, path: []const u8) Probe {
     var problem: xfer.Problem = .{};
     const real = xfer.checkedProgram(ctx.arena, ctx.io, path, &problem) catch |e| {
@@ -350,7 +348,7 @@ fn tailscaleProgram(arena: std.mem.Allocator, io: Io, given: ?[]const u8) []cons
     const candidates = tailscaleCandidates(builtin.os.tag);
     switch (chooseTailscale(given, candidates, SystemProbe{ .arena = arena, .io = io }, systemProbe)) {
         .ok => |p| return p,
-        .refused => |r| std.debug.print("rweb: will not run tailscale at {s}: {t} (at {s}); it and every folder above it must be root's or yours and not writable by others (a group may write only if it holds no other user). Pass --tailscale PATH\n", .{ r.path, r.why, r.at }),
+        .refused => |r| std.debug.print("rweb: will not run tailscale at {s}: {t} (at {s}); it and every folder above it must be root's or yours, not writable by others (a group may write only if it holds no other user), with no ACL entry letting another user change them, and not on a FUSE filesystem or a volume another user mounted. Later install locations are not tried. Pass --tailscale PATH\n", .{ r.path, r.why, r.at }),
         .none => {
             std.debug.print("rweb: cannot find tailscale in", .{});
             for (candidates) |c| std.debug.print(" {s}", .{c});
@@ -498,12 +496,16 @@ test "tailscale is taken from --tailscale or fixed places, never PATH, and must 
     // The first that exists and passes, by its real path.
     const fs1 = FakeProbe{ .entries = &.{.{ "/usr/local/bin/tailscale", Probe{ .ok = "/opt/ts/tailscale" } }} };
     try T.expectEqualStrings("/opt/ts/tailscale", chooseTailscale(null, cands, fs1, FakeProbe.probe).ok);
-    // One that fails its checks is passed over for one that passes...
+    // The first that exists decides: one that fails its checks is the answer, never passed over for
+    // a later place (which could hold a wrapper that runs it)...
     const fs2 = FakeProbe{ .entries = &.{ .{ "/usr/bin/tailscale", refused }, .{ "/usr/sbin/tailscale", Probe{ .ok = "/usr/sbin/tailscale" } } } };
-    try T.expectEqualStrings("/usr/sbin/tailscale", chooseTailscale(null, cands, fs2, FakeProbe.probe).ok);
-    // ...and named when none passes.
-    const fs3 = FakeProbe{ .entries = &.{.{ "/usr/bin/tailscale", refused }} };
-    try T.expectEqualStrings("/usr/bin", chooseTailscale(null, cands, fs3, FakeProbe.probe).refused.at);
+    try T.expectEqualStrings("/usr/bin/tailscale", chooseTailscale(null, cands, fs2, FakeProbe.probe).refused.path);
+    try T.expectEqualStrings("/usr/bin", chooseTailscale(null, cands, fs2, FakeProbe.probe).refused.at);
+    // ...a missing one is passed over, and a refusal after it is still the answer.
+    const fs3 = FakeProbe{ .entries = &.{ .{ "/usr/local/bin/tailscale", refused }, .{ "/usr/sbin/tailscale", Probe{ .ok = "/usr/sbin/tailscale" } } } };
+    try T.expect(chooseTailscale(null, cands, fs3, FakeProbe.probe) == .refused);
+    const fs5 = FakeProbe{ .entries = &.{.{ "/usr/sbin/tailscale", Probe{ .ok = "/usr/sbin/tailscale" } }} };
+    try T.expectEqualStrings("/usr/sbin/tailscale", chooseTailscale(null, cands, fs5, FakeProbe.probe).ok);
     // A given path is the only one tried: refused or missing, the fixed places are not used.
     try T.expect(chooseTailscale("/home/me/bin/tailscale", cands, fs1, FakeProbe.probe) == .refused);
     try T.expectEqualStrings("/home/me/bin/tailscale", chooseTailscale("/home/me/bin/tailscale", cands, fs1, FakeProbe.probe).refused.path);

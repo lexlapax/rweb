@@ -67,7 +67,9 @@ flowchart TB
   (at most 16 MiB per control message whatever Rex advertises, 64 KiB until the handshake is done, 1 MiB
   per data or download message; a reconnect token of at most 256 printable bytes; JSON nested at most
   64 deep; at most 64 pings a second), gives every handshake 10 seconds, writes each frame whole even
-  when its task is cancelled, gives directory listings, downloads and terminal info 5 seconds instead of
+  when its task is cancelled but drops the connection if a write to Rex does not finish in time (the
+  call's timeout, or 10 seconds), resumes a dropped data stream unless it keeps failing with nothing
+  delivered, gives directory listings, downloads and terminal info 5 seconds instead of
   30, and checks after every connect that Rex's socket is served by this same user. It keeps Rex's events in a
   fixed ring (1,024 events, 4 MiB): on overflow the queued events collapse into one "dropped" notice,
   which makes the hub re-read the tree, and connection notices are never lost. Rex's own messages inside
@@ -77,6 +79,12 @@ flowchart TB
   instead of resuming the same bad message forever.
   A mirror that fails (a bad snapshot, out of memory) reports it as the stream's end, and the hub opens
   a new stream, as it does when Rex asks for one.
+- The mirror is a renderer, not a full terminal, and keeps what a program can make it hold small: kitty
+  graphics and the glyph protocol are off (their bytes are not even buffered), unknown OSC and APC strings
+  are dropped, OSC and DCS strings are kept to 64 KiB, scrollback to 10,000 rows and 32 MiB (or Rex's own
+  smaller limits), a snapshot to 256 MiB and 1,048,576 cells. A redraw is formatted within 16 MiB, carrying
+  less history when it would not fit (the screen alone at worst); Copy text is formatted within eight times
+  its 1 MiB limit. The bounds and where they are set are listed at the top of `src/rex/mirror.zig`.
 
 ## A request, from the browser to rweb
 
@@ -126,12 +134,14 @@ Secret files (the backend secret, the token file), the upload folder, the unix s
 `tailscale` program are trusted only through an open descriptor: every folder from `/` down is opened
 without following links and must be root's or yours and not writable by others (unless sticky, as `/tmp`
 is; a folder its group can write to only when that group holds nobody else, or is macOS's root-equivalent
-`admin`). A secret must be a regular file of yours closed to others, read from the descriptor that was
+`admin`), with no access-control entry that lets another user change it, and not on a file system another
+user controls (FUSE, a disk image they mounted, a volume that ignores ownership). A secret must be a regular file of yours closed to others, read from the descriptor that was
 checked. The upload folder is created only once the folders above it pass, stays open for the life of the
 process, and files are created relative to it; the path pasted is its real path. The unix socket's folder
 stays open too: stale sockets are inspected and removed relative to it, and at shutdown the socket is
-removed only if the entry is still the one rweb bound. `tailscale` comes from `--tailscale` or a fixed
-list of install locations, never from `PATH`.
+removed only if the entry is still the one rweb bound. `tailscale` comes from `--tailscale` or the first
+of a fixed list of install locations that exists, never from `PATH`; it is opened inside its checked folder
+and run by exactly that path, and a refusal is final (the next location is not tried).
 
 A browser connection that goes quiet for 20 seconds (unless rweb is still working on its last request),
 or whose socket does not take a frame within 30 seconds, is dropped, so a phone that stopped reading
@@ -223,7 +233,6 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 | `src/fuzz.zig` | Fuzz targets for every parser that reads outside bytes (`zig build fuzz --fuzz`) |
 | `tests/web/` | Tests for the page's logic (`zig build web-test`) |
 | `tools/` | `dist.sh` and `release.sh` (release archives; `release-base.test.sh` checks its folder rules), `notices.py` (third-party notices) |
-| `spike/` | The Phase 0 proof of concept, kept for reference |
 
 ## Pinned dependencies
 

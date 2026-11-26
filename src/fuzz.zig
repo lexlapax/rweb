@@ -186,6 +186,16 @@ test "fuzz snapshotEnd: reading the framing in pieces agrees with reading it who
     } });
 }
 
+/// 100 empty pings then 100 empty pongs, unmasked (from a server).
+const control_run = blk: {
+    var b: [400]u8 = undefined;
+    for (0..200) |i| {
+        b[2 * i] = if (i < 100) 0x89 else 0x8a;
+        b[2 * i + 1] = 0;
+    }
+    break :blk b;
+};
+
 test "fuzz ws readMessage: reassembly over a fixed reader" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
@@ -208,6 +218,10 @@ test "fuzz ws readMessage: reassembly over a fixed reader" {
                 .owns_stream = false,
                 .is_client = is_client,
                 .max_message = max_message,
+                // The real limit (64 a second) would end every input after 64 pings or pongs, so
+                // the fuzzer could never reach what follows a long run of them. The limit itself
+                // has its own unit tests in ws.zig.
+                .control_limit = std.math.maxInt(u32),
             };
             var messages: usize = 0;
             while (messages < 64) : (messages += 1) {
@@ -225,6 +239,7 @@ test "fuzz ws readMessage: reassembly over a fixed reader" {
             seed("\x01\x01\x01a\x89\x00\x80\x01b\x82\x00"), // fragments with a ping between, then binary
             seed("\x01\x88\x02\x03\xe8"), // close 1000
             seed("\x01\x81\x7e\x01\x00"), // a length past the limit
+            seed("\x01" ++ &control_run ++ "\x82\x01z"), // 200 control frames, then a message
         },
     });
 }

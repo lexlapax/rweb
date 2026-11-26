@@ -1,7 +1,25 @@
 # Agent context map
 
-Last updated: 2026-11-25 (laptop-mac: third review round and its fixes). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
+Last updated: 2026-11-25 (laptop-mac: fourth review round and its fixes; live test pending). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-25: fourth review round of `c5fd3c1` and its fixes
+
+A readiness review on linux-box (hold: a startup race made two round-3 hub tests fail on Linux), an external
+rescan (Linux ACL writer on `tailscale`, unterminated control strings, the CDN-loading spike) and a
+four-part internal review (25 more) were checked against the code. Tally, plan, fixes, tests, checks and
+what is left: [docs/security-review-2026-11-25-round4.md](docs/security-review-2026-11-25-round4.md). The
+worst: round 3's server-side paste cleaning broke every paste with characters such as `’ € ß` or emoji;
+kitty graphics in the mirror (unbounded placements, 400 MB image loads). Fixed by mechanism: the mirror is
+a renderer (kitty/glyph off, 64 KiB control strings, scrollback and redraw/Copy byte budgets); paste and
+page correctness; one checked path (ACLs on Linux and macOS, strict Linux groups, foreign mounts refused,
+`tailscale` run by its checked path); Rex write deadlines and resume streaks; `release.sh` tests and pins
+Zig, `-dirty` stamps; spike removed (owner's decision); README "About this project" and `CONTRIBUTING.md`
+(owner's request). Checked on laptop-mac: unit 326/337, live 272/274, fuzz corpus, web 29/29. **Next (owner's
+plan):** commit locally (not pushed), build archives with `tools/release.sh`, swap the live service on
+laptop-mac and linux-box through a setup-repo worktree pin, test through Serve with the iOS Simulator
+(laptop-mac → linux-box) and the Android emulator (linux-box → laptop-mac), then the owner tests; push only
+after that.
 
 ## 2026-11-25: third review round of `4c383fb` and its fixes
 
@@ -118,7 +136,8 @@ Ghostty fetched). `spike/`'s Python probes remain Linux-only (`XDG_RUNTIME_DIR`,
     voice input arrive once and in order. A space just before Enter is misordered or turned
     into a stray DEL, so keys and text need one order. There is no touch selection for copying
     (findings 12 and 13).
-- The spike is in `spike/` (throwaway; Phase 1 starts fresh). No bridge code yet.
+- The spike was in `spike/` (throwaway; Phase 1 started fresh). Removed 2026-11-25 (fourth review round); in
+  Git history up to `c5fd3c1`.
 
 ## Owner decisions (2026-11-25)
 
@@ -330,7 +349,7 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 | Snapshot format, libghostty-vt, browser terminals, Serve identity, machine facts | [docs/design-research.md](docs/design-research.md) |
 | Rex protocol, streams, revisions; Ovis and herdr background | [docs/rex-web-research.md](docs/rex-web-research.md) |
 | What Phase 1 built, findings, limits | [docs/phase1-result.md](docs/phase1-result.md) |
-| Working example of every Rex call the bridge needs | `spike/src/main.zig`, `spike/src/ws.zig` |
+| Working example of every Rex call the bridge needs | `src/rex/` (the spike's `spike/src/main.zig` is in Git history up to `c5fd3c1`) |
 | Live protocol reference (authoritative) | `curl --unix-socket "$XDG_RUNTIME_DIR/rex/server.sock" http://localhost/llms.txt` |
 | Rex CLI usage | the `rex` skill (always pass `-s` and `-b` in tests) |
 | Deployment (Phase 4) | the owner's `setup-repo` repository, with approval |

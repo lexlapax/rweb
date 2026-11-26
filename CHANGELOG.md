@@ -112,6 +112,34 @@ From the third review (details: `docs/security-review-2026-11-25-round3.md`):
   folder.
 - Docs name reviewers generically.
 
+From the fourth review (details: `docs/security-review-2026-11-25-round4.md`):
+
+- Fixed: pastes containing characters such as `’ “ — € ß`, Cyrillic, emoji or much CJK text were mangled
+  or lost by the bridge's paste cleaning (it removed UTF-8 continuation bytes); and a race between the
+  paste check and a stream restart.
+- The terminal mirror no longer runs kitty graphics or the glyph protocol, which a program could use to
+  make it hold hundreds of megabytes or spend quadratic time; control strings are kept to 64 KiB,
+  scrollback to 10,000 rows and 32 MiB, and redraws and Copy text to fixed byte budgets (a redraw carries
+  less history rather than more memory).
+- Access control lists are checked (Linux POSIX ACLs and macOS ACLs) on the secret files, the upload and
+  socket folders, the `tailscale` program and the folders above them; group-writable folders pass on Linux
+  only for your own group of one, with all accounts in the local files; file systems another user mounts
+  are refused; `tailscale` is run by exactly the path that was checked, and a refused install location is
+  final.
+- Writes to Rex have deadlines; an idle terminal's stream is resumed rather than restarted after repeated
+  drops; typed input is never cut inside an SS3 key or an X10 mouse report.
+- The page: an error or `closed` for a terminal it has moved away from is ignored; a terminal being restored
+  is retried while Rex is restarting instead of forgotten; queued uploads stop when you switch terminals;
+  `open` errors name their terminal and whether they may pass; `open` no longer counts against the hub-wide
+  budget.
+- Startup no longer re-announces the first connection to Rex (two tests raced it on Linux).
+- Releases: `tools/release.sh` runs the tests on the exported commit first, refuses a Zig other than the
+  pinned one unless told otherwise, and writes `BUILDINFO`; a build from a changed working tree shows
+  `-dirty` in `rweb --version`; the docs name `tools/release.sh` as the only release path.
+- The Phase 0 spike is removed from the tree (it loaded xterm.js from a CDN; it is in Git history).
+- README: "About this project"; `CONTRIBUTING.md`. Vendored browser code: what is and is not known about
+  its provenance is recorded, and a rebuild from recorded sources is planned for Phase 6.
+
 ## 0.1.0 (2026-11-25, built and installed; not published)
 
 The first numbered version: the bridge and page as used daily on Linux and macOS, plus the fixes from

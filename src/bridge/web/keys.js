@@ -264,7 +264,45 @@
     return Math.max(floor === undefined ? 0.35 : floor, Math.min(1, stageWidth / screenWidth));
   }
 
-  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  // ---- which terminal a message is about ----
+  // Terminals are named by `session` and `block` (compared as strings: ids may come as numbers).
+  function sameTerm(a, b) { return !!a && !!b && String(a.session) === String(b.session) && String(a.block) === String(b.block); }
+  // Whether a message that names a terminal (an `open` refusal, `closed`) is about `current`, the
+  // terminal the page shows. A late one for a terminal the page has left since must not clear the one
+  // it shows now (H3). A field the message leaves out is not compared; a message that names no
+  // terminal at all (an older bridge) is taken as about the current one, as before.
+  function aboutTerm(m, current) {
+    const has = v => v !== undefined && v !== null;
+    if (!m || (!has(m.session) && !has(m.block))) return true;
+    if (!current) return false;
+    if (has(m.session) && String(m.session) !== String(current.session)) return false;
+    if (has(m.block) && String(m.block) !== String(current.block)) return false;
+    return true;
+  }
+  // What the page does with a refused `open` (H3, H4): 'ignore' it (it is about another terminal),
+  // 'retry' it (the terminal is being restored after a (re)connect and the refusal may pass: Rex not
+  // answering, a snapshot late, or the rate), or 'clear' the view (the terminal is not there, or the
+  // person chose it just now and should see why at once).
+  function openRefusal(m, current, restoring) {
+    if (!aboutTerm(m, current)) return 'ignore';
+    if (restoring && current && m && (m.transient === true || m.rate === true)) return 'retry';
+    return 'clear';
+  }
+  // Wait before retry number `attempt` (0, 1, ...): 1 s, 2 s, 4 s, 8 s, then 10 s each.
+  const OPEN_RETRY_MAX_MS = 10000;
+  function openRetryDelay(attempt) {
+    const n = Math.max(0, Math.floor(Number(attempt) || 0));
+    return Math.min(OPEN_RETRY_MAX_MS, 1000 * 2 ** Math.min(n, 4));
+  }
+  // Queued uploads each name the terminal (`term`) that was shown when the files were chosen (H6).
+  // Before the next one is sent, those for another terminal are dropped, not sent to this one.
+  function partitionUploads(queue, current) {
+    const keep = [], drop = [];
+    for (const u of queue || []) (u && sameTerm(u.term, current) ? keep : drop).push(u);
+    return {keep, drop};
+  }
+
+  const api = {sameTerm, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

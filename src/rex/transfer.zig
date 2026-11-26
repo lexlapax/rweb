@@ -68,6 +68,7 @@ pub const Stream = struct {
         try dog.finish(io);
         c.owns_stream = true;
         c.max_message = wire.data_max_message;
+        c.write_timeout_ms = ws.write_timeout_ms; // pongs
         return .{ .gpa = gpa, .io = io, .conn = c };
     }
 

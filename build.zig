@@ -10,7 +10,8 @@ fn commitFile(b: *std.Build, given: ?[]const u8) std.Build.LazyPath {
         const wf = b.addWriteFiles();
         return wf.add("git_commit.zig", b.fmt("pub const commit = \"{f}\";\n", .{std.zig.fmtString(c)}));
     }
-    const stamp = b.addSystemCommand(&.{ "sh", "-c", "c=$(git rev-parse HEAD 2>/dev/null) && [ ${#c} -eq 40 ] || c=unknown; printf 'pub const commit = \"%s\";\\n' \"$c\"" });
+    // A working tree that differs from the commit (edits, new files) says so: `<commit>-dirty`.
+    const stamp = b.addSystemCommand(&.{ "sh", "-c", "c=$(git rev-parse HEAD 2>/dev/null) && [ ${#c} -eq 40 ] || c=unknown; [ \"$c\" != unknown ] && [ -n \"$(git status --porcelain 2>/dev/null)\" ] && c=$c-dirty; printf 'pub const commit = \"%s\";\\n' \"$c\"" });
     stamp.setCwd(b.path("."));
     stamp.has_side_effects = true;
     return stamp.captureStdOut(.{ .basename = "git_commit.zig" });

@@ -1082,8 +1082,10 @@ extern "c" fn umask(mask: c_uint) c_uint;
 
 /// The unix socket's folder, opened and checked: every folder above it passes `xfer.checkAncestor`
 /// (walked from `/` without following a link; missing ones are made 0700 inside their checked
-/// parent), and the folder itself, made 0700 if missing, must be ours and closed to others, or
-/// another user could replace the socket. The caller keeps the descriptor; `name` is the socket's
+/// parent), and the folder itself, made 0700 if missing, must be ours and closed to others
+/// (`xfer.checkPrivateDirFd`: by mode and ACL), or another user could replace the socket; every
+/// folder, this one included, must also have no ACL that lets another user write and be on a
+/// filesystem whose owners mean what they say. The caller keeps the descriptor; `name` is the socket's
 /// name in it (a slice of `socket_path`).
 fn openSocketDir(io: Io, socket_path: []const u8, problem: *xfer.Problem) !struct { fd: std.posix.fd_t, name: []const u8 } {
     problem.path = socket_path;
@@ -1099,10 +1101,10 @@ fn openSocketDir(io: Io, socket_path: []const u8, problem: *xfer.Problem) !struc
     problem.path = dir;
     const fd = try xfer.openFolderAt(io, parent, dir_name, true);
     errdefer (Io.Dir{ .handle = fd }).close(io);
-    const om = xfer.fdOwnerMode(fd) catch return error.SocketDirNotPrivate;
-    xfer.checkPrivateDir(om, @intCast(std.c.getuid())) catch |e| return switch (e) {
+    // Ours and closed to others, by mode and by ACL, on a filesystem whose owners mean what they say.
+    xfer.checkPrivateDirFd(io, fd) catch |e| return switch (e) {
         error.NotOwned => error.SocketDirNotOurs,
-        error.TooOpen => error.SocketDirNotPrivate,
+        error.TooOpen, error.StatFailed => error.SocketDirNotPrivate,
         else => e,
     };
     problem.path = socket_path;

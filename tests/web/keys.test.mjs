@@ -281,3 +281,54 @@ test('program-set clipboard text loses control characters but keeps tabs and lin
   // Letters just past C1 stay.
   assert.equal(K.cleanClip('é\u00a0ü ✓ \u{1f600}'), 'é\u00a0ü ✓ \u{1f600}');
 });
+
+test('a refused open or closed acts only on the terminal the page shows (H3)', () => {
+  const cur = {session: 's1', block: 'b2'};
+  assert.equal(K.sameTerm(cur, {session: 's1', block: 'b2'}), true);
+  assert.equal(K.sameTerm({session: 7, block: 9}, {session: '7', block: '9'}), true);
+  assert.equal(K.sameTerm(cur, null), false);
+  assert.equal(K.aboutTerm({t: 'closed', session: 's1', block: 'b2'}, cur), true);
+  assert.equal(K.aboutTerm({t: 'closed', block: 'b2'}, cur), true);                // block only: compared alone
+  assert.equal(K.aboutTerm({t: 'closed', block: 'b1'}, cur), false);               // late, for the one left
+  assert.equal(K.aboutTerm({t: 'closed', session: 's0', block: 'b2'}, cur), false);
+  assert.equal(K.aboutTerm({t: 'closed', block: 'b2'}, null), false);              // nothing shown
+  // An older bridge names no terminal: as before, taken as about the current one.
+  assert.equal(K.aboutTerm({t: 'error', for: 'open', msg: 'x'}, cur), true);
+  assert.equal(K.aboutTerm({t: 'error', for: 'open', session: null, block: null}, cur), true);
+  assert.equal(K.openRefusal({for: 'open', session: 's1', block: 'b1', msg: 'no such terminal'}, cur, false), 'ignore');
+  assert.equal(K.openRefusal({for: 'open', session: 's1', block: 'b1', transient: true}, cur, true), 'ignore');
+  assert.equal(K.openRefusal({for: 'open', session: 's1', block: 'b2', msg: 'no such terminal'}, cur, false), 'clear');
+  assert.equal(K.openRefusal({for: 'open', msg: 'old bridge'}, cur, false), 'clear');
+});
+
+test('a transient or rate refusal of a restored terminal is retried with backoff (H4)', () => {
+  const cur = {session: 's1', block: 'b2'}, me = {for: 'open', session: 's1', block: 'b2'};
+  assert.equal(K.openRefusal({...me, transient: true}, cur, true), 'retry');
+  assert.equal(K.openRefusal({...me, rate: true}, cur, true), 'retry');
+  assert.equal(K.openRefusal({for: 'open', rate: true}, cur, true), 'retry');       // an older bridge's rate refusal
+  // Not transient: the terminal is not there; stop and clear.
+  assert.equal(K.openRefusal(me, cur, true), 'clear');
+  assert.equal(K.openRefusal({...me, transient: false}, cur, true), 'clear');
+  assert.equal(K.openRefusal({...me, transient: 'true'}, cur, true), 'clear');
+  // Chosen by the person just now (not a restore): cleared at once, with the reason.
+  assert.equal(K.openRefusal({...me, transient: true}, cur, false), 'clear');
+  assert.equal(K.openRefusal({...me, rate: true}, cur, false), 'clear');
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 50].map(K.openRetryDelay), [1000, 2000, 4000, 8000, 10000, 10000, 10000]);
+  assert.equal(K.openRetryDelay(-1), 1000);
+  assert.equal(K.openRetryDelay(undefined), 1000);
+  assert.equal(K.OPEN_RETRY_MAX_MS, 10000);
+});
+
+test('queued uploads for a terminal the page has left are dropped, not sent to the new one (H6)', () => {
+  const a = {session: 's1', block: 'b1'}, b = {session: 's1', block: 'b2'};
+  const q = [{file: 'one', term: a}, {file: 'two', term: a}, {file: 'three', term: b}];
+  const onB = K.partitionUploads(q, b);
+  assert.deepEqual(onB.keep.map(u => u.file), ['three']);
+  assert.deepEqual(onB.drop.map(u => u.file), ['one', 'two']);
+  const onA = K.partitionUploads(q, a);
+  assert.deepEqual(onA.keep.map(u => u.file), ['one', 'two']);
+  assert.deepEqual(onA.drop.map(u => u.file), ['three']);
+  assert.deepEqual(K.partitionUploads(q, null).keep, []);
+  assert.deepEqual(K.partitionUploads([{file: 'x'}], a), {keep: [], drop: [{file: 'x'}]});   // no terminal: never sent
+  assert.deepEqual(K.partitionUploads([], a), {keep: [], drop: []});
+});
