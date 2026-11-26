@@ -43,6 +43,14 @@ pub const Options = struct {
     /// evicts the oldest one that has not sent a request head yet, so idle connections from a
     /// local process cannot keep the owner out (Serve sends its request at once).
     max_pending: u32 = 16,
+    /// A browser that has said nothing for this long (the page pings every 3 s, and answers our
+    /// pings) is gone: a connection through Serve can die without telling anyone.
+    silent_limit_ms: u32 = 20_000,
+    /// The longest one WebSocket frame may take to write: a browser that stops reading is dropped
+    /// instead of holding its writer (and the connection) for ever.
+    write_deadline_ms: u32 = 30_000,
+    /// A transfer that moves no bytes for this long is cut (and a partial upload removed).
+    transfer_idle_ms: u32 = 30_000,
 };
 
 const security_headers = [_]std.http.Header{
@@ -71,8 +79,35 @@ fn withSecurity(buf: []std.http.Header, extra: []const std.http.Header) []const 
 
 const no_store = [_]std.http.Header{.{ .name = "cache-control", .value = "no-store" }};
 
-/// Sustained message rate from one browser above which it is cut off.
+/// Messages one browser may send in any one-second window; one more and it is cut off.
 pub const max_messages_per_second: u32 = 200;
+
+fn nowMs(io: Io) i64 {
+    return Io.Clock.awake.now(io).toMilliseconds();
+}
+
+/// A request target is printable ASCII without spaces (RFC 9112): anything else is refused before
+/// it is routed, so no control byte can reach a header, a log or a redirect.
+pub fn targetIsClean(target: []const u8) bool {
+    for (target) |c| if (c <= 0x20 or c == 0x7f) return false;
+    return true;
+}
+
+/// Whether a viewer's connection is still alive: what the reader last heard, and when the frame
+/// being written started (0 while none is).
+const Liveness = struct {
+    last_rx: std.atomic.Value(i64),
+    write_since: std.atomic.Value(i64) = .init(0),
+};
+
+/// When a transfer last moved bytes.
+const Progress = struct {
+    last_ms: std.atomic.Value(i64),
+
+    fn touch(p: *Progress, io: Io) void {
+        p.last_ms.store(nowMs(io), .release);
+    }
+};
 
 pub const Server = struct {
     gpa: Allocator,
@@ -295,6 +330,13 @@ pub const Server = struct {
         var logged_path: []const u8 = "(unparsed)";
         defer log.info("request {s} {s} (head read at {d}, handled in {d} ms)", .{ @tagName(req.head.method), logged_path, t_head, std.Io.Clock.awake.now(s.io).toMilliseconds() - t_head });
 
+        // ---- a target with a control byte or a space: refused before anything looks at it ----
+        if (!targetIsClean(req.head.target)) {
+            logged_path = "(bad target)";
+            try req.respond("bad request\n", .{ .status = .bad_request, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+            return;
+        }
+
         // ---- the backend secret, if there is one: first, and answered with a bare 404 ----
         const outer: []const u8 = if (s.opts.backend_secret) |secret|
             (stripSecret(req.head.target, secret) orelse {
@@ -308,17 +350,16 @@ pub const Server = struct {
             req.head.target;
         // ---- the token's path prefix: `/s/<id>/...` is served like `/...` ----
         var under_prefix = false;
+        // `/s/<id>` with no slash: the page needs one, and gets a redirect once access allows it.
+        var bare_prefix = false;
         const rest: []const u8 = if (s.token_prefix) |pfx| if (stripPrefix(outer, pfx)) |inner| blk: {
             under_prefix = true;
-            if (inner.len == 0 or inner[0] == '?') { // `/s/<id>`: the page needs its trailing slash
-                logged_path = "(prefix)";
-                return s.redirect(&req, pfx, inner, false, false);
-            }
+            bare_prefix = inner.len == 0 or inner[0] == '?';
             break :blk inner;
         } else outer else outer;
         const path_part = rest[0 .. std.mem.indexOfScalar(u8, rest, '?') orelse rest.len];
         const path = if (path_part.len == 0) "/" else path_part;
-        logged_path = knownPath(path);
+        logged_path = if (bare_prefix) "(prefix)" else knownPath(path);
 
         // ---- access: before anything else ----
         var hdrs: [64]access.Header = undefined;
@@ -358,6 +399,7 @@ pub const Server = struct {
                 return;
             },
         }
+        if (bare_prefix) return s.redirect(&req, s.token_prefix.?, rest, false, false);
 
         const is_xfer = std.mem.startsWith(u8, path, "/xfer/");
         if (is_xfer and (req.head.method == .GET or req.head.method == .PUT)) {
@@ -374,13 +416,14 @@ pub const Server = struct {
             }
             var xtoken: [32]u8 = undefined;
             @memcpy(&xtoken, tail);
-            return if (req.head.method == .GET) s.serveDownload(&req, &xtoken) else s.serveUpload(&req, &xtoken);
+            return if (req.head.method == .GET) s.serveDownload(conn, &req, &xtoken) else s.serveUpload(conn, &req, &xtoken);
         }
         if (req.head.method != .GET) {
             try req.respond("method not allowed\n", .{ .status = .method_not_allowed, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
             return;
         }
-        const is_lab = std.mem.startsWith(u8, path, "/lab") or std.mem.startsWith(u8, path, "/api/lab");
+        // `/api/tree` is a diagnostic too: the page reads the tree over its socket.
+        const is_lab = std.mem.startsWith(u8, path, "/lab") or std.mem.startsWith(u8, path, "/api/lab") or std.mem.eql(u8, path, "/api/tree");
         if (is_lab and !s.opts.lab) {
             try req.respond("not found\n", .{ .status = .not_found, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
             return;
@@ -451,7 +494,7 @@ pub const Server = struct {
             var it = std.mem.tokenizeScalar(u8, query[1..], '&');
             while (it.next()) |kv| {
                 if (std.mem.eql(u8, kv, "token") or std.mem.startsWith(u8, kv, "token=")) continue;
-                lw.print("{s}{s}", .{ if (first) "?" else "&", kv }) catch {
+                writeQueryPart(&lw, if (first) "?" else "&", kv) catch {
                     lw.end = prefix.len + 1; // too long: drop the query
                     break;
                 };
@@ -499,8 +542,9 @@ pub const Server = struct {
     }
 
     /// A page asset: validated with an ETag, compressed when the browser accepts it, and kept
-    /// by the browser (private, never by a shared cache). The vendored files cannot change
-    /// without a new binary, so they are kept for a day; the page's own files are revalidated.
+    /// by the browser (private, never by a shared cache) but revalidated on every use, the
+    /// vendored files too, so a new binary's files are used at once. A response that sets the
+    /// token cookie is never stored.
     fn serveAsset(s: *Server, req: *std.http.Server.Request, idx: usize, query_token: ?[]const u8, headers: []const access.Header) !void {
         const a = assets.all[idx];
         const is_root = std.mem.eql(u8, a.path, "/");
@@ -519,7 +563,7 @@ pub const Server = struct {
             if (std.ascii.eqlIgnoreCase(h.name, "if-none-match")) if_none_match = h.value;
             if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) accept_encoding = h.value;
         }
-        const cache_control = if (std.mem.startsWith(u8, a.path, "/vendor/")) "private, max-age=86400" else "private, no-cache";
+        const cache_control = if (cookie != null) "no-store" else "private, no-cache";
 
         var hb: [16]std.http.Header = undefined;
         var extra: [8]std.http.Header = undefined;
@@ -554,12 +598,29 @@ pub const Server = struct {
         try req.respond(text, .{ .status = status, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
     }
 
-    /// `GET /xfer/<token>`: stream the file Rex opened for the token.
-    fn serveDownload(s: *Server, req: *std.http.Server.Request, xtoken: []const u8) !void {
-        var entry = s.hub.xfers.take(xtoken, .download) orelse return refuseXfer(req, .not_found, "not found\n");
-        defer entry.deinit(s.gpa);
+    /// Cuts a transfer that has moved no bytes for `transfer_idle_ms`: shuts the browser's
+    /// connection and, for a download, Rex's stream, so whichever side is blocked returns.
+    fn progressWatchdog(s: *Server, p: *Progress, browser_conn: Io.net.Stream, rex_stream: ?Io.net.Stream) void {
+        const limit: i64 = s.opts.transfer_idle_ms;
+        const step: i64 = @max(10, @min(1000, s.opts.transfer_idle_ms / 4));
+        while (true) {
+            s.io.sleep(.fromMilliseconds(step), .awake) catch return;
+            if (nowMs(s.io) - p.last_ms.load(.acquire) > limit) {
+                log.info("transfer stalled: no bytes for {d} ms; cut", .{limit});
+                browser_conn.shutdown(s.io, .both) catch {};
+                if (rex_stream) |r| r.shutdown(s.io, .both) catch {};
+                return;
+            }
+        }
+    }
+
+    /// `GET /xfer/<token>`: stream the file Rex opened for the token. A transfer slot is taken
+    /// before the token, so a busy bridge does not use the token up.
+    fn serveDownload(s: *Server, conn: Io.net.Stream, req: *std.http.Server.Request, xtoken: []const u8) !void {
         if (!s.hub.xfers.acquire()) return refuseXfer(req, .too_many_requests, "too many transfers\n");
         defer s.hub.xfers.release();
+        var entry = s.hub.xfers.take(xtoken, .download) orelse return refuseXfer(req, .not_found, "not found\n");
+        defer entry.deinit(s.gpa);
 
         const max = s.hub.cfg.transfer.max_bytes;
         var st = rex.transfer.Stream.open(s.gpa, s.io, s.hub.ctl.opts.socket_path, entry.ticket) catch |e| {
@@ -567,12 +628,15 @@ pub const Server = struct {
             return refuseXfer(req, .bad_gateway, "Rex did not give the file\n");
         };
         defer st.deinit();
+        var progress: Progress = .{ .last_ms = .init(nowMs(s.io)) };
+        var dog = s.io.concurrent(progressWatchdog, .{ s, &progress, conn, st.conn.stream }) catch return refuseXfer(req, .service_unavailable, "busy\n");
+        defer dog.cancel(s.io);
 
         var nb: [128]u8 = undefined;
         const shown = xfer.safeName(&nb, entry.name);
         log.info("download start: {s} ({d} bytes announced)", .{ shown, entry.size });
 
-        var cd_buf: [400]u8 = undefined;
+        var cd_buf: [512]u8 = undefined;
         var hb: [16]std.http.Header = undefined;
         const extra = [_]std.http.Header{
             .{ .name = "content-type", .value = "application/octet-stream" },
@@ -595,26 +659,30 @@ pub const Server = struct {
                 return error.TransferTooLarge;
             }
             try body.writer.writeAll(chunk);
+            progress.touch(s.io);
         }
         try body.end();
         log.info("download done: {s} {d} bytes", .{ shown, total });
     }
 
     /// `PUT /xfer/<token>`: write the body into the upload directory under a safe, new name, then
-    /// paste its quoted path into the terminal.
-    fn serveUpload(s: *Server, req: *std.http.Server.Request, xtoken: []const u8) !void {
-        var entry = s.hub.xfers.take(xtoken, .upload) orelse return refuseXfer(req, .not_found, "not found\n");
-        defer entry.deinit(s.gpa);
+    /// paste its quoted path into the terminal. The file is created relative to the folder opened
+    /// at startup (`upload_dir_handle`), never by path.
+    fn serveUpload(s: *Server, conn: Io.net.Stream, req: *std.http.Server.Request, xtoken: []const u8) !void {
         const dir_path = s.hub.cfg.transfer.upload_dir orelse return refuseXfer(req, .not_found, "not found\n");
+        const dir = s.hub.cfg.transfer.upload_dir_handle orelse return refuseXfer(req, .not_found, "not found\n");
         if (!s.hub.xfers.acquire()) return refuseXfer(req, .too_many_requests, "too many transfers\n");
         defer s.hub.xfers.release();
+        var entry = s.hub.xfers.take(xtoken, .upload) orelse return refuseXfer(req, .not_found, "not found\n");
+        defer entry.deinit(s.gpa);
+        // The page that asked must still be allowed to write to that terminal (it may have turned
+        // read-only, moved to another terminal, or gone): checked now, and again before the path is
+        // pasted.
+        if (!s.hub.mayUpload(entry.viewer_id, entry.session_id, entry.block_id)) return refuseXfer(req, .forbidden, "this page can no longer write to that terminal\n");
 
         const len = req.head.content_length orelse return refuseXfer(req, .length_required, "length required\n");
         if (len != entry.size) return refuseXfer(req, .bad_request, "the size is not what was announced\n");
         if (len > s.hub.cfg.transfer.max_bytes) return refuseXfer(req, .payload_too_large, "too large\n");
-
-        var dir = Io.Dir.cwd().openDir(s.io, dir_path, .{}) catch return refuseXfer(req, .internal_server_error, "the upload folder cannot be opened\n");
-        defer dir.close(s.io);
 
         // A name that is safe, and that does not replace anything: "a.txt", "a (1).txt", ...
         var nb: [128]u8 = undefined;
@@ -645,7 +713,10 @@ pub const Server = struct {
             if (!keep) dir.deleteFile(s.io, final) catch {};
         }
 
-        // The body, exactly `len` bytes.
+        // The body, exactly `len` bytes, each read within `transfer_idle_ms` of the last.
+        var progress: Progress = .{ .last_ms = .init(nowMs(s.io)) };
+        var dog = s.io.concurrent(progressWatchdog, .{ s, &progress, conn, null }) catch return refuseXfer(req, .service_unavailable, "busy\n");
+        defer dog.cancel(s.io);
         var body_buf: [16 * 1024]u8 = undefined;
         const reader = try req.readerExpectContinue(&body_buf);
         var chunk: [64 * 1024]u8 = undefined;
@@ -656,7 +727,9 @@ pub const Server = struct {
             if (n == 0) return error.UploadFailed; // the browser stopped early
             f.writeStreamingAll(s.io, chunk[0..n]) catch return error.UploadFailed;
             left -= n;
+            progress.touch(s.io);
         }
+        if (!s.hub.mayUpload(entry.viewer_id, entry.session_id, entry.block_id)) return refuseXfer(req, .forbidden, "this page can no longer write to that terminal\n");
         keep = true;
         log.info("upload done: {s} {d} bytes", .{ final, len });
 
@@ -708,37 +781,42 @@ pub const Server = struct {
         }
     }
 
-    /// One browser: a writer task drains the viewer's queue; this task reads commands.
+    /// One browser: a writer task drains the viewer's queue; this task reads commands; a watchdog
+    /// drops the connection when the browser goes silent or stops reading.
     fn viewerSession(s: *Server, conn: Io.net.Stream, sock: *std.http.Server.WebSocket) !void {
         const gpa = s.gpa;
         const c = try rex.ws.Conn.fromHttp(gpa, s.io, conn, sock.input, sock.output, protocol.max_message_bytes);
         defer c.deinit(gpa);
         const v = try s.hub.addViewer();
-        var last_rx: std.atomic.Value(i64) = .init(std.Io.Clock.awake.now(s.io).toMilliseconds());
-        var writer = try s.io.concurrent(writerLoop, .{ s, c, v, &last_rx });
+        errdefer {
+            s.hub.closeViewer(v);
+            s.hub.removeViewer(v);
+        }
+        var live: Liveness = .{ .last_rx = .init(nowMs(s.io)) };
+        var watchdog = try s.io.concurrent(viewerWatchdog, .{ s, c, &live });
+        defer watchdog.cancel(s.io);
+        var writer = try s.io.concurrent(writerLoop, .{ s, c, v, &live });
 
         var arena_state = std.heap.ArenaAllocator.init(gpa);
         defer arena_state.deinit();
         // A browser sends a few messages a second at most while someone types. A page stuck in a
-        // loop would otherwise fill the connection with traffic, so past `max_messages_per_second`
-        // for two seconds in a row the socket is closed.
-        var window_start: i64 = std.Io.Clock.awake.now(s.io).toMilliseconds();
+        // loop would otherwise fill the connection with traffic, so the message past
+        // `max_messages_per_second` in any one-second window closes the socket.
+        var window_start: i64 = nowMs(s.io);
         var window_count: u32 = 0;
-        var hot_windows: u32 = 0;
         while (true) {
             const m = c.readMessage(gpa) catch break;
             defer gpa.free(m.data);
-            last_rx.store(std.Io.Clock.awake.now(s.io).toMilliseconds(), .release);
-            window_count += 1;
-            const now = std.Io.Clock.awake.now(s.io).toMilliseconds();
+            const now = nowMs(s.io);
+            live.last_rx.store(now, .release);
             if (now - window_start >= 1000) {
-                hot_windows = if (window_count > max_messages_per_second) hot_windows + 1 else 0;
                 window_start = now;
                 window_count = 0;
-                if (hot_windows >= 2) {
-                    log.warn("closing a browser that sent more than {d} messages a second", .{max_messages_per_second});
-                    break;
-                }
+            }
+            window_count += 1;
+            if (window_count > max_messages_per_second) {
+                log.warn("closing a browser that sent more than {d} messages in a second", .{max_messages_per_second});
+                break;
             }
             switch (m.opcode) {
                 .close => break,
@@ -758,35 +836,61 @@ pub const Server = struct {
         }
         s.hub.closeViewer(v);
         writer.cancel(s.io);
-        c.writeFrame(.close, &.{ 0x03, 0xe8 }) catch {};
+        // The goodbye is written under the same deadline as any frame (the watchdog still runs).
+        s.writeTimed(c, &live, .close, &.{ 0x03, 0xe8 }) catch {};
         s.hub.removeViewer(v);
     }
 
-    /// A browser that has said nothing for this long (the page pings every 3 s, and answers
-    /// our pings) is gone: a connection through Serve can die without telling anyone.
-    const silent_limit_ms: i64 = 20_000;
+    /// Write one frame with the watchdog watching its deadline.
+    fn writeTimed(s: *Server, c: *rex.ws.Conn, live: *Liveness, op: rex.ws.Opcode, data: []const u8) !void {
+        live.write_since.store(@max(1, nowMs(s.io)), .release);
+        defer live.write_since.store(0, .release);
+        try c.writeFrame(op, data);
+    }
 
-    fn writerLoop(s: *Server, c: *rex.ws.Conn, v: *hub_mod.Viewer, last_rx: *std.atomic.Value(i64)) void {
-        var idle: u32 = 0;
+    /// Shut a viewer's connection if its browser has gone silent or a frame has taken longer than
+    /// the write deadline (the browser stopped reading); true if it did. Shutting it wakes the
+    /// reader and the writer, which then clean up.
+    fn dropIfDead(s: *Server, c: *rex.ws.Conn, live: *Liveness) bool {
+        const now = nowMs(s.io);
+        const quiet = now - live.last_rx.load(.acquire);
+        if (quiet > s.opts.silent_limit_ms) {
+            log.info("dropping a browser that has been silent for {d} s", .{@divTrunc(quiet, 1000)});
+            c.stream.shutdown(s.io, .both) catch {};
+            return true;
+        }
+        const since = live.write_since.load(.acquire);
+        if (since != 0 and now - since > s.opts.write_deadline_ms) {
+            log.info("dropping a browser that has not read a frame in {d} ms", .{now - since});
+            c.stream.shutdown(s.io, .both) catch {};
+            return true;
+        }
+        return false;
+    }
+
+    /// Checks a viewer's liveness while its writer may be blocked in a write.
+    fn viewerWatchdog(s: *Server, c: *rex.ws.Conn, live: *Liveness) void {
+        const step: i64 = @max(10, @min(1000, @min(s.opts.silent_limit_ms, s.opts.write_deadline_ms) / 4));
+        while (true) {
+            s.io.sleep(.fromMilliseconds(step), .awake) catch return;
+            if (s.dropIfDead(c, live)) return;
+        }
+    }
+
+    fn writerLoop(s: *Server, c: *rex.ws.Conn, v: *hub_mod.Viewer, live: *Liveness) void {
         defer if (s.opts.debug_input) log.info("writer task ended", .{});
         while (true) {
+            // On every turn, busy or not: a queue that never empties must not hide a silent browser.
+            if (s.dropIfDead(c, live)) return;
             const f = (v.next(3000) catch return) orelse {
                 if (v.isClosed()) return;
                 // Quiet for a moment: a ping every ~3 s keeps a phone's path through Serve warm.
-                idle += 1;
-                c.writeFrame(.ping, "") catch return;
-                const quiet = std.Io.Clock.awake.now(s.io).toMilliseconds() - last_rx.load(.acquire);
-                if (quiet > silent_limit_ms) {
-                    log.info("dropping a browser that has been silent for {d} s", .{@divTrunc(quiet, 1000)});
-                    c.stream.shutdown(s.io, .both) catch {}; // wakes the reader, which cleans up
-                    return;
-                }
+                s.writeTimed(c, live, .ping, "") catch return;
                 continue;
             };
             defer f.deinit(s.gpa);
-            idle = 0;
             const t0 = std.Io.Clock.awake.now(s.io).toMilliseconds();
-            c.writeFrame(if (f.binary) .binary else .text, f.data) catch |e| {
+            s.writeTimed(c, live, if (f.binary) .binary else .text, f.data) catch |e| {
                 if (s.opts.debug_input) log.info("send failed after {d} ms: {t}", .{ std.Io.Clock.awake.now(s.io).toMilliseconds() - t0, e });
                 return;
             };
@@ -797,6 +901,16 @@ pub const Server = struct {
         }
     }
 };
+
+/// `sep` then `part` (one `key=value` of a query) into a Location header: bytes that are not
+/// plainly safe in a URL are percent-encoded, so nothing a client sent reaches the header raw.
+fn writeQueryPart(w: *Io.Writer, sep: []const u8, part: []const u8) Io.Writer.Error!void {
+    try w.writeAll(sep);
+    for (part) |c| {
+        const safe = std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "-._~!$'()*+,;=:@/?%", c) != null;
+        if (safe) try w.writeByte(c) else try w.print("%{X:0>2}", .{c});
+    }
+}
 
 /// What follows the secret first segment of `target` (`/<secret>` then nothing, `/` or `?`),
 /// or null when the target does not start with the secret. The comparison takes the same time
@@ -865,14 +979,16 @@ fn clearStaleSocket(io: Io, path: []const u8) !void {
 
 extern "c" fn umask(mask: c_uint) c_uint;
 
-/// Create the socket's directory 0700 if it is missing; refuse one that others can enter.
+/// Create the socket's directory 0700 if it is missing; refuse one that is not ours or that others
+/// can enter.
 fn prepareSocketDir(io: Io, socket_path: []const u8) !void {
     const dir = std.fs.path.dirname(socket_path) orelse return error.BadSocketPath;
     _ = Io.Dir.cwd().createDirPathStatus(io, dir, @enumFromInt(0o700)) catch {}; // new directories are 0700
     var d = try Io.Dir.cwd().openDir(io, dir, .{});
     defer d.close(io);
-    const st = try d.stat(io);
-    if (@intFromEnum(st.permissions) & 0o077 != 0) return error.SocketDirNotPrivate;
+    const om = xfer.fdOwnerMode(d.handle) catch return error.SocketDirNotPrivate;
+    if (om.uid != std.c.getuid()) return error.SocketDirNotOurs; // another user could replace the socket
+    if (om.mode & 0o077 != 0) return error.SocketDirNotPrivate;
 }
 
 /// The uid of the process on the other end of a unix socket, if the OS will say.
@@ -914,7 +1030,15 @@ const Rig = struct {
     session_id: []const u8,
     block_id: []const u8,
 
-    const Extra = struct { backend_secret: ?[]const u8 = null, head_timeout_ms: u32 = 10_000, max_pending: u32 = 16, lab: bool = true };
+    const Extra = struct {
+        backend_secret: ?[]const u8 = null,
+        head_timeout_ms: u32 = 10_000,
+        max_pending: u32 = 16,
+        lab: bool = true,
+        silent_limit_ms: u32 = 20_000,
+        write_deadline_ms: u32 = 30_000,
+        transfer_idle_ms: u32 = 30_000,
+    };
 
     fn init(hub_cfg: hub_mod.Config, acc: access.Config, listen: Listen) !Rig {
         return initExtra(hub_cfg, acc, listen, .{});
@@ -929,7 +1053,17 @@ const Rig = struct {
         errdefer ctl.close();
         const h = try Hub.open(a, testing.io, ctl, hub_cfg);
         errdefer h.close();
-        const srv = try Server.start(a, testing.io, h, .{ .listen = listen, .access = acc, .backend_secret = extra.backend_secret, .head_timeout_ms = extra.head_timeout_ms, .max_pending = extra.max_pending, .lab = extra.lab });
+        const srv = try Server.start(a, testing.io, h, .{
+            .listen = listen,
+            .access = acc,
+            .backend_secret = extra.backend_secret,
+            .head_timeout_ms = extra.head_timeout_ms,
+            .max_pending = extra.max_pending,
+            .lab = extra.lab,
+            .silent_limit_ms = extra.silent_limit_ms,
+            .write_deadline_ms = extra.write_deadline_ms,
+            .transfer_idle_ms = extra.transfer_idle_ms,
+        });
         return .{ .f = f, .ctl = ctl, .hub = h, .srv = srv, .session_id = made.session_id, .block_id = made.block_id };
     }
 
@@ -1041,7 +1175,8 @@ test "server: assets are compressed, validated and cached, so a phone loads them
     defer freeHttp(z);
     try testing.expectEqualStrings("gzip", headerValue(z.head, "content-encoding").?);
     try testing.expect(z.body.len < original / 2);
-    try testing.expectEqualStrings("private, max-age=86400", headerValue(z.head, "cache-control").?);
+    // Kept, but revalidated: a new binary's vendored files are used at once.
+    try testing.expectEqualStrings("private, no-cache", headerValue(z.head, "cache-control").?);
     const tag = headerValue(z.head, "etag").?;
     try testing.expect(tag.len == 34 and tag[0] == '"');
 
@@ -1057,11 +1192,11 @@ test "server: assets are compressed, validated and cached, so a phone loads them
     defer freeHttp(other);
     try testing.expectEqual(@as(u16, 200), other.status);
 
-    // The page itself is revalidated, and a token page is never a 304 (it sets the cookie).
+    // A token page sets the cookie: never stored, and never a 304.
     var ppb: [128]u8 = undefined;
     const page = try get(rig, pagePath(&ppb), "");
     defer freeHttp(page);
-    try testing.expectEqualStrings("private, no-cache", headerValue(page.head, "cache-control").?);
+    try testing.expectEqualStrings("no-store", headerValue(page.head, "cache-control").?);
     try testing.expect(headerValue(page.head, "set-cookie") != null);
     const page_tag = headerValue(page.head, "etag").?;
     const hdr2 = try std.fmt.allocPrint(testing.allocator, "If-None-Match: {s}\r\n", .{page_tag});
@@ -1108,16 +1243,27 @@ test "server: the token cookie is scoped to the token's own path, never to the w
     defer freeHttp(bad);
     try testing.expectEqual(@as(u16, 403), bad.status);
 
-    // `/s/<id>` without its slash gets one (relative paths need it); no cookie is set there.
-    const ns = try get(rig, pfx, "");
+    // `/s/<id>` without its slash gets one (relative paths need it), but only once access allows
+    // the request; no cookie is set there.
+    var hb: [96]u8 = undefined;
+    const ck = try std.fmt.bufPrint(&hb, "Cookie: rweb-token={s}\r\n", .{token});
+    const anon = try get(rig, pfx, "");
+    defer freeHttp(anon);
+    try testing.expectEqual(@as(u16, 403), anon.status);
+    try testing.expect(headerValue(anon.head, "location") == null);
+    const ns = try get(rig, pfx, ck);
     defer freeHttp(ns);
     try testing.expectEqual(@as(u16, 302), ns.status);
     try testing.expectEqualStrings(try std.fmt.bufPrint(&lb, "{s}/", .{pfx}), headerValue(ns.head, "location").?);
     try testing.expect(headerValue(ns.head, "set-cookie") == null);
+    // What it copies from the query is percent-encoded.
+    var qb: [96]u8 = undefined;
+    const nq = try get(rig, try std.fmt.bufPrint(&qb, "{s}?a=\xc3\xa9\"<&b=1", .{pfx}), ck);
+    defer freeHttp(nq);
+    try testing.expectEqual(@as(u16, 302), nq.status);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&lb, "{s}/?a=%C3%A9%22%3C&b=1", .{pfx}), headerValue(nq.head, "location").?);
 
     // Under the prefix the cookie authenticates the page, its files, the tree and the socket.
-    var hb: [96]u8 = undefined;
-    const ck = try std.fmt.bufPrint(&hb, "Cookie: rweb-token={s}\r\n", .{token});
     for ([_][]const u8{ "/", "/app.js", "/vendor/wterm.js", "/api/tree" }) |p| {
         var ub: [96]u8 = undefined;
         const page = try get(rig, try std.fmt.bufPrint(&ub, "{s}{s}", .{ pfx, p }), ck);
@@ -1402,6 +1548,8 @@ test "server: refuses to start without any access rule, and in a directory other
         try testing.expectEqual(@as(c_int, 0), std.c.chmod(dz, 0o755));
     }
     try testing.expectError(error.SocketDirNotPrivate, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = owner_cfg }));
+    // A folder that is not ours (here root's /tmp) is refused too: its owner could replace the socket.
+    if (std.c.getuid() != 0) try testing.expectError(error.SocketDirNotOurs, Server.start(a, testing.io, h, .{ .listen = .{ .unix = "/tmp/rweb-test-not-ours.sock" }, .access = owner_cfg }));
 }
 
 test "live: a browser socket drives a throwaway terminal on a real Rex (needs REX_SOCKET)" {
@@ -1522,7 +1670,7 @@ test "server: stripSecret" {
 test "server: the diagnostic pages are off unless asked for, and never log a query" {
     const rig = try Rig.initExtra(.{}, token_cfg, .{ .tcp_loopback = 0 }, .{ .lab = false });
     defer rig.deinit();
-    for ([_][]const u8{ "/lab", "/lab.js", "/labsel", "/labsel.js", "/api/lab/hb", "/api/lab/result" }) |p| {
+    for ([_][]const u8{ "/lab", "/lab.js", "/labsel", "/labsel.js", "/api/lab/hb", "/api/lab/result", "/api/tree" }) |p| {
         const path = try std.fmt.allocPrint(testing.allocator, "{s}?token={s}", .{ p, token });
         defer testing.allocator.free(path);
         const h = try get(rig, path, "");
@@ -1650,10 +1798,28 @@ fn tmpDir(buf: []u8) ![]const u8 {
     return dir;
 }
 
+/// A new upload folder under /tmp, made and opened as the bridge does at startup. The caller closes
+/// `dir` and removes `path`.
+const UploadDir = struct { path: []const u8, dir: Io.Dir };
+
+fn uploadDir(buf: []u8) !UploadDir {
+    var rnd: [4]u8 = undefined;
+    testing.io.random(&rnd);
+    const path = try std.fmt.bufPrint(buf, "/tmp/rweb-test-up-{x}", .{rnd});
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: xfer.Problem = .{};
+    return .{ .path = path, .dir = try xfer.openUploadDir(arena.allocator(), testing.io, path, &problem) };
+}
+
 const Opened = struct { rig: Rig, c: *rex.ws.Conn };
 
 fn openRig(cfg: hub_mod.Config) !Opened {
-    const rig = try Rig.init(cfg, token_cfg, .{ .tcp_loopback = 0 });
+    return openRigExtra(cfg, .{});
+}
+
+fn openRigExtra(cfg: hub_mod.Config, extra: Rig.Extra) !Opened {
+    const rig = try Rig.initExtra(cfg, token_cfg, .{ .tcp_loopback = 0 }, extra);
     errdefer rig.deinit();
     const c = try browser(rig);
     errdefer c.deinit(testing.allocator);
@@ -1812,9 +1978,11 @@ test "server: a directory listing for the picker" {
 
 test "server: an upload lands only in the upload folder, under a safe new name, and its path is pasted" {
     var db: [64]u8 = undefined;
-    const dir = try tmpDir(&db);
+    const up = try uploadDir(&db);
+    const dir = up.path;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
-    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .max_bytes = 1 << 20 } });
+    defer up.dir.close(testing.io);
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
     const content = "hello from a phone\nsecond line\n";
@@ -1867,9 +2035,11 @@ test "server: an upload lands only in the upload folder, under a safe new name, 
 
 test "server: an upload is refused without the page's Origin, with the wrong size, twice, or too big" {
     var db: [64]u8 = undefined;
-    const dir = try tmpDir(&db);
+    const up = try uploadDir(&db);
+    const dir = up.path;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
-    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .max_bytes = 1000 } });
+    defer up.dir.close(testing.io);
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_handle = up.dir, .max_bytes = 1000 } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
 
@@ -1910,4 +2080,252 @@ test "server: an upload is refused without the page's Origin, with the wrong siz
     const swap = try put(o.rig, durl, "Origin: http://localhost\r\n", "x");
     defer freeHttp(swap);
     try testing.expectEqual(@as(u16, 404), swap.status);
+}
+
+// ---- the fixes from the 2026-11-25 round-2 review ----
+
+test "server: a target with a control byte or a space is refused before routing" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    var pb: [35]u8 = undefined;
+    const pfx = tokenPrefix(&pb, token);
+    for ([_][]const u8{ "\x01", "\x7f", "\t", "\r", "\x00" }) |bad| {
+        // Bare `/s/<id>` (once a redirect that copied the query) and a plain path.
+        for ([_][]const u8{ pfx, "/" }) |base| {
+            const req = try std.fmt.allocPrint(testing.allocator, "GET {s}?a={s}x&token={s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", .{ base, bad, token });
+            defer testing.allocator.free(req);
+            if (httpRequest(try rig.tcp(), req)) |h| {
+                defer freeHttp(h);
+                try testing.expectEqual(@as(u16, 400), h.status);
+                try testing.expect(headerValue(h.head, "location") == null);
+            } else |_| {} // the HTTP parser may refuse it first: just as good
+        }
+    }
+    try testing.expect(targetIsClean("/s/ab/?x=%0d%0a"));
+    try testing.expect(!targetIsClean("/a b") and !targetIsClean("/a\x1b") and !targetIsClean("/\x7f"));
+    try testing.expect(targetIsClean("/\xc3\xa9")); // not ASCII, but not a control byte: encoded where copied
+}
+
+test "server: an upload token stops working once its page turns read-only or leaves the terminal" {
+    var db: [64]u8 = undefined;
+    const up = try uploadDir(&db);
+    const dir = up.path;
+    defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    defer up.dir.close(testing.io);
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+
+    // Read-only after asking: the token is gone.
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":3}}", .{});
+    const m1 = try textWith(o.c, "\"kind\":\"upload\"");
+    defer testing.allocator.free(m1);
+    const url1 = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(m1)});
+    defer testing.allocator.free(url1);
+    try sendJson(o.c, "{{\"t\":\"observe\",\"on\":true}}", .{});
+    testing.allocator.free(try textWith(o.c, "\"observe\":true"));
+    const r1 = try put(o.rig, url1, "Origin: http://localhost\r\n", "one");
+    defer freeHttp(r1);
+    try testing.expectEqual(@as(u16, 404), r1.status);
+
+    // Left the terminal after asking: refused, and no file is made.
+    try sendJson(o.c, "{{\"t\":\"observe\",\"on\":false}}", .{});
+    testing.allocator.free(try textWith(o.c, "\"observe\":false"));
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"b.txt\",\"size\":3}}", .{});
+    const m2 = try textWith(o.c, "\"kind\":\"upload\"");
+    defer testing.allocator.free(m2);
+    const url2 = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(m2)});
+    defer testing.allocator.free(url2);
+    try sendJson(o.c, "{{\"t\":\"close_view\"}}", .{});
+    try sendJson(o.c, "{{\"t\":\"ping\"}}", .{});
+    testing.allocator.free(try textWith(o.c, "\"pong\""));
+    const r2 = try put(o.rig, url2, "Origin: http://localhost\r\n", "two");
+    defer freeHttp(r2);
+    try testing.expectEqual(@as(u16, 403), r2.status);
+    for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
+        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, name });
+        defer testing.allocator.free(path);
+        try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, path, .{}));
+    }
+}
+
+test "server: an upload goes into the folder opened at startup, whatever replaces its path" {
+    var db: [64]u8 = undefined;
+    const up = try uploadDir(&db);
+    defer up.dir.close(testing.io);
+    const a = testing.allocator;
+    const moved = try std.fmt.allocPrint(a, "{s}.moved", .{up.path});
+    defer a.free(moved);
+    const elsewhere = try std.fmt.allocPrint(a, "{s}.elsewhere", .{up.path});
+    defer a.free(elsewhere);
+    defer for ([_][]const u8{ up.path, moved, elsewhere }) |p| Io.Dir.cwd().deleteTree(testing.io, p) catch {};
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
+    defer o.rig.deinit();
+    defer o.c.deinit(a);
+
+    // The folder is renamed away and a new one, then a link to another, put at its path.
+    try Io.Dir.renameAbsolute(up.path, moved, testing.io);
+    try Io.Dir.cwd().createDirPath(testing.io, up.path);
+    try Io.Dir.cwd().createDirPath(testing.io, elsewhere);
+    for ([_][]const u8{ "first.txt", "second.txt" }, 0..) |name, round| {
+        if (round == 1) {
+            try Io.Dir.cwd().deleteTree(testing.io, up.path);
+            try Io.Dir.cwd().symLink(testing.io, elsewhere, up.path, .{});
+        }
+        try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"{s}\",\"size\":2}}", .{name});
+        const msg = try textWith(o.c, "\"kind\":\"upload\"");
+        defer a.free(msg);
+        const url = try std.fmt.allocPrint(a, "/xfer/{s}", .{try tokenIn(msg)});
+        defer a.free(url);
+        const r = try put(o.rig, url, "Origin: http://localhost\r\n", "hi");
+        defer freeHttp(r);
+        try testing.expectEqual(@as(u16, 200), r.status);
+        // In the original folder, under its new name; not in what took its place.
+        const kept = try std.fmt.allocPrint(a, "{s}/{s}", .{ moved, name });
+        defer a.free(kept);
+        const got = try Io.Dir.cwd().readFileAlloc(testing.io, kept, a, .limited(64));
+        defer a.free(got);
+        try testing.expectEqualStrings("hi", got);
+        for ([_][]const u8{ up.path, elsewhere }) |d| {
+            const ghost = try std.fmt.allocPrint(a, "{s}/{s}", .{ d, name });
+            defer a.free(ghost);
+            try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, ghost, .{}));
+        }
+    }
+}
+
+test "server: an upload that stops sending is cut, and its partial file removed" {
+    var db: [64]u8 = undefined;
+    const up = try uploadDir(&db);
+    defer Io.Dir.cwd().deleteTree(testing.io, up.path) catch {};
+    defer up.dir.close(testing.io);
+    const a = testing.allocator;
+    const o = try openRigExtra(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } }, .{ .transfer_idle_ms = 300 });
+    defer o.rig.deinit();
+    defer o.c.deinit(a);
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"stall.bin\",\"size\":100}}", .{});
+    const msg = try textWith(o.c, "\"kind\":\"upload\"");
+    defer a.free(msg);
+    // Ten of the hundred bytes announced, then nothing.
+    const req = try std.fmt.allocPrint(a, "PUT /xfer/{s}?token={s} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: 100\r\n\r\n0123456789", .{ try tokenIn(msg), token });
+    defer a.free(req);
+    const stream = try o.rig.tcp();
+    defer stream.close(testing.io);
+    var wb: [512]u8 = undefined;
+    var w = stream.writer(testing.io, &wb);
+    try w.interface.writeAll(req);
+    try w.interface.flush();
+    const t0 = nowMs(testing.io);
+    var rb: [256]u8 = undefined;
+    var r = stream.reader(testing.io, &rb);
+    while (true) _ = r.interface.takeByte() catch break; // until the bridge cuts it
+    try testing.expect(nowMs(testing.io) - t0 < 5_000);
+    // The partial file goes as the handler unwinds.
+    const partial = try std.fmt.allocPrint(a, "{s}/stall.bin", .{up.path});
+    defer a.free(partial);
+    var gone = false;
+    for (0..100) |_| {
+        if (Io.Dir.cwd().statFile(testing.io, partial, .{})) |_| {} else |_| {
+            gone = true;
+            break;
+        }
+        try testing.io.sleep(.fromMilliseconds(20), .awake);
+    }
+    try testing.expect(gone);
+}
+
+/// Wait up to `ms` for the server to have no connections left.
+fn waitNoConnections(rig: Rig, ms: i64) !void {
+    const t0 = nowMs(testing.io);
+    while (rig.srv.active.load(.acquire) != 0) {
+        if (nowMs(testing.io) - t0 > ms) return error.StillConnected;
+        try testing.io.sleep(.fromMilliseconds(20), .awake);
+    }
+}
+
+test "server: a silent browser is dropped even while its terminal keeps the queue busy" {
+    const rig = try Rig.initExtra(.{}, token_cfg, .{ .tcp_loopback = 0 }, .{ .silent_limit_ms = 800 });
+    defer rig.deinit();
+    const c = try browser(rig);
+    defer c.deinit(testing.allocator);
+    try waitText(c, "\"t\":\"tree\"");
+    try sendJson(c, "{{\"t\":\"open\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ rig.session_id, rig.block_id });
+    try waitText(c, "\"t\":\"opened\"");
+    // From now on the browser says nothing, while output arrives every 50 ms.
+    const t0 = nowMs(testing.io);
+    while (rig.srv.active.load(.acquire) != 0 and nowMs(testing.io) - t0 < 6_000) {
+        try rig.f.feed(rig.block_id, "more output\r\n");
+        try testing.io.sleep(.fromMilliseconds(50), .awake);
+    }
+    try waitNoConnections(rig, 1_000);
+}
+
+test "server: a browser that stops reading is dropped at the write deadline" {
+    const rig = try Rig.initExtra(.{}, token_cfg, .{ .tcp_loopback = 0 }, .{ .write_deadline_ms = 500 });
+    defer rig.deinit();
+    const c = try browser(rig);
+    defer c.deinit(testing.allocator);
+    try waitText(c, "\"t\":\"tree\"");
+    try sendJson(c, "{{\"t\":\"open\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ rig.session_id, rig.block_id });
+    try waitText(c, "\"t\":\"opened\"");
+    // It keeps talking (so it is not silent) but never reads, while a lot of output arrives.
+    var line: [64 * 1024]u8 = undefined;
+    // Rewrites of one line (no scrolling, which is slow for the fake's terminal in a debug build).
+    for (&line, 0..) |*b, i| b.* = if (i % 64 == 0) '\r' else 'a' + @as(u8, @intCast(i % 26));
+    const t0 = nowMs(testing.io);
+    var round: u32 = 0;
+    while (rig.srv.active.load(.acquire) != 0 and nowMs(testing.io) - t0 < 15_000) : (round += 1) {
+        try rig.f.feed(rig.block_id, &line);
+        if (round % 10 == 0) sendJson(c, "{{\"t\":\"ping\"}}", .{}) catch {};
+        try testing.io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try waitNoConnections(rig, 2_000);
+}
+
+test "server: one hot second is enough to be cut off" {
+    // Before, a page could send far past the limit every other second and stay connected.
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    const c = try browser(rig);
+    defer c.deinit(testing.allocator);
+    for (0..max_messages_per_second + 20) |_| c.writeFrame(.text, "{\"t\":\"ping\"}") catch break;
+    var ended = false;
+    var frames: u32 = 0;
+    while (frames < 100_000) : (frames += 1) {
+        const m = c.readMessage(testing.allocator) catch {
+            ended = true;
+            break;
+        };
+        defer testing.allocator.free(m.data);
+        if (m.opcode == .close) {
+            ended = true;
+            break;
+        }
+    }
+    try testing.expect(ended);
+}
+
+test "server: a busy bridge does not use up a transfer token" {
+    var db: [64]u8 = undefined;
+    const up = try uploadDir(&db);
+    defer Io.Dir.cwd().deleteTree(testing.io, up.path) catch {};
+    defer up.dir.close(testing.io);
+    const a = testing.allocator;
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = up.path, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
+    defer o.rig.deinit();
+    defer o.c.deinit(a);
+    try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"later.txt\",\"size\":2}}", .{});
+    const msg = try textWith(o.c, "\"kind\":\"upload\"");
+    defer a.free(msg);
+    const url = try std.fmt.allocPrint(a, "/xfer/{s}", .{try tokenIn(msg)});
+    defer a.free(url);
+    // Every slot taken: refused, and the token is still good afterwards.
+    for (0..xfer.max_running) |_| try testing.expect(o.rig.hub.xfers.acquire());
+    const busy = try put(o.rig, url, "Origin: http://localhost\r\n", "hi");
+    defer freeHttp(busy);
+    try testing.expectEqual(@as(u16, 429), busy.status);
+    for (0..xfer.max_running) |_| o.rig.hub.xfers.release();
+    const ok = try put(o.rig, url, "Origin: http://localhost\r\n", "hi");
+    defer freeHttp(ok);
+    try testing.expectEqual(@as(u16, 200), ok.status);
 }

@@ -10,7 +10,10 @@ const LS = {
   get(k, d) { try { const v = localStorage.getItem('rweb.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem('rweb.' + k, JSON.stringify(v)); } catch {} },
 };
-const dbgOn = new URLSearchParams(location.search).get('dbg') === '1';
+// Input diagnostics: asked for with ?dbg=1, and on only once the bridge's `mode` message says it
+// was started to log them (see `setDebug`).
+const dbgAsked = new URLSearchParams(location.search).get('dbg') === '1';
+let dbgOn = false;
 
 const state = {
   ws: null, retry: 500, observe: false, locked: false, rexUp: true,
@@ -26,7 +29,8 @@ const link = {lastRx: performance.now(), healthy: false};
 // ---- the terminal ----
 // Two terminals can draw the screen. xterm.js is the default. wterm (the one Ovis uses) draws
 // ordinary text rows, so the phone's own long-press selection, handles and Copy work on it.
-// `?term=wterm` or `?term=xterm` chooses, and the choice is remembered on this device.
+// The ⋯ menu's switch chooses, and the choice is remembered on this device; `?term=wterm` or
+// `?term=xterm` chooses for that page load only (keys.js `pickTerm`).
 async function main() {
 // A test token in the address would stay in history and be sent on every request; the server has
 // put it in a cookie by now, so the address bar and the socket use the cookie from here on.
@@ -34,18 +38,21 @@ if (new URLSearchParams(location.search).has('token')) {
   const q = new URLSearchParams(location.search); q.delete('token');
   history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash);
 }
-const kind = (() => {
-  const q = new URLSearchParams(location.search).get('term');
-  if (q === 'wterm' || q === 'xterm') { LS.set('term', q); return q; }
-  return LS.get('term', 'wterm');
-})();
+const kind = K.pickTerm(new URLSearchParams(location.search).get('term'), LS.get('term', 'wterm'));
 const loadScript = src => new Promise((ok, no) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => no(new Error('could not load ' + src)); document.head.append(s); });
 let term = null, fitAddon = null, termKind = 'xterm', startupNote = null;
+let wtermPaste = () => {};                // set to sendPaste once the page is ready
 if (kind === 'wterm') {
   try {
     const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = 'vendor/wterm.css'; document.head.append(l);
     await loadScript('vendor/wterm.js'); await loadScript('wterm-shim.js');
     term = await window.makeWtermTerminal($('term'), {fontSize: state.fontSize});
+    // wterm sends every paste it sees (a paste event, or a paste arriving as an input event) through
+    // its `sendPaste`, which would type it. The page takes those over (see "pastes" below); without
+    // the hook, wterm is not used.
+    const inp = term.wt && term.wt.input;
+    if (!inp || typeof inp.sendPaste !== 'function') { try { term.wt.destroy(); } catch {} $('term').replaceChildren(); $('term').classList.remove('rweb-wterm'); throw new Error('wterm: cannot take over pastes on this build'); }
+    inp.sendPaste = text => { try { if (inp.selectionActions) inp.selectionActions.clearSelection(); } catch {} wtermPaste(String(text)); };
     fitAddon = {proposeDimensions: () => term.proposeDimensions($('stage').clientWidth, $('stage').clientHeight)};
     termKind = 'wterm';
     // The page behind the grid matches wterm's own background until Rex sends a theme.
@@ -90,6 +97,34 @@ term.onData(d => {
 });
 term.onBinary(d => { d = K.stripReplies(d); if (d && canType()) send({t: 'in', d}); });
 
+// ---- pastes ----
+// Every paste goes to Rex as a paste ({t: 'paste'}), never as typed input, and without ESC or C1
+// controls (keys.js `cleanPaste`): a pasted text that carried its own "end of paste" would otherwise
+// have the rest typed as commands. Neither terminal's own paste handling runs: these listeners sit on
+// the terminal's container in the capture phase, so they see the events before anything inside it
+// and stop them there. wterm's other way in (a paste arriving as an input event) comes here through
+// the hook set up where wterm starts (`wtermPaste`).
+function sendPaste(text) {
+  const d = K.cleanPaste(text || '');
+  if (!d) return;
+  if (!canType()) { if (state.current) notice(link.healthy ? 'Typing is off' : 'Not connected: not sent'); return; }
+  if (soft.on) softReset();
+  send({t: 'paste', d});
+}
+wtermPaste = sendPaste;
+$('term').addEventListener('paste', e => {
+  e.preventDefault(); e.stopPropagation();
+  sendPaste(e.clipboardData ? e.clipboardData.getData('text/plain') : '');
+}, true);
+// A soft keyboard's paste (and a drop) can come as an input event with no paste event before it.
+$('term').addEventListener('beforeinput', e => {
+  if (!K.isPasteInput(e.inputType)) return;
+  const text = e.data || (e.dataTransfer && e.dataTransfer.getData('text/plain')) || '';
+  if (!text) return;            // nothing to take here: the input event that follows is a paste too
+  e.preventDefault(); e.stopPropagation();
+  sendPaste(text);
+}, true);
+
 // ---- soft keyboard ----
 // Phone keyboards compose words, hold them back until you press space, and on Backspace re-open
 // the word they already committed. xterm.js's overlay then shows text the shell no longer has.
@@ -98,13 +133,18 @@ term.onBinary(d => { d = K.stripReplies(d); if (d && canType()) send({t: 'in', d
 // type what came). The shell's own echo is then the only display, as with a desktop keyboard.
 const soft = {on: termKind === 'xterm' && matchMedia('(pointer: coarse)').matches, prev: '', composing: false};
 function softReset() { soft.prev = ''; if (term.textarea && term.textarea.value !== '') term.textarea.value = ''; }
-function softSync() {
+function softSync(pasted) {
   const ta = term.textarea, now = ta.value;
   const e = K.editsBetween(soft.prev, now);
   soft.prev = now;
   if (!e.deletes && !e.inserts) return;
   if (!canType()) { if (state.current) notice(link.healthy ? 'Typing is off' : 'Not connected: not sent'); return; }
-  let ins = e.inserts;
+  if (pasted) {                                       // a paste the beforeinput listener could not take
+    if (e.deletes) send({t: 'in', d: '\x7f'.repeat(e.deletes)});
+    return sendPaste(e.inserts);
+  }
+  // A soft keyboard cannot type ESC or C1 controls; any in the box came from somewhere else.
+  let ins = K.cleanPaste(e.inserts);
   if (!e.deletes) { const r = K.applyLatched(state.latched, ins); if (r.used) clearLatched(); ins = r.text; }
   send({t: 'in', d: '\x7f'.repeat(e.deletes) + ins});
   if (!soft.composing && Array.from(now).length > 100) softReset();   // keep the text box short
@@ -119,7 +159,7 @@ function softSync() {
   root.addEventListener('compositionupdate', only(() => {}), true);
   root.addEventListener('compositionend', only(() => { soft.composing = false; }), true);
   root.addEventListener('beforeinput', only(() => {}), true);
-  root.addEventListener('input', only(() => softSync()), true);
+  root.addEventListener('input', only(e => softSync(K.isPasteInput(e.inputType))), true);
 })();
 
 // Physical keys go to Rex, which encodes them for the program's keyboard mode. Keys with no usable
@@ -274,7 +314,7 @@ setInterval(() => {
 
 function handleMessage(m) {
   switch (m.t) {
-    case 'mode': state.canDownload = !!m.download; state.canUpload = !!m.upload; state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
+    case 'mode': setDebug(K.debugOn(dbgAsked, m)); state.canDownload = !!m.download; state.canUpload = !!m.upload; state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
     case 'rex': state.rexUp = m.up; renderStatus(); break;
     case 'tree': {
       state.tree = m.sessions; renderAll(); maybeRestore();
@@ -512,7 +552,12 @@ $('more').onclick = () => openPop($('more'), pop => {
   }, 'pop-fit');
   item(pop, 'Load all scrollback', () => { closePop(); send({t: 'more_history'}); }, 'pop-hist');
   { const dg = LS.get('diag', false); const it = item(pop, dg ? 'Touch diagnostics: on' : 'Touch diagnostics: off', () => { LS.set('diag', !dg); location.reload(); }); it.setAttribute('role', 'menuitemcheckbox'); it.setAttribute('aria-pressed', String(dg)); }
-  item(pop, termKind === 'wterm' ? 'Terminal: wterm (switch to the older xterm.js)' : 'Terminal: xterm.js (switch back to wterm)', () => { LS.set('term', termKind === 'wterm' ? 'xterm' : 'wterm'); location.reload(); });
+  item(pop, termKind === 'wterm' ? 'Terminal: wterm (switch to the older xterm.js)' : 'Terminal: xterm.js (switch back to wterm)', () => {
+    LS.set('term', termKind === 'wterm' ? 'xterm' : 'wterm');
+    const q = new URLSearchParams(location.search); q.delete('term');      // a ?term= would override it
+    history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash);
+    location.reload();
+  });
   item(pop, 'Reconnect', () => { closePop(); if (state.ws) { const w = state.ws; state.ws = null; try { w.close(); } catch {} } connect(); });
   updateControls();
 });
@@ -589,7 +634,8 @@ function renderCopySelection() {
 }
 function openCopy(text, truncated) {
   const dlg = $('copydlg'), box = $('copytext');
-  copyFull = text; copyLines = text.split('\n'); copySel = null;
+  const view = K.copyView(text, truncated);           // a node per line: only the last COPY_MAX_LINES
+  copyFull = text; copyLines = view.lines; copySel = null;
   const build = () => {
     box.replaceChildren();
     const frag = document.createDocumentFragment();
@@ -615,7 +661,7 @@ function openCopy(text, truncated) {
   $('copy-native').onclick = () => setNative(!copyNative);
   setNative(false);
   box.onclick = e => { if (copyNative) return; const row = e.target.closest('.ln'); if (!row) return; copySel = K.tapLine(copySel, Number(row.dataset.i)); renderCopySelection(); };
-  $('copy-note').textContent = truncated ? 'Showing the end of a long history.' : '';
+  $('copy-note').textContent = view.note;
   const done = what => () => notice(what), fail = () => notice('Could not copy: your browser refused');
   $('copy-all').onclick = () => copyToClipboard(copyFull).then(done('Copied everything'), fail);
   $('copy-last').onclick = () => copyToClipboard(K.lastLines(copyFull, 100)).then(done('Copied the last 100 lines'), fail);
@@ -636,7 +682,7 @@ async function doPaste() {
   if (!canType()) return;
   let text = '';
   try { text = await navigator.clipboard.readText(); } catch { text = null; }
-  if (text) return send({t: 'paste', d: text});
+  if (text) return sendPaste(text);
   if (text === '') return notice('The clipboard is empty');
   const dlg = $('pastedlg'), ta = $('pastetext'); ta.value = '';
   const r = await dialogResult(dlg, done => {
@@ -644,7 +690,7 @@ async function doPaste() {
     dlg.querySelector('form').onsubmit = e => { e.preventDefault(); done(ta.value); };
     setTimeout(() => ta.focus(), 0);
   });
-  if (r) send({t: 'paste', d: r});
+  if (r) sendPaste(r);
 }
 
 // ---- the key row ----
@@ -707,9 +753,14 @@ function releaseKey() {
 $('keys').addEventListener('pointerdown', e => { const b = e.target.closest('button'); if (!b || !b._k) return; e.preventDefault(); pressKey(b); });
 for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) $('keys').addEventListener(ev, releaseKey);
 
-// ---- diagnostics: open with ?dbg=1 (and start the bridge with --debug-input) ----
+// ---- diagnostics: open with ?dbg=1 and start the bridge with --debug-input ----
+// Nothing is sent unless the bridge's `mode` message allows it (`debug: true`).
 function dbgSend(o) { if (dbgOn) send({ms: Math.round(performance.now()), ...o, t: 'dbg'}); }
-if (dbgOn && term.textarea) {
+let dbgStarted = false;
+function setDebug(on) {
+  dbgOn = on;
+  if (!on || dbgStarted || !term.textarea) return;
+  dbgStarted = true;
   setInterval(() => dbgSend({ev: 'hb', vis: document.visibilityState}), 1000);
   const ta = term.textarea;
   for (const ev of ['keydown', 'keyup']) ta.addEventListener(ev, e => dbgSend({ev, key: e.key, code: e.code, kc: e.keyCode, comp: e.isComposing}), true);

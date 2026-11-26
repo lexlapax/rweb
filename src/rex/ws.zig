@@ -119,6 +119,28 @@ pub fn acceptKey(key: []const u8) [28]u8 {
 
 pub const Client = Conn;
 
+/// How long a handshake (the HTTP upgrade and the protocol's first messages) may take.
+pub const handshake_timeout_ms: u32 = 10_000;
+
+/// A deadline for a handshake: shuts `stream` (so a blocked read returns) unless stopped first.
+/// Stop it before the stream is closed, on every path.
+pub const Watchdog = struct {
+    future: Io.Future(void),
+
+    pub fn start(io: Io, stream: Io.net.Stream, timeout_ms: u32) Io.ConcurrentError!Watchdog {
+        return .{ .future = try io.concurrent(run, .{ io, stream, timeout_ms }) };
+    }
+
+    fn run(io: Io, stream: Io.net.Stream, timeout_ms: u32) void {
+        io.sleep(.fromMilliseconds(timeout_ms), .awake) catch return; // stopped in time
+        stream.shutdown(io, .both) catch {};
+    }
+
+    pub fn stop(w: *Watchdog, io: Io) void {
+        w.future.cancel(io);
+    }
+};
+
 /// One end of a WebSocket. A client masks what it sends; a server does not.
 /// Most pings and pongs between two data messages, and most frames in one fragmented message.
 pub const max_control_run: u32 = 256;
@@ -226,7 +248,20 @@ pub const Conn = struct {
         extra_headers: []const u8,
     ) !*Conn {
         errdefer stream.close(io);
+        return upgrade(gpa, io, stream, path, subprotocol, extra_headers);
+    }
 
+    /// As `connectStream`, but a failure leaves `stream` open for the caller to close (one that
+    /// published it so another task can shut it must unpublish it first). On success the
+    /// connection owns the stream.
+    pub fn upgrade(
+        gpa: Allocator,
+        io: Io,
+        stream: Io.net.Stream,
+        path: []const u8,
+        subprotocol: ?[]const u8,
+        extra_headers: []const u8,
+    ) !*Conn {
         const c = try gpa.create(Conn);
         errdefer gpa.destroy(c);
         c.* = .{ .io = io, .stream = stream, .reader = undefined, .writer = undefined };
@@ -439,8 +474,6 @@ test "acceptKey matches the RFC 6455 example" {
     const a = acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
     try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", &a);
 }
-
-
 
 /// A server-side connection over bytes in memory, for frame-level tests.
 fn memConn(bytes: []const u8, out: *std.Io.Writer, r: *std.Io.Reader, is_client: bool) Conn {

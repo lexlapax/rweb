@@ -91,8 +91,14 @@ pub fn main(init: std.process.Init) !void {
             std.Io.File.stdout().writeStreamingAll(io, versionText()) catch {};
             std.process.exit(0);
         }
-        std.debug.print("{s}\n", .{cli.usage});
-        if (e != error.Usage) std.debug.print("rweb: {t}\n", .{e});
+        switch (e) {
+            error.NeedAllowHost => std.debug.print("rweb: --owner needs --allow-host NAME (this node's DNS name, repeatable): without it a page on any host name, a rebound DNS name included, reaches the bridge with the owner's identity. --owner-from-tailscale adds this node's name itself\n", .{}),
+            error.BadToken => std.debug.print("rweb: --token must be at least 16 characters of letters, digits, - and _ (the --token-file rules)\n", .{}),
+            else => {
+                std.debug.print("{s}\n", .{cli.usage});
+                if (e != error.Usage) std.debug.print("rweb: {t}\n", .{e});
+            },
+        }
         std.process.exit(if (e == error.Usage) 0 else 2);
     };
 
@@ -143,14 +149,19 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (owner != null and hosts.items.len == 0) std.debug.print("rweb: WARNING: no --allow-host: a request for any Host name is accepted (DNS-rebinding defence is off)\n", .{});
+    // `cli.parse` already refuses an owner without a host; this is the second line.
+    if (owner != null and hosts.items.len == 0) {
+        std.debug.print("rweb: an owner rule needs --allow-host NAME\n", .{});
+        std.process.exit(2);
+    }
     if (parsed.token != null) std.debug.print("rweb: WARNING: --token is visible to every user in the process list; use --token-file\n", .{});
 
     // Secrets come from files only their owner can read, never from the command line (which
     // every user on the machine can see).
-    const backend_secret: ?[]const u8 = if (parsed.backend_secret_file) |path| readSecretFile(arena, io, path, 32, true) catch |e| secretFileFailed(path, e) else null;
+    var problem: xfer.Problem = .{};
+    const backend_secret: ?[]const u8 = if (parsed.backend_secret_file) |path| readSecretFile(arena, io, path, 32, true, &problem) catch |e| secretFileFailed(path, e, problem) else null;
     var token = parsed.token;
-    if (parsed.token_file) |path| token = readSecretFile(arena, io, path, 16, true) catch |e| secretFileFailed(path, e);
+    if (parsed.token_file) |path| token = readSecretFile(arena, io, path, cli.min_token_len, true, &problem) catch |e| secretFileFailed(path, e, problem);
     if (parsed.random_token) {
         var raw: [16]u8 = undefined;
         io.random(&raw);
@@ -174,8 +185,11 @@ pub fn main(init: std.process.Init) !void {
         transfer.enabled = true;
         transfer.max_bytes = @as(u64, parsed.max_transfer_mb) * 1024 * 1024;
         if (parsed.upload_dir) |dir| {
-            checkUploadDir(arena, io, dir) catch |e| {
-                std.debug.print("rweb: cannot use upload folder {s}: {t}\n", .{ dir, e });
+            // Opened once and kept open for the life of the process: uploads go into this folder,
+            // whatever is later put at its path.
+            var up_problem: xfer.Problem = .{};
+            transfer.upload_dir_handle = xfer.openUploadDir(arena, io, dir, &up_problem) catch |e| {
+                std.debug.print("rweb: cannot use upload folder {s}: {t} (at {s})\n", .{ dir, e, up_problem.path });
                 std.process.exit(2);
             };
             transfer.upload_dir = dir;
@@ -186,7 +200,11 @@ pub fn main(init: std.process.Init) !void {
             parsed.max_transfer_mb,
         });
     }
-    const h = try hub.Hub.open(gpa, io, ctl, .{ .observe_only = parsed.observe_only, .history_lines = parsed.history_lines, .transfer = transfer });
+    defer if (transfer.upload_dir_handle) |d| d.close(io);
+    var hub_cfg: hub.Config = .{ .observe_only = parsed.observe_only, .history_lines = parsed.history_lines, .transfer = transfer };
+    // The page may send its debug messages only when the bridge logs them (`--debug-input`).
+    hub_cfg.debug_input = parsed.debug_input;
+    const h = try hub.Hub.open(gpa, io, ctl, hub_cfg);
     defer h.close();
 
     const listen: server.Listen = switch (parsed.listen) {
@@ -215,7 +233,15 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("rweb: listening on http://127.0.0.1:{d}/ (Rex at {s}){s}\n", .{ srv.port, rex_socket, if (parsed.observe_only) ", observe-only" else "" });
             if (backend_secret != null) std.debug.print("rweb: requests must carry the secret first path segment (point Tailscale Serve at http://127.0.0.1:{d}/<secret>)\n", .{srv.port});
             if (backend_secret == null and owner != null) std.debug.print("rweb: WARNING: the owner's identity headers can be forged by any local process on this machine (no --backend-secret-file)\n", .{});
-            if (parsed.random_token) std.debug.print("rweb: open http://127.0.0.1:{d}/?token={s}\n", .{ srv.port, token.? });
+            // The token opens the bridge: it goes to a person at a terminal, never into a log.
+            if (parsed.random_token) {
+                const tty = std.Io.File.stderr().isTty(io) catch false;
+                if (tty) {
+                    std.debug.print("rweb: open http://127.0.0.1:{d}/?token={s}\n", .{ srv.port, token.? });
+                } else {
+                    std.debug.print("rweb: made a random token; it is not shown because standard error is not a terminal (it may be a log). To choose the token, put it in a file only you can read (mode 0600) and pass --token-file PATH\n", .{});
+                }
+            }
         },
     }
 
@@ -296,49 +322,21 @@ fn dnsNameFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const
     return name;
 }
 
-/// The upload folder: made 0700 if missing; must then be a directory of ours that others cannot enter.
-fn checkUploadDir(arena: std.mem.Allocator, io: Io, path: []const u8) !void {
-    _ = Io.Dir.cwd().createDirPathStatus(io, path, @enumFromInt(0o700)) catch {}; // a new folder is 0700
-
-    const st = try Io.Dir.cwd().statFile(io, path, .{});
-    if (st.kind != .directory) return error.NotADirectory;
-    if (@intFromEnum(st.permissions) & 0o077 != 0) return error.TooOpen;
-    const path_z = try std.fmt.allocPrintSentinel(arena, "{s}", .{path}, 0);
-    if ((try fileUid(path_z)) != std.c.getuid()) return error.NotOwned;
-}
-
-/// The user id that owns `path`. (`Io.File.Stat` has no owner, and the C `stat` differs by system.)
-fn fileUid(path_z: [:0]const u8) error{FileNotFound}!u32 {
-    if (builtin.os.tag == .linux) {
-        var stx: std.os.linux.Statx = undefined;
-        const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, path_z.ptr, 0, .{ .UID = true }, &stx);
-        if (std.os.linux.errno(rc) != .SUCCESS) return error.FileNotFound;
-        return stx.uid;
-    } else {
-        var sb: std.c.Stat = undefined;
-        if (std.c.stat(path_z, &sb) != 0) return error.FileNotFound;
-        return sb.uid;
-    }
-}
-
-const SecretError = error{ TooOpen, NotOwned, TooShort, BadCharacters, FileNotFound, OutOfMemory } || Io.Dir.ReadFileAllocError || Io.Dir.StatFileError;
-
-fn secretFileFailed(path: []const u8, e: anyerror) noreturn {
-    std.debug.print("rweb: cannot use secret file {s}: {t}\n", .{ path, e });
+fn secretFileFailed(path: []const u8, e: anyerror, problem: xfer.Problem) noreturn {
+    if (problem.path.len > 0 and !std.mem.eql(u8, problem.path, path)) {
+        std.debug.print("rweb: cannot use secret file {s}: {t} (at {s})\n", .{ path, e, problem.path });
+    } else std.debug.print("rweb: cannot use secret file {s}: {t}\n", .{ path, e });
     std.process.exit(2);
 }
 
-/// The contents of a secret file, trimmed. The file must be ours and closed to group and others,
+/// The contents of a secret file, trimmed, read through `xfer.readPrivateFile` (a regular file of
+/// ours, closed to group and others, in folders only we or root can change, never through a link),
 /// and long enough; with `path_safe` it may hold only characters that are safe in a URL path.
-fn readSecretFile(arena: std.mem.Allocator, io: Io, path: []const u8, min_len: usize, path_safe: bool) SecretError![]const u8 {
-    const st = try Io.Dir.cwd().statFile(io, path, .{});
-    if (@intFromEnum(st.permissions) & 0o077 != 0) return error.TooOpen;
-    const path_z = try std.fmt.allocPrintSentinel(arena, "{s}", .{path}, 0);
-    if ((try fileUid(path_z)) != std.c.getuid()) return error.NotOwned;
-    const raw = try Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4096));
+fn readSecretFile(arena: std.mem.Allocator, io: Io, path: []const u8, min_len: usize, path_safe: bool, problem: *xfer.Problem) (xfer.OpenError || error{ TooShort, BadCharacters })![]const u8 {
+    const raw = try xfer.readPrivateFile(arena, io, path, 4096, problem);
     const text = std.mem.trim(u8, raw, " \t\r\n");
     if (text.len < min_len) return error.TooShort;
-    if (path_safe) for (text) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.BadCharacters;
+    if (path_safe and !cli.isSafeSecret(text)) return error.BadCharacters;
     return text;
 }
 
@@ -373,15 +371,21 @@ test "a secret file must be private, ours, long enough and made of safe characte
     try writeTmp(io, tmp.dir, "group", 0o640, good);
     try writeTmp(io, tmp.dir, "short", 0o600, "abc");
     try writeTmp(io, tmp.dir, "slash", 0o600, "0123456789abcdef0123456789abc/ef0123");
+    try tmp.dir.symLink(io, "ok", "link", .{});
+    try tmp.dir.createDirPath(io, "adir");
     const T = std.testing;
-    try T.expectEqualStrings(good, try readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/ok", .{root}), 32, true));
-    try T.expectError(error.TooOpen, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/open", .{root}), 32, true));
-    try T.expectError(error.TooOpen, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/group", .{root}), 32, true));
-    try T.expectError(error.TooShort, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/short", .{root}), 32, true));
-    try T.expectError(error.BadCharacters, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/slash", .{root}), 32, true));
-    // A token may hold other characters (it is not part of a path).
-    try T.expectEqualStrings("0123456789abcdef0123456789abc/ef0123", try readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/slash", .{root}), 16, false));
-    try T.expectError(error.FileNotFound, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/missing", .{root}), 32, true));
+    var p: xfer.Problem = .{};
+    try T.expectEqualStrings(good, try readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/ok", .{root}), 32, true, &p));
+    try T.expectError(error.TooOpen, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/open", .{root}), 32, true, &p));
+    try T.expectError(error.TooOpen, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/group", .{root}), 32, true, &p));
+    try T.expectError(error.TooShort, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/short", .{root}), 32, true, &p));
+    try T.expectError(error.BadCharacters, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/slash", .{root}), 32, true, &p));
+    // With path_safe off, other characters are kept.
+    try T.expectEqualStrings("0123456789abcdef0123456789abc/ef0123", try readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/slash", .{root}), 16, false, &p));
+    try T.expectError(error.FileNotFound, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/missing", .{root}), 32, true, &p));
+    // Never through a link, and never a directory.
+    try T.expectError(error.SymLink, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/link", .{root}), 32, true, &p));
+    try T.expectError(error.NotARegularFile, readSecretFile(arena, io, try std.fmt.allocPrint(arena, "{s}/adir", .{root}), 32, true, &p));
 }
 
 test {

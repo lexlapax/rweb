@@ -36,9 +36,21 @@ pub const Stream = struct {
     /// Bytes read so far.
     bytes: u64 = 0,
 
-    /// Open the stream a ticket names, and complete the handshake.
+    /// Open the stream a ticket names, and complete the handshake within
+    /// `ws.handshake_timeout_ms`.
     pub fn open(gpa: Allocator, io: Io, socket_path: []const u8, ticket: [16]u8) !Stream {
-        const c = try ws.Conn.connect(gpa, io, socket_path, "/api/data", subprotocol);
+        return openTimeout(gpa, io, socket_path, ticket, ws.handshake_timeout_ms);
+    }
+
+    pub fn openTimeout(gpa: Allocator, io: Io, socket_path: []const u8, ticket: [16]u8, timeout_ms: u32) !Stream {
+        const addr = try Io.net.UnixAddress.init(socket_path);
+        const stream = try addr.connect(io);
+        // The watchdog is stopped before the stream can be closed (defers run in reverse order).
+        errdefer stream.close(io);
+        var dog = try ws.Watchdog.start(io, stream, timeout_ms);
+        defer dog.stop(io);
+        const c = try ws.Conn.upgrade(gpa, io, stream, "/api/data", subprotocol, "");
+        c.owns_stream = false; // until the handshake is done; the errdefer above closes it
         errdefer c.deinit(gpa);
         var hello: [17]u8 = undefined;
         hello[0] = 0x01;
@@ -52,6 +64,7 @@ pub const Stream = struct {
             .welcome => {},
             .reject => return error.Rejected,
         }
+        c.owns_stream = true;
         return .{ .gpa = gpa, .io = io, .conn = c };
     }
 
@@ -122,6 +135,17 @@ test "newRef is a lower-case canonical UUID with its prefix" {
     };
     try std.testing.expectEqual(@as(u8, '4'), u[14]);
     try std.testing.expect(std.mem.indexOfScalar(u8, "89ab", u[19]) != null);
+}
+
+test "the download handshake has a deadline" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const silent = try @import("fake.zig").Silent.start(a, io, null);
+    defer silent.deinit();
+    const t0 = Io.Clock.awake.now(io).toMilliseconds();
+    const ticket: [16]u8 = @splat(2);
+    try std.testing.expect(std.meta.isError(Stream.openTimeout(a, io, silent.path, ticket, 200)));
+    try std.testing.expect(Io.Clock.awake.now(io).toMilliseconds() - t0 < 5000);
 }
 
 const api_mod = @import("api.zig");

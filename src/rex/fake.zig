@@ -40,6 +40,71 @@ const Session = struct {
     block: *Block,
 };
 
+/// A unix socket that accepts connections and never says a word: for handshake deadlines.
+pub const Silent = struct {
+    gpa: Allocator,
+    io: Io,
+    path: []u8,
+    server: Io.net.Server,
+    mu: Io.Mutex = .init,
+    accepted: std.ArrayList(Io.net.Stream) = .empty,
+    task: ?Io.Future(void) = null,
+    stopping: bool = false,
+
+    /// Listen at `path` (a fresh one under /tmp if null).
+    pub fn start(gpa: Allocator, io: Io, path: ?[]const u8) !*Silent {
+        const p = if (path) |x| try gpa.dupe(u8, x) else blk: {
+            var rnd: [6]u8 = undefined;
+            io.random(&rnd);
+            break :blk try std.fmt.allocPrint(gpa, "/tmp/rweb-silent-{x}.sock", .{rnd});
+        };
+        errdefer gpa.free(p);
+        Io.Dir.deleteFileAbsolute(io, p) catch {};
+        const addr = try Io.net.UnixAddress.init(p);
+        const s = try gpa.create(Silent);
+        errdefer gpa.destroy(s);
+        s.* = .{ .gpa = gpa, .io = io, .path = p, .server = try addr.listen(io, .{}) };
+        errdefer s.server.deinit(io);
+        s.task = try io.concurrent(acceptLoop, .{s});
+        return s;
+    }
+
+    fn acceptLoop(s: *Silent) void {
+        while (true) {
+            const st = s.server.accept(s.io) catch return;
+            s.mu.lockUncancelable(s.io);
+            defer s.mu.unlock(s.io);
+            if (s.stopping) {
+                st.close(s.io);
+                return;
+            }
+            s.accepted.append(s.gpa, st) catch st.close(s.io);
+        }
+    }
+
+    pub fn acceptedCount(s: *Silent) usize {
+        s.mu.lockUncancelable(s.io);
+        defer s.mu.unlock(s.io);
+        return s.accepted.items.len;
+    }
+
+    pub fn deinit(s: *Silent) void {
+        s.mu.lockUncancelable(s.io);
+        s.stopping = true;
+        s.mu.unlock(s.io);
+        if (Io.net.UnixAddress.init(s.path)) |addr| {
+            if (addr.connect(s.io)) |c| c.close(s.io) else |_| {}
+        } else |_| {}
+        if (s.task) |*t| t.cancel(s.io);
+        for (s.accepted.items) |st| st.close(s.io);
+        s.accepted.deinit(s.gpa);
+        s.server.deinit(s.io);
+        Io.Dir.deleteFileAbsolute(s.io, s.path) catch {};
+        s.gpa.free(s.path);
+        s.gpa.destroy(s);
+    }
+};
+
 /// `file`: for a download, the bytes to send.
 const Ticket = struct { bytes: [16]u8, block_id: []u8, file: ?[]u8 = null };
 
@@ -71,6 +136,8 @@ pub const Fake = struct {
     event_seq: u64 = 0,
     /// Wait this long before sending a new data stream's first bytes (a slow snapshot), for tests.
     hold_data_ms: u32 = 0,
+    /// If set, `data.connect` answers with this JSON as its payload, for tests of bad replies.
+    data_connect_payload: ?[]const u8 = null,
 
     /// Listen on a fresh socket under /tmp and start serving.
     pub fn start(gpa: Allocator, io: Io) !*Fake {
@@ -471,6 +538,12 @@ pub const Fake = struct {
         f.mu.lockUncancelable(f.io);
         defer f.mu.unlock(f.io);
 
+        // Never answered: for tests of a call still waiting when the client closes.
+        if (std.mem.eql(u8, method, "rweb.test.no_answer")) return;
+        if (std.mem.eql(u8, method, "data.connect")) if (f.data_connect_payload) |raw| {
+            const text = try std.fmt.allocPrint(arena, "{{\"type\":\"response\",\"id\":{f},\"seq\":0,\"payload\":{s}}}", .{ std.json.fmt(id, .{}), raw });
+            return c.writeFrame(.text, text);
+        };
         if (std.mem.eql(u8, method, "session.list")) {
             const Item = struct { session_id: []const u8, label: []const u8 };
             const items = try arena.alloc(Item, f.sessions.items.len);

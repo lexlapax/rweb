@@ -1,7 +1,28 @@
 # Agent context map
 
-Last updated: 2026-11-25 (laptop-mac: release-review fixes). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
+Last updated: 2026-11-25 (laptop-mac: second security review and its fixes). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-25: second security review of `ded0668` and its fixes
+
+Daybreak rescanned `ded0668` (11 findings); an internal adversarial review in four parts (front end,
+Rex library, hub concurrency, page and release) added 42 more, among them a deadlock and use-after-free
+crashes in the hub. Every finding was checked against the code; D4 was partly refuted (bounded recursion)
+but hid a real byte-reordering bug. Verdicts, the plan by mechanism, each fix and its tests, checks and
+what is left: [docs/security-review-2026-11-25-round2.md](docs/security-review-2026-11-25-round2.md).
+In short: terminals are reference-counted and nothing waits on Rex under `Hub.mu` (the restart residual
+below is fixed); every viewer queue, Rex event queue, input queue, history redraw and Copy text is
+bounded; the Rex library has message, token, depth and handshake limits and ownership fixes; the rex1
+splitter is a state machine checked against a reference model and fuzzed; secret files and the upload
+folder are trusted only through checked descriptors with safe parent folders; upload tokens are checked
+against their viewer at use; pastes lose ESC and C1 and go as pastes; `--owner` needs `--allow-host`.
+Owner's decision on Daybreak #3 (macOS Serve target holds the backend secret): document only.
+Checked on laptop-mac: unit 253/263 (10 live skipped), live 208/209 against local Rex, fuzz corpus, web
+22/22, release-base, ReleaseSafe bridge in Chrome (typing, hostile paste in both engines) and the iOS
+Simulator. Not checked: Linux runs, a Serve deployment of this build, a phone keyboard's paste.
+**Deployment note:** startup now refuses secret files and upload folders under folders another user can
+change; laptop-mac's layout passes, check each host when deploying. **Next:** the owner has both reviews
+look at the fix commit; no version, GitHub Release or deployment until the owner says so.
 
 ## 2026-11-25: release reviews of `7a53f54` and their fixes
 
@@ -15,7 +36,7 @@ typed Tailscale JSON parsing. Checked on laptop-mac: unit 150/159 (9 skipped), l
 (gated restart skipped), web 17/17, Chrome and iOS-Simulator Mobile Safari in tunnel mode. Not yet
 checked: the page through Serve from another device (with the next deployment). **Next:** the owner has
 both reviews look at the fix commit; no version, GitHub Release or deployment until the owner says so.
-Left on purpose: a stream restart (supervisor) still opens under `Hub.mu` (bounded, Rex-caused).
+Left on purpose then: a stream restart (supervisor) still opened under `Hub.mu`; fixed in the second review.
 
 ## 2026-11-25: next work agreed
 
@@ -174,7 +195,8 @@ Owner's answers (2026-11-22): history on open = last ~1,000 lines; a wide termin
 and Rex's size changes only on request; a read-only ("view only") switch on the page, off by
 default, plus a bridge-wide locked `--observe-only`. Built: `access.zig`, `protocol.zig`,
 `hub.zig`, `server.zig`, `assets.zig` + `web/` (page, vendored xterm.js), `cli.zig`, `main.zig`
-(`zig build run -- --listen-tcp 0 --random-token`). Evidence, findings, limits:
+(`zig build run -- --listen-tcp 0 --random-token`; since 0.1.1 the token's address is printed only to a
+terminal). Evidence, findings, limits:
 [docs/phase2-result.md](docs/phase2-result.md). Checked on desktop-mac in Chrome, through Serve
 port 11443 (each refusal shown), and on the owner's Android tablet (Samsung Keyboard and Gboard
 both work); linux-box ran the full suite including live tests. Phone typing works since the owner turned off the phone Tailscale app's power saving (it had

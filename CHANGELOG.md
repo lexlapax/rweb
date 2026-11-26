@@ -29,6 +29,54 @@ the Rex API revisions it speaks.
 - `tools/release.sh` refuses a release folder that is a link or another user's, and makes its own
   private (`0700`) before building in it.
 
+From the second review (details: `docs/security-review-2026-11-25-round2.md`):
+
+- Fixed a deadlock: a management action (new session, rename) racing the first open of a session could
+  hang the bridge. Fixed use-after-free crashes when a terminal closed (its shell exited) while a browser
+  typed into it, switched away or closed. A terminal is now kept alive by a reference from every viewer
+  and every task using it, and the last one destroys it.
+- No waiting on Rex while holding the hub's lock: attaching, opening a stream and restarting one happen
+  outside it, so a slow or stuck terminal no longer freezes the other browsers.
+- Every browser's queue is bounded in bytes and frames. State updates (mode, Rex up or down, theme, the
+  session list) replace their own queued copy, and `closed` and `exited` always get through, so a
+  busy terminal can no longer hide them. "Load all scrollback" and the Copy view send at most the last
+  10,000 and 20,000 rows; the Copy view shows at most 5,000 lines and says when it cut.
+- Opening, sizing and terminal actions count against the per-browser limit of 8 heavy requests a
+  second; the 200-messages-a-second limit is a hard cap per second. A browser that stops reading is
+  dropped after 30 seconds, and the 20-second silence check runs even while output keeps flowing.
+- Pastes: every paste, in both terminals and from a phone keyboard, goes to Rex as a paste with ESC and
+  C1 control characters removed, so a pasted text cannot end bracketed paste early and type the rest as
+  commands.
+- `?term=` in the address applies to that page load only; `?dbg=1` works only when rweb runs with
+  `--debug-input`.
+- Upload tokens belong to the page that asked: they are withdrawn when it turns read-only or leaves,
+  and refused when it has moved to another terminal, both when the upload arrives and before its path is
+  pasted. A transfer that sends nothing for 30 seconds is cut. Token lifetimes count while the machine
+  sleeps.
+- Secret files, the token file and the upload folder are checked on an open descriptor and used through
+  it; every folder above them must be root's or yours and not writable by others. The upload folder is
+  opened once at startup. The unix socket's folder must be yours. **Upgrade note:** rweb now refuses to
+  start when one of these sits under a folder another user can change; the error names the folder.
+- `--owner` requires `--allow-host` (unless `--owner-from-tailscale`); `--token` follows the token-file
+  rules; `--random-token` prints its address only to a terminal.
+- A request target with a control byte or a space is refused; the `/s/<id>` redirect comes after the
+  access check and encodes what it copies. Responses that set the token cookie are not cached;
+  vendored scripts are revalidated on every load. `/api/tree` needs `--enable-lab`.
+- The Rex client: a ceiling of 16 MiB per message whatever Rex advertises, reconnect tokens of at most
+  256 printable bytes, 10-second handshakes, JSON nested at most 64 deep, Rex's events in a bounded
+  ring, the welcome built without an assertion, ownership fixes on reconnect and close, the input queue
+  bounded in bytes for every kind of input, and a duplicate response no longer leaks.
+- The terminal mirror: resizes outside 1-4,096 per side or over 1,048,576 cells are ignored; a mirror
+  that fails is restarted instead of freezing; fixed memory leaks (the escape-sequence parser's buffers,
+  theme strings) and a double free on out-of-memory. Rex's in-band messages are split off by a rewritten
+  splitter that never reorders program output (the old one could swap an ESC and the byte after it).
+- Fuzzing covers the splitter against a reference model, snapshot framing and WebSocket message
+  reassembly.
+- Docs: the macOS Tailscale layout is for a Mac where you are the only local account; the SSH tunnel's
+  `/s/<id>/` address is as private as its token; checksums detect damage, not tampering.
+- `tools/release.sh` will not overwrite a version it already built; `tools/dist.sh` removes its stage
+  after packing.
+
 ## 0.1.0 (2026-11-25, built and installed; not published)
 
 The first numbered version: the bridge and page as used daily on Linux and macOS, plus the fixes from

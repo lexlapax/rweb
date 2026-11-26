@@ -21,9 +21,17 @@ pub const Sender = struct {
     ctx: *anyopaque,
     /// Make the call and return when it has been answered. An error means it failed.
     call: *const fn (ctx: *anyopaque, method: []const u8, payload_json: []const u8) anyerror!void,
+    /// The largest request the connection takes now (Rex's `max_message_bytes`); null for
+    /// `default_max_message`.
+    max_message: ?*const fn (ctx: *anyopaque) u64 = null,
 
     pub fn forControl(ctl: *Control) Sender {
-        return .{ .ctx = ctl, .call = controlCall };
+        return .{ .ctx = ctl, .call = controlCall, .max_message = controlMaxMessage };
+    }
+
+    fn controlMaxMessage(ctx: *anyopaque) u64 {
+        const ctl: *Control = @ptrCast(@alignCast(ctx));
+        return ctl.maxMessage();
     }
 
     fn controlCall(ctx: *anyopaque, method: []const u8, payload_json: []const u8) anyerror!void {
@@ -41,6 +49,15 @@ const Item = union(enum) {
     key: []u8,
     /// A `block.event`: its type and the JSON of its payload.
     event: struct { kind: []u8, payload: []u8 },
+
+    /// Bytes it holds, counted against `Input.max_queued_bytes`.
+    fn size(i: Item) usize {
+        return switch (i) {
+            .text => |t| t.items.len,
+            .key => |k| k.len,
+            .event => |e| e.kind.len + e.payload.len,
+        };
+    }
 
     fn deinit(i: *Item, gpa: Allocator) void {
         switch (i.*) {
@@ -82,8 +99,13 @@ pub const Input = struct {
     stats: Stats = .{},
     worker: ?Io.Future(void) = null,
 
-    /// Most text held back before `writeText` says `Backpressure`.
+    /// Most bytes held back (text, keys and events alike) before a submission gets `Backpressure`.
     pub const max_queued_bytes = 1 << 20;
+    /// The request limit assumed when the sender does not say.
+    pub const default_max_message: u64 = 1 << 20;
+    /// Room for everything in a `terminal.write` request except the escaped IDs and text: the
+    /// request envelope (type, id, method) and the payload's keys.
+    const request_overhead = 256;
 
     pub const SubmitError = error{ Backpressure, Closed, InvalidUtf8 } || Allocator.Error;
 
@@ -147,19 +169,20 @@ pub const Input = struct {
     /// A key event (the `key` object of `client.key`, as JSON).
     pub fn key(q: *Input, key_json: []const u8) SubmitError!void {
         const copy = try q.gpa.dupe(u8, key_json);
-        errdefer q.gpa.free(copy);
-        try q.push(.{ .key = copy });
+        return q.push(.{ .key = copy }); // `push` owns it, even when it fails
     }
 
     /// A `block.event`, such as `paste` or `mouse`, with its payload as JSON.
     pub fn blockEvent(q: *Input, kind: []const u8, payload_json: []const u8) SubmitError!void {
         const k = try q.gpa.dupe(u8, kind);
-        errdefer q.gpa.free(k);
-        const p = try q.gpa.dupe(u8, payload_json);
-        errdefer q.gpa.free(p);
-        try q.push(.{ .event = .{ .kind = k, .payload = p } });
+        const p = q.gpa.dupe(u8, payload_json) catch |e| {
+            q.gpa.free(k);
+            return e;
+        };
+        return q.push(.{ .event = .{ .kind = k, .payload = p } }); // `push` owns them, even when it fails
     }
 
+    /// Queue `item`, which this owns from now on: on failure it is freed.
     fn push(q: *Input, item: Item) SubmitError!void {
         var it = item;
         q.mu.lockUncancelable(q.io);
@@ -168,7 +191,7 @@ pub const Input = struct {
             it.deinit(q.gpa);
             return error.Closed;
         }
-        if (q.queue.items.len >= 4096) {
+        if (q.queue.items.len >= 4096 or q.queued_bytes + it.size() > max_queued_bytes) {
             it.deinit(q.gpa);
             return error.Backpressure;
         }
@@ -176,6 +199,7 @@ pub const Input = struct {
             it.deinit(q.gpa);
             return e;
         };
+        q.queued_bytes += it.size();
         q.kick();
     }
 
@@ -207,9 +231,9 @@ pub const Input = struct {
                     q.mu.unlock(q.io);
                     break;
                 }
-                var item = q.queue.orderedRemove(0);
+                var item = q.takeHead();
                 q.in_flight = true;
-                if (item == .text) q.queued_bytes -= item.text.items.len;
+                q.queued_bytes -= item.size();
                 q.mu.unlock(q.io);
                 defer item.deinit(q.gpa);
 
@@ -227,6 +251,33 @@ pub const Input = struct {
                 q.mu.unlock(q.io);
             }
         }
+    }
+
+    /// Take the next item to send. Caller holds `mu`; the queue is not empty. Text longer than
+    /// one write may carry is cut at a character boundary, and the rest stays at the head.
+    fn takeHead(q: *Input) Item {
+        const head = &q.queue.items[0];
+        if (head.* == .text) {
+            const t = &head.text;
+            const n = utf8Cut(t.items, q.maxWriteBytes());
+            if (n < t.items.len) cut: {
+                var part: std.ArrayList(u8) = .empty;
+                // Out of memory: send it whole; Rex refuses it if it is too large.
+                part.appendSlice(q.gpa, t.items[0..n]) catch break :cut;
+                t.replaceRangeAssumeCapacity(0, n, &.{});
+                return .{ .text = part };
+            }
+        }
+        return q.queue.orderedRemove(0);
+    }
+
+    /// Most text bytes one `terminal.write` may carry so its request fits the connection's
+    /// message limit: JSON escapes a byte to at most 6 (`\u00XX`), the IDs included.
+    fn maxWriteBytes(q: *Input) usize {
+        const limit: u64 = if (q.sender.max_message) |f| f(q.sender.ctx) else default_max_message;
+        const overhead: u64 = request_overhead + 6 * (q.session_id.len + q.block_id.len);
+        if (limit <= overhead + 6) return 1;
+        return @intCast(@min((limit - overhead) / 6, std.math.maxInt(usize)));
     }
 
     fn send(q: *Input, item: *Item) bool {
@@ -262,6 +313,16 @@ pub const Input = struct {
         return true;
     }
 };
+
+/// The longest prefix of UTF-8 `text` of at most `max` bytes that ends at a character boundary,
+/// but at least one whole character.
+fn utf8Cut(text: []const u8, max: usize) usize {
+    if (text.len <= max) return text.len;
+    var n = max;
+    while (n > 0 and text[n] & 0xc0 == 0x80) n -= 1;
+    if (n == 0) n = @min(text.len, std.unicode.utf8ByteSequenceLength(text[0]) catch 1);
+    return n;
+}
 
 // ---- tests ----
 
@@ -472,4 +533,75 @@ test "live: characters submitted one at a time reach a real shell in order (need
         if (all) return;
     }
     return error.OutOfOrderOrLost;
+}
+
+test "input: keys and events count against the byte cap too" {
+    const a = testing.allocator;
+    var rec: Recorder = .{ .io = testing.io, .gpa = a, .delay_ms = 300 };
+    defer rec.deinit();
+    const q = try Input.open(a, testing.io, rec.sender(), "s", "b");
+    defer q.close();
+    try q.writeText("go"); // in flight for a while
+    try testing.io.sleep(.fromMilliseconds(30), .awake);
+    const key = try a.alloc(u8, 64 * 1024);
+    defer a.free(key);
+    @memset(key, 'k');
+    var accepted: usize = 0;
+    while (accepted < 100) : (accepted += 1) {
+        q.key(key) catch |e| {
+            try testing.expectEqual(error.Backpressure, e);
+            break;
+        };
+    }
+    try testing.expectEqual(Input.max_queued_bytes / key.len, accepted);
+    try testing.expectError(error.Backpressure, q.blockEvent("paste", key));
+}
+
+/// A sender with a small message limit that keeps every payload it gets.
+const Bodies = struct {
+    gpa: Allocator,
+    limit: u64,
+    bodies: std.ArrayList([]u8) = .empty,
+
+    fn deinit(b: *Bodies) void {
+        for (b.bodies.items) |x| b.gpa.free(x);
+        b.bodies.deinit(b.gpa);
+    }
+    fn call(ctx: *anyopaque, _: []const u8, payload: []const u8) anyerror!void {
+        const b: *Bodies = @ptrCast(@alignCast(ctx));
+        try b.bodies.append(b.gpa, try b.gpa.dupe(u8, payload));
+    }
+    fn maxMessage(ctx: *anyopaque) u64 {
+        const b: *Bodies = @ptrCast(@alignCast(ctx));
+        return b.limit;
+    }
+    fn sender(b: *Bodies) Sender {
+        return .{ .ctx = b, .call = call, .max_message = maxMessage };
+    }
+};
+
+test "input: a coalesced write is cut so each request fits the message limit" {
+    const a = testing.allocator;
+    var b: Bodies = .{ .gpa = a, .limit = 4096 };
+    defer b.deinit();
+    const q = try Input.open(a, testing.io, b.sender(), "session:1", "block:1");
+    defer q.close();
+    // Control bytes escape to six bytes each, the worst case; a two-byte character must not be split.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..3000) |i| try text.appendSlice(a, if (i % 3 == 0) "\x01" else if (i % 3 == 1) "\xc3\xa9" else "x");
+    try q.writeText(text.items);
+    try q.flush(5000);
+    try testing.expect(b.bodies.items.len > 1);
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(a);
+    for (b.bodies.items) |body| {
+        // What Control.call wraps around the payload, with the longest id.
+        const envelope = "{\"type\":\"request\",\"id\":\"18446744073709551615\",\"method\":\"com.superlogical.terminal.write\",\"payload\":}".len;
+        try testing.expect(body.len + envelope <= b.limit);
+        const p = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+        defer p.deinit();
+        try joined.appendSlice(a, p.value.object.get("args").?.object.get("data").?.string);
+    }
+    try testing.expectEqualStrings(text.items, joined.items);
 }

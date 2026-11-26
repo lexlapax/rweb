@@ -16,12 +16,15 @@ pub const usage =
     \\  --listen-tcp PORT         loopback TCP only (127.0.0.1); 0 picks a port
     \\
     \\Who may connect:
-    \\  --owner LOGIN             required Tailscale-User-Login (Tailscale Serve sets it)
+    \\  --owner LOGIN             required Tailscale-User-Login (Tailscale Serve sets it); needs
+    \\                            --allow-host
     \\  --owner-from-tailscale    take the owner from this node's own Tailscale login (`tailscale status`)
-    \\  --token TOKEN             shared secret in the `token` query or `rweb-token` header (tests only:
-    \\                            it shows in the process list; prefer --token-file)
+    \\  --token TOKEN             shared secret in the `token` query or `rweb-token` header, 16+
+    \\                            letters, digits, - or _ (tests only: it shows in the process
+    \\                            list; prefer --token-file)
     \\  --token-file PATH         the same, read from a file only you can read (mode 0600)
-    \\  --random-token            make a token and print the URL (loopback tests)
+    \\  --random-token            make a token and print the URL when standard error is a
+    \\                            terminal (loopback tests)
     \\  --own-address IP          this node's Tailscale address (repeatable); requests from
     \\                            it are refused. With --owner and none given, `tailscale ip`
     \\                            is asked; if that fails the bridge will not start
@@ -80,6 +83,16 @@ pub const Parsed = struct {
 
 pub const PeerUid = union(enum) { uid: u32, self };
 
+/// The shortest token accepted, from `--token` or `--token-file`.
+pub const min_token_len = 16;
+
+/// Whether a secret holds only characters that are safe in a URL path, a query and a cookie:
+/// letters, digits, `-` and `_` (so no CR or LF can reach a header).
+pub fn isSafeSecret(text: []const u8) bool {
+    for (text) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
+    return true;
+}
+
 pub const Error = error{
     Usage,
     /// `--version`: print the version and exit.
@@ -94,6 +107,10 @@ pub const Error = error{
     NeedBackendSecret,
     /// `--own-address` that is not an IP address.
     BadAddress,
+    /// `--owner` without any `--allow-host`: any Host name, a rebound one included, would be accepted.
+    NeedAllowHost,
+    /// `--token` that is too short or holds characters other than letters, digits, `-` and `_`.
+    BadToken,
 } || Allocator.Error;
 
 /// Parse `args` (without the program name). Slices in the result point into `args`, except
@@ -121,7 +138,10 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
         } else if (eql(u8, a, "--owner-from-tailscale")) {
             p.owner_from_tailscale = true;
         } else if (eql(u8, a, "--token")) {
-            p.token = try value(args, &i);
+            const v = try value(args, &i);
+            // The same rules as a token file: it reaches a cookie and a URL, so no CR, LF or space.
+            if (v.len < min_token_len or !isSafeSecret(v)) return error.BadToken;
+            p.token = v;
         } else if (eql(u8, a, "--token-file")) {
             p.token_file = try value(args, &i);
         } else if (eql(u8, a, "--allow-host")) {
@@ -187,6 +207,8 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
         },
     }
     if (p.owner != null and p.owner_from_tailscale) return error.Usage;
+    // An owner rule names the host it is for. (`--owner-from-tailscale` adds this node's DNS name.)
+    if (p.owner != null and p.allowed_hosts.len == 0) return error.NeedAllowHost;
     if (p.token != null or p.token_file != null) p.random_token = false;
     // With an owner rule the own-address rule must be enforceable: fail closed.
     if ((p.owner != null or p.owner_from_tailscale) and !p.allow_own_address and p.own_addresses.len == 0) p.detect_own_addresses = true;
@@ -233,25 +255,25 @@ test "a listener is required, and only one" {
 
 test "a unix socket needs an access rule and defaults to root as the only peer" {
     try testing.expectError(error.NoAccessRule, parseT(&.{ "--listen-unix", "/x/b.sock" }));
-    const p = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com" });
+    const p = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--allow-host", "box.example" });
     try testing.expectEqual(@as(u32, 0), p.peer_uids.?[0].uid);
     try testing.expect(p.detect_own_addresses); // fail closed: the own-address rule must be enforceable
-    const q = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--allow-own-address" });
+    const q = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--allow-host", "box.example", "--allow-own-address" });
     try testing.expect(!q.detect_own_addresses);
 }
 
 test "an --own-address that is not an address stops startup" {
-    try testing.expectError(error.BadAddress, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--own-address", "not-an-ip" }));
-    try testing.expectError(error.BadAddress, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--own-address", "100.64.0.5", "--own-address", "" }));
-    const p = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--own-address", "100.64.0.5", "--own-address", "fd7a:115c:a1e0::5" });
+    try testing.expectError(error.BadAddress, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--allow-host", "box.example", "--own-address", "not-an-ip" }));
+    try testing.expectError(error.BadAddress, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--allow-host", "box.example", "--own-address", "100.64.0.5", "--own-address", "" }));
+    const p = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--allow-host", "box.example", "--own-address", "100.64.0.5", "--own-address", "fd7a:115c:a1e0::5" });
     try testing.expect(!p.detect_own_addresses); // the two addresses were kept: nothing to detect
 }
 
 test "loopback TCP without any rule gets a random token" {
     const p = try parseT(&.{ "--listen-tcp", "0" });
     try testing.expect(p.random_token);
-    const q = try parseT(&.{ "--listen-tcp", "8080", "--token", "abc" });
-    try testing.expect(!q.random_token and std.mem.eql(u8, q.token.?, "abc"));
+    const q = try parseT(&.{ "--listen-tcp", "8080", "--token", "abcdefgh-0123456_" });
+    try testing.expect(!q.random_token and std.mem.eql(u8, q.token.?, "abcdefgh-0123456_"));
     try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--allow-peer-uid", "0" }));
 }
 
@@ -270,24 +292,24 @@ test "numbers and options are checked" {
 test "owner from Tailscale counts as an owner rule" {
     const p = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner-from-tailscale" });
     try testing.expect(p.detect_own_addresses);
-    try testing.expectError(error.Usage, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "a@b", "--owner-from-tailscale" }));
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "a@b", "--allow-host", "box.example", "--owner-from-tailscale" }));
 }
 
 test "loopback TCP with an owner rule needs a backend secret, unless forgeability is accepted" {
     try testing.expectError(error.NeedBackendSecret, parseT(&.{ "--listen-tcp", "7695", "--owner-from-tailscale" }));
-    try testing.expectError(error.NeedBackendSecret, parseT(&.{ "--listen-tcp", "7695", "--owner", "a@b", "--allow-own-address" }));
+    try testing.expectError(error.NeedBackendSecret, parseT(&.{ "--listen-tcp", "7695", "--owner", "a@b", "--allow-host", "box.example", "--allow-own-address" }));
     const ok = try parseT(&.{ "--listen-tcp", "7695", "--owner-from-tailscale", "--backend-secret-file", "/x/secret" });
     try testing.expect(ok.backend_secret_file != null);
-    const test_only = try parseT(&.{ "--listen-tcp", "7695", "--owner", "a@b", "--allow-forgeable-loopback-identity" });
+    const test_only = try parseT(&.{ "--listen-tcp", "7695", "--owner", "a@b", "--allow-host", "box.example", "--allow-forgeable-loopback-identity" });
     try testing.expect(test_only.allow_forgeable_loopback_identity);
     // A token-only loopback listener is the test setup and needs none of it.
     _ = try parseT(&.{ "--listen-tcp", "0" });
     // A unix socket has a real peer check: a backend secret there is a mistake.
-    try testing.expectError(error.Usage, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "a@b", "--backend-secret-file", "/x/s" }));
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "a@b", "--allow-host", "box.example", "--backend-secret-file", "/x/s" }));
 }
 
 test "token and token file are exclusive; hosts and lab are carried" {
-    try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--token", "a", "--token-file", "/x" }));
+    try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--token", "abcdefgh-0123456_", "--token-file", "/x" }));
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), &.{ "--listen-tcp", "0", "--allow-host", "a.example", "--allow-host", "b.example", "--enable-lab" });
@@ -309,4 +331,23 @@ test "file transfer is off unless asked for, and uploads need a named absolute f
     try testing.expectError(error.Usage, parseT(&.{ "--listen-tcp", "0", "--enable-file-transfer", "--observe-only" }));
     try testing.expectError(error.BadNumber, parseT(&.{ "--listen-tcp", "0", "--max-transfer-mb", "0" }));
     try testing.expectError(error.BadNumber, parseT(&.{ "--listen-tcp", "0", "--max-transfer-mb", "99999" }));
+}
+
+test "an owner rule needs an allowed host, unless it comes from Tailscale" {
+    try testing.expectError(error.NeedAllowHost, parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com" }));
+    try testing.expectError(error.NeedAllowHost, parseT(&.{ "--listen-tcp", "7695", "--owner", "a@b", "--allow-forgeable-loopback-identity" }));
+    _ = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner", "me@example.com", "--allow-host", "box.example" });
+    // The node's own DNS name is added at startup.
+    _ = try parseT(&.{ "--listen-unix", "/x/b.sock", "--owner-from-tailscale" });
+    // A token-only listener needs none.
+    _ = try parseT(&.{ "--listen-tcp", "0", "--token", "0123456789abcdef" });
+}
+
+test "--token follows the token-file rules" {
+    for ([_][]const u8{ "short", "0123456789abcde", "0123456789abcdef\r\nSet-Cookie: x=y", "0123456789abcdef ", "0123456789abcdef;", "0123456789abcdef/x", "0123456789abcdéf" }) |bad| {
+        try testing.expectError(error.BadToken, parseT(&.{ "--listen-tcp", "0", "--token", bad }));
+    }
+    const ok = try parseT(&.{ "--listen-tcp", "0", "--token", "Abc-def_0123456789" });
+    try testing.expectEqualStrings("Abc-def_0123456789", ok.token.?);
+    try testing.expect(isSafeSecret("a-Z_9") and !isSafeSecret("a b") and !isSafeSecret("a\n"));
 }

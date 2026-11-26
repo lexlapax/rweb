@@ -28,10 +28,16 @@ pub const Message = union(enum) {
 
 pub const Splitter = struct {
     gpa: Allocator,
-    /// `ESC _ rex1;<nonce>;`
+    /// `ESC _ rex1;<nonce>;`. ESC appears in it only at index 0, which the state machine relies
+    /// on: after a mismatch inside the prefix, only the mismatching byte can start a new message.
     prefix: []u8,
-    /// Bytes held back because they might start a message.
+    /// The candidate message so far: a prefix of `prefix`, or all of it and then the body (which
+    /// never holds an ESC), plus a trailing ESC when `esc_pending`. Nothing before it is held, and
+    /// it is copied in once; it never exceeds `prefix.len + max_body + 1` bytes.
     held: std.ArrayList(u8) = .empty,
+    /// The last byte held is an ESC inside the body: `\` next ends the message, anything else
+    /// means the candidate was program output.
+    esc_pending: bool = false,
 
     pub fn init(gpa: Allocator, nonce: u64) !Splitter {
         return .{ .gpa = gpa, .prefix = try std.fmt.allocPrint(gpa, "\x1b_rex1;{d};", .{nonce}) };
@@ -43,94 +49,93 @@ pub const Splitter = struct {
     }
 
     /// Feed stream bytes. `sink.plain(bytes)` gets program output in order; `sink.message(m)`
-    /// gets each Rex message (its slices are valid only during the call).
+    /// gets each Rex message (its slices are valid only during the call). Plain bytes and messages
+    /// reach the sink in exactly the order they appear in the stream. Iterative: each input byte
+    /// is looked at once, or twice when it ends a candidate (it may start the next one).
     pub fn feed(s: *Splitter, bytes: []const u8, sink: anytype) anyerror!void {
         var i: usize = 0;
-        var plain_start: usize = 0;
         while (i < bytes.len) {
-            if (s.held.items.len == 0) {
-                // Ground: look for an ESC.
-                const esc = std.mem.indexOfScalarPos(u8, bytes, i, 0x1b) orelse {
-                    i = bytes.len;
-                    break;
-                };
-                if (esc > plain_start) try sink.plain(bytes[plain_start..esc]);
-                plain_start = esc;
-                i = esc;
-                try s.held.append(s.gpa, bytes[i]);
-                i += 1;
-                plain_start = i;
+            const h = s.held.items.len;
+            if (h == 0) {
+                // Ground: everything up to the next ESC is program output.
+                const esc = std.mem.indexOfScalarPos(u8, bytes, i, 0x1b) orelse bytes.len;
+                if (esc > i) try sink.plain(bytes[i..esc]);
+                if (esc == bytes.len) return;
+                try s.held.append(s.gpa, 0x1b);
+                i = esc + 1;
                 continue;
             }
-            // Holding a candidate: take one byte and decide.
             const b = bytes[i];
-            i += 1;
-            plain_start = i;
-            try s.held.append(s.gpa, b);
-            const h = s.held.items;
-            if (h.len <= s.prefix.len) {
-                if (!std.mem.eql(u8, h, s.prefix[0..h.len])) try s.flushHeld(sink);
+            if (h < s.prefix.len) {
+                if (b == s.prefix[h]) {
+                    try s.held.append(s.gpa, b);
+                    i += 1;
+                } else {
+                    // Not ours. The held bytes hold no other ESC, so they are all program output;
+                    // `b` is looked at again from ground, where an ESC starts a new candidate.
+                    try s.flushHeld(sink);
+                }
                 continue;
             }
-            // Past the prefix: the body runs to ESC \.
-            if (h.len > s.prefix.len + max_body + 2) {
-                try s.flushHeld(sink);
+            if (s.esc_pending) {
+                s.esc_pending = false;
+                if (b == '\\') {
+                    i += 1;
+                    defer s.held.clearRetainingCapacity();
+                    try s.deliver(s.held.items[s.prefix.len .. h - 1], sink);
+                    continue;
+                }
+                // An ESC inside the body that is not the terminator: the candidate was program
+                // output up to that ESC, and the ESC may start a new candidate with `b`.
+                defer {
+                    s.held.items[0] = 0x1b;
+                    s.held.items.len = 1;
+                }
+                try sink.plain(s.held.items[0 .. h - 1]);
                 continue;
             }
             if (b == 0x1b) {
-                // Could be the ST's ESC; or a new candidate. Wait for the next byte.
+                try s.held.append(s.gpa, b);
+                s.esc_pending = true;
+                i += 1;
                 continue;
             }
-            if (b == '\\' and h[h.len - 2] == 0x1b) {
-                const body = h[s.prefix.len .. h.len - 2];
-                try s.deliver(body, sink);
-                s.held.clearRetainingCapacity();
-                continue;
-            }
-            if (h[h.len - 2] == 0x1b) {
-                // ESC not followed by `\` inside a body: not ours. Give back all but the
-                // final byte, which may itself start something; re-scan it.
-                const last = h[h.len - 1];
-                s.held.items.len -= 1;
+            // Body bytes up to the next ESC, while they fit.
+            const room = max_body - (h - s.prefix.len);
+            const run_end = std.mem.indexOfScalarPos(u8, bytes, i, 0x1b) orelse bytes.len;
+            if (run_end - i > room) {
+                // Too long to be a message: program output. The bytes after the held ones are
+                // plain too (no ESC among them), and ground passes them on.
                 try s.flushHeld(sink);
-                if (last == 0x1b) {
-                    try s.held.append(s.gpa, last);
-                } else try sink.plain(&.{last});
+                continue;
             }
+            try s.held.appendSlice(s.gpa, bytes[i..run_end]);
+            i = run_end;
         }
-        if (s.held.items.len == 0 and plain_start < bytes.len) try sink.plain(bytes[plain_start..]);
     }
 
+    /// Hand everything held to the sink as program output.
     fn flushHeld(s: *Splitter, sink: anytype) anyerror!void {
-        if (s.held.items.len == 0) return;
-        // A mismatch at byte k means bytes before k are plain, but the mismatching byte could
-        // itself be an ESC that starts a real message. Re-scan from there.
-        const h = s.held.items;
-        const again = std.mem.indexOfScalarPos(u8, h, 1, 0x1b);
-        if (again) |k| {
-            const rest = try s.gpa.dupe(u8, h[k..]);
-            defer s.gpa.free(rest);
-            try sink.plain(h[0..k]);
+        defer {
             s.held.clearRetainingCapacity();
-            return s.feed(rest, sink);
+            s.esc_pending = false;
         }
-        try sink.plain(h);
-        s.held.clearRetainingCapacity();
+        if (s.held.items.len > 0) try sink.plain(s.held.items);
     }
 
     /// Flush what is held as program output (the stream ended).
     pub fn finish(s: *Splitter, sink: anytype) !void {
         try s.flushHeld(sink);
-        if (s.held.items.len > 0) {
-            try sink.plain(s.held.items);
-            s.held.clearRetainingCapacity();
-        }
     }
 
     fn deliver(s: *Splitter, body: []const u8, sink: anytype) !void {
         var arena_state = std.heap.ArenaAllocator.init(s.gpa);
         defer arena_state.deinit();
-        const msg = parseBody(arena_state.allocator(), body) catch Message.unknown;
+        // A malformed body is a message of no known type; running out of memory is an error.
+        const msg = parseBody(arena_state.allocator(), body) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => Message.unknown,
+        };
         try sink.message(msg);
     }
 };
@@ -180,6 +185,108 @@ fn u16Field(o: std.json.ObjectMap, name: []const u8) ?u16 {
 fn u32Field(o: std.json.ObjectMap, name: []const u8) ?u32 {
     const v = o.get(name) orelse return null;
     return if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) @intCast(v.integer) else null;
+}
+
+// ---- test support: a reference splitter, also used by the fuzz target ----
+
+/// The splitter's rules applied to a whole stream at once: no state across calls, written for
+/// clarity, to check `Splitter` against. A candidate at an ESC is the prefix, then a body of at
+/// most `max_body` bytes without an ESC, then `ESC \`. A mismatch in the prefix makes the bytes
+/// matched so far program output and the mismatching byte is looked at again; an ESC in the body
+/// not followed by `\` makes everything before it program output and starts again at that ESC;
+/// a body byte past `max_body` makes the candidate, that byte included, program output; a
+/// candidate the stream ends inside is program output.
+pub fn referenceSplit(gpa: Allocator, nonce: u64, input: []const u8, sink: anytype) !void {
+    var buf: [32]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&buf, "\x1b_rex1;{d};", .{nonce}) catch unreachable;
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] != 0x1b) {
+            const next = std.mem.indexOfScalarPos(u8, input, i, 0x1b) orelse input.len;
+            try sink.plain(input[i..next]);
+            i = next;
+            continue;
+        }
+        var j = i + 1;
+        while (j < input.len and j - i < prefix.len and input[j] == prefix[j - i]) j += 1;
+        if (j - i < prefix.len) {
+            try sink.plain(input[i..j]);
+            i = j;
+            continue;
+        }
+        const body_end = std.mem.indexOfScalarPos(u8, input, j, 0x1b) orelse input.len;
+        if (body_end - j > max_body) {
+            try sink.plain(input[i .. j + max_body + 1]);
+            i = j + max_body + 1;
+            continue;
+        }
+        if (body_end + 1 >= input.len) {
+            try sink.plain(input[i..]);
+            return;
+        }
+        if (input[body_end + 1] == '\\') {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            try sink.message(parseBody(arena.allocator(), input[j..body_end]) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => Message.unknown,
+            });
+            i = body_end + 2;
+        } else {
+            try sink.plain(input[i..body_end]);
+            i = body_end;
+        }
+    }
+}
+
+/// A sink that records program output and messages in order, so two splitters can be compared
+/// byte for byte and message for message.
+pub const Trace = struct {
+    gpa: Allocator,
+    plain_bytes: std.ArrayList(u8) = .empty,
+    /// One entry per message: how many plain bytes came before it, then what it said.
+    log: std.ArrayList(u8) = .empty,
+    messages: usize = 0,
+
+    pub fn deinit(t: *Trace) void {
+        t.plain_bytes.deinit(t.gpa);
+        t.log.deinit(t.gpa);
+    }
+
+    pub fn plain(t: *Trace, b: []const u8) !void {
+        try t.plain_bytes.appendSlice(t.gpa, b);
+    }
+
+    pub fn message(t: *Trace, m: Message) !void {
+        t.messages += 1;
+        try t.log.print(t.gpa, "@{d} ", .{t.plain_bytes.items.len});
+        switch (m) {
+            .resize => |r| try t.log.print(t.gpa, "resize {d}x{d} owner={?s};", .{ r.cols, r.rows, r.owner }),
+            .theme => |th| try t.log.print(t.gpa, "theme fg={?s} bg={?s} palette={d};", .{ th.foreground, th.background, th.palette.len }),
+            .child_exited => |e| try t.log.print(t.gpa, "exit {d};", .{e.exit_code}),
+            .unknown => try t.log.appendSlice(t.gpa, "unknown;"),
+        }
+    }
+
+    pub fn expectSame(want: *const Trace, got: *const Trace) !void {
+        try std.testing.expectEqualSlices(u8, want.plain_bytes.items, got.plain_bytes.items);
+        try std.testing.expectEqualStrings(want.log.items, got.log.items);
+    }
+};
+
+/// Feed `input` to a `Splitter` in pieces of the given sizes (cycling), then finish.
+pub fn streamSplit(gpa: Allocator, nonce: u64, input: []const u8, chunks: []const usize, sink: anytype) !void {
+    var s = try Splitter.init(gpa, nonce);
+    defer s.deinit();
+    var off: usize = 0;
+    var k: usize = 0;
+    while (off < input.len) : (k += 1) {
+        const n = if (chunks.len == 0) input.len else @max(1, chunks[k % chunks.len]);
+        const end = @min(input.len, off + n);
+        try s.feed(input[off..end], sink);
+        off = end;
+    }
+    try s.finish(sink);
 }
 
 // ---- tests ----
@@ -269,4 +376,125 @@ test "an unfinished message at the end is flushed as program output" {
     var c = try feedAll(3, &.{"a\x1b_rex1;3;{\"type\":"});
     defer c.deinit();
     try testing.expectEqualStrings("a\x1b_rex1;3;{\"type\":", c.plain_bytes.items);
+}
+
+test "an ESC inside a body that is not the terminator keeps its place in the output" {
+    // The old splitter gave "[" before the ESC here.
+    const input = "\x1b_rex1;5;ab\x1b[31mz";
+    for (0..input.len + 1) |cut| {
+        var c = try feedAll(5, &.{ input[0..cut], input[cut..] });
+        defer c.deinit();
+        try testing.expectEqualStrings(input, c.plain_bytes.items);
+        try testing.expectEqualStrings("", c.log.items);
+    }
+    // ...and the ESC can still start a real message.
+    var c = try feedAll(5, &.{"\x1b_rex1;5;ab\x1b\x1b_rex1;5;{\"type\":\"child_exited\",\"exit_code\":4}\x1b\\z"});
+    defer c.deinit();
+    try testing.expectEqualStrings("\x1b_rex1;5;ab\x1bz", c.plain_bytes.items);
+    try testing.expectEqualStrings("exit 4;", c.log.items);
+}
+
+/// Compare the streaming splitter with the reference on `input`, whole and in pieces.
+fn checkAgainstReference(input: []const u8, every_split: bool, rnd: std.Random) !void {
+    const a = testing.allocator;
+    var want: Trace = .{ .gpa = a };
+    defer want.deinit();
+    try referenceSplit(a, 7, input, &want);
+    try testing.expect(want.plain_bytes.items.len <= input.len);
+
+    var whole: Trace = .{ .gpa = a };
+    defer whole.deinit();
+    try streamSplit(a, 7, input, &.{}, &whole);
+    try want.expectSame(&whole);
+
+    var bytewise: Trace = .{ .gpa = a };
+    defer bytewise.deinit();
+    try streamSplit(a, 7, input, &.{1}, &bytewise);
+    try want.expectSame(&bytewise);
+
+    var sizes: [4]usize = undefined;
+    for (&sizes) |*z| z.* = 1 + rnd.uintLessThan(usize, 40);
+    var random: Trace = .{ .gpa = a };
+    defer random.deinit();
+    try streamSplit(a, 7, input, &sizes, &random);
+    try want.expectSame(&random);
+
+    if (!every_split) return;
+    // One splitter and trace for every cut, emptied in between: allocation is the slow part.
+    var s = try Splitter.init(a, 7);
+    defer s.deinit();
+    var got: Trace = .{ .gpa = a };
+    defer got.deinit();
+    for (0..input.len + 1) |cut| {
+        try s.feed(input[0..cut], &got);
+        try s.feed(input[cut..], &got);
+        try s.finish(&got);
+        try want.expectSame(&got);
+        got.plain_bytes.clearRetainingCapacity();
+        got.log.clearRetainingCapacity();
+    }
+}
+
+test "the streaming splitter agrees with the reference on random streams" {
+    const fragments = [_][]const u8{
+        "\x1b_rex1;7;",                                                "\x1b_rex1;8;", "\x1b_rex1;77;", "\x1b_rex1;",
+        "\x1b_rex",                                                    "\x1b",         "\\",            "\x1b\\",
+        "[",                                                           "_",            ";",             "abc",
+        "\x1b[31m",                                                    "\x1b_G",       "7;",            "{\"type\":\"child_exited\",\"exit_code\":2}",
+        "{\"type\":\"resize\",\"cols\":3,\"rows\":2,\"owner\":\"o\"}", "{\"type\":",   "not json",
+    };
+    var prng = std.Random.DefaultPrng.init(0x5eed_0f_5711);
+    const rnd = prng.random();
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(testing.allocator);
+    for (0..1500) |round| {
+        input.clearRetainingCapacity();
+        const n = 1 + rnd.uintLessThan(usize, 16);
+        for (0..n) |_| {
+            if (rnd.uintLessThan(u8, 10) == 0) {
+                try input.append(testing.allocator, rnd.int(u8));
+            } else try input.appendSlice(testing.allocator, fragments[rnd.uintLessThan(usize, fragments.len)]);
+        }
+        try checkAgainstReference(input.items, input.items.len <= 64 or round % 100 == 0, rnd);
+    }
+}
+
+test "a body of exactly max_body is a message; one byte more is program output" {
+    const a = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const rnd = prng.random();
+    const head = "{\"type\":\"child_exited\",\"exit_code\":9,\"pad\":\"";
+    const tail = "\"}";
+    for ([_]usize{ max_body - 1, max_body, max_body + 1, max_body + 2 }) |body_len| {
+        var input: std.ArrayList(u8) = .empty;
+        defer input.deinit(a);
+        try input.appendSlice(a, "x\x1b_rex1;7;");
+        try input.appendSlice(a, head);
+        try input.appendNTimes(a, 'p', body_len - head.len - tail.len);
+        try input.appendSlice(a, tail);
+        try input.appendSlice(a, "\x1b\\y");
+        var want: Trace = .{ .gpa = a };
+        defer want.deinit();
+        try referenceSplit(a, 7, input.items, &want);
+        if (body_len <= max_body) {
+            try testing.expectEqualStrings("@1 exit 9;", want.log.items);
+            try testing.expectEqualStrings("xy", want.plain_bytes.items);
+        } else {
+            try testing.expectEqual(@as(usize, 0), want.messages);
+            try testing.expectEqualSlices(u8, input.items, want.plain_bytes.items);
+        }
+        try checkAgainstReference(input.items, false, rnd);
+        // Cut right around the limit, too.
+        const limit_at = 1 + "\x1b_rex1;7;".len + max_body;
+        for (limit_at - 2..limit_at + 3) |cut| {
+            var s = try Splitter.init(a, 7);
+            defer s.deinit();
+            var got: Trace = .{ .gpa = a };
+            defer got.deinit();
+            try s.feed(input.items[0..cut], &got);
+            try s.feed(input.items[cut..], &got);
+            try s.finish(&got);
+            try want.expectSame(&got);
+        }
+    }
 }

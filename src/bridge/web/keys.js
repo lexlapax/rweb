@@ -159,6 +159,44 @@
     return one.repeat(Math.min(Math.abs(rows), 100));
   }
 
+  // Pasted text, made safe to hand to Rex as a paste. ESC and the C1 controls (U+0080 to U+009F,
+  // among them the one-character CSI, U+009B) are removed: with them a pasted text could carry its
+  // own "end of paste" (ESC [ 201 ~) and have the rest typed as commands ("pastejacking"), or send
+  // any other control sequence the shell would act on. Nothing a person means to paste needs them.
+  function cleanPaste(text) {
+    return String(text).replace(/[\x1b\x80-\x9f]/g, '');
+  }
+  // `beforeinput` and `input` types that put text in from outside: a paste or a drop.
+  const PASTE_INPUTS = ['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop'];
+  function isPasteInput(inputType) { return PASTE_INPUTS.includes(inputType); }
+
+  // The Copy view shows at most COPY_MAX_LINES rows (one element each), the last ones. Returns the
+  // lines to show, how many there were, and the note to show above them ('' when nothing is left
+  // out). `truncated`: the bridge already sent only the end of a longer history.
+  const COPY_MAX_LINES = 5000;
+  function groupDigits(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+  function copyView(text, truncated, max) {
+    const all = String(text).split('\n'), limit = max === undefined ? COPY_MAX_LINES : max;
+    const lines = all.length > limit ? all.slice(all.length - limit) : all;
+    const cut = lines.length < all.length;
+    let note = '';
+    if (truncated) note = `The history is longer than the bridge sends: showing its last ${groupDigits(lines.length)} lines.`;
+    else if (cut) note = `Showing the last ${groupDigits(lines.length)} of ${groupDigits(all.length)} lines.`;
+    return {lines, total: all.length, cut, note};
+  }
+
+  // Which terminal draws the page. `?term=wterm` or `?term=xterm` in the address chooses for that
+  // page load only; the choice saved on this device (by the menu's switch) is used otherwise. A link
+  // someone sends must not change what this device uses from then on.
+  function pickTerm(param, saved) {
+    if (param === 'wterm' || param === 'xterm') return param;
+    return saved === 'xterm' ? 'xterm' : 'wterm';
+  }
+  // Input diagnostics (`?dbg=1`) send every key event to the bridge's log. They run only when the
+  // bridge says it was started to receive them (`debug: true` in its `mode` message), so a link with
+  // `?dbg=1` alone does nothing.
+  function debugOn(asked, mode) { return !!asked && !!mode && mode.debug === true; }
+
   const FONT_MIN = 8, FONT_MAX = 28, FONT_DEFAULT = 14;
   function clampFont(n) {
     n = Math.round(Number(n));
@@ -173,7 +211,7 @@
     return Math.max(floor === undefined ? 0.35 : floor, Math.min(1, stageWidth / screenWidth));
   }
 
-  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

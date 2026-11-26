@@ -35,6 +35,9 @@ mkdir -p ~/.local/bin && install -m 0755 rweb-<version>-<platform>/rweb ~/.local
 rweb --version
 ```
 
+The checksums catch a damaged or incomplete download. They do not prove that nobody changed the release:
+`SHA256SUMS` comes from the same place as the archives, so whoever could change one could change both.
+
 The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README, the changelog, the
 licence (MIT) and the third-party notices. `rweb --version` shows the version, the commit it was built from, and the Rex
 API revisions it speaks. To build from source instead: `zig build -Doptimize=ReleaseSafe` with Zig 0.17.1 (see the README).
@@ -74,7 +77,7 @@ Do this once per tailnet, then once per machine.
 under its tags in the admin console), it has no owner login, so `--owner-from-tailscale` cannot work and
 rweb refuses to start with it. Name yourself instead: replace `--owner-from-tailscale` with
 `--owner you@example.com --allow-host <machine>.<tailnet>.ts.net` (your Tailscale login and the machine's
-own name) in sections 5 and 6.
+own name) in sections 5 and 6. rweb refuses `--owner` without `--allow-host`.
 
 Keep **Funnel off** for rweb's port: Funnel would publish it on the internet, and rweb refuses every
 request that comes through Funnel anyway. Devices that are tagged, or shared into your tailnet by someone
@@ -126,10 +129,18 @@ send a loopback request carrying your identity headers, so rweb also requires a 
 part of every path, which only Tailscale Serve knows; it refuses to start on loopback with an owner rule
 and no secret.
 
+**Use this layout only on a Mac where you are the only local account.** The secret is part of the Serve
+target, so other accounts on the Mac may be able to read it in `tailscale serve status`, or in the
+process list while the `tailscale serve` command runs. With it, another account could send requests with
+your identity to rweb. On a Mac shared with other accounts, do not run rweb this way.
+
 ```sh
 mkdir -p ~/.config/rweb
 (umask 077; head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > ~/.config/rweb/backend-secret)
 ```
+
+rweb reads the secret only from a file that is yours and closed to others, in folders that are yours or the
+system's and not writable by others (`~/.config/rweb` made as above is fine).
 
 As a LaunchAgent, `~/Library/LaunchAgents/local.rweb.plist` (replace `YOU` with your user name):
 
@@ -173,7 +184,9 @@ device**: a request from the Rex machine itself is refused, because any program 
 
 Without Tailscale, run rweb on loopback with a token and forward a port to it over SSH. The token is the
 only thing standing between a process that can reach the port and your Rex sessions, so keep it in a
-file only you can read and never pass it on the command line.
+file only you can read and never pass it on the command line. Make it with the command below, which picks
+a random one; do not make one up. The token file's folders must be yours or the system's and not writable
+by others.
 
 On the Rex machine (Linux or macOS):
 
@@ -202,6 +215,17 @@ a token). On a phone, use an SSH app that supports local port forwarding and kee
 while you use the page. Keep the forwarded port on loopback (no `-g`, no `GatewayPorts`), or other devices
 on that network could reach it.
 
+Treat the `/s/<id>/` address like the token. The `<id>` is made from the token, and with it someone can
+test guesses of the token on their own machine; that is why the token must be random. Do not share the
+address or post screenshots that show it. The first address, with `?token=`, can stay in the browser's
+history and address suggestions: open it once per browser, or delete it from the history afterwards. To
+change the token, write a new token file with the same command and restart rweb; the old token and the
+old `/s/<id>/` address then stop working.
+
+For a quick test, `--random-token` makes a token for that run only and prints the address with it, but
+only when rweb runs in a terminal. A token given with `--token` must be at least 16 characters of letters,
+digits, `-` and `_`; it shows in the process list, so prefer the token file.
+
 ## 8. Several machines
 
 Run one rweb on each machine that runs Rex; each serves only its own Rex. With Tailscale every machine
@@ -213,8 +237,9 @@ https://server.<tailnet>.ts.net:12443/    sessions on server
 ```
 
 Bookmark each, or add each to the phone's home screen. With SSH tunnels give each machine its own local
-port (`-L 7701:127.0.0.1:7700 you@desk`, `-L 7702:127.0.0.1:7700 you@server`); each keeps its own sign-in. Rex sessions on one machine
-are not visible through another machine's rweb.
+port (`-L 7701:127.0.0.1:7700 you@desk`, `-L 7702:127.0.0.1:7700 you@server`) and its own token; each keeps
+its own sign-in, and each `/s/<id>/` address is as secret as its token (section 7). Rex sessions on one
+machine are not visible through another machine's rweb.
 
 ## 9. Using the page
 
@@ -240,7 +265,8 @@ are not visible through another machine's rweb.
 ## 10. File transfer (off by default)
 
 `--enable-file-transfer` lets the page download any file your user can read (through Rex), and with
-`--upload-dir DIR` upload into that one folder. Uploaded files never replace an existing one, and their
+`--upload-dir DIR` upload into that one folder. The folder and every folder above it must be yours or the
+system's and not writable by others. Uploaded files never replace an existing one, and their
 path is pasted at the prompt. `--max-transfer-mb N` limits the size (default 256). Turn it on only if you
 want the browser to have that reach. Design and limits: [file-transfer.md](file-transfer.md) (in the
 source repository).
@@ -252,6 +278,12 @@ if you may want it back), then restart rweb: `systemctl --user restart rweb` on 
 `launchctl kickstart -k "gui/$(id -u)/local.rweb"` on macOS. Restarting rweb does not touch your Rex
 sessions, and open pages reconnect. The Serve entry, the secret and the token stay as they are.
 
+Upgrading to 0.1.1: rweb now checks more at startup and stops with a message naming what to fix (see
+section 12). It refuses `--owner` without `--allow-host`, a `--token` shorter than 16 characters or with
+other characters than letters, digits, `-` and `_`, and a secret file, token file or upload folder that is a
+link or sits under a folder another user can change. If you made those files as this guide says, nothing
+changes. Address the SSH tunnel through the `/s/<id>/` address it redirects to (section 7).
+
 ## 12. Troubleshooting
 
 Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.log` (macOS LaunchAgent).
@@ -261,6 +293,10 @@ Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.lo
 | `cannot find Rex's socket` | Rex is not running, or its socket is elsewhere: start Rex, or pass `--rex-socket`. |
 | `this node is a tagged Tailscale device` | Use `--owner` and `--allow-host` instead of `--owner-from-tailscale` (section 4, tagged machines). |
 | `cannot tell this node's Tailscale addresses` | The `tailscale` command is missing from `PATH` or Tailscale is down. |
+| `--owner needs --allow-host NAME` | Add `--allow-host <machine>.<tailnet>.ts.net` (section 4, tagged machines). |
+| `--token must be at least 16 characters` | Use a token file made with the command in section 7 instead. |
+| `cannot use secret file …` or `cannot use upload folder …` | The message names the file or folder and the folder where the check failed. `SymLink`: point the option at the real file. `TooOpen` or `NotOwned`: `chmod 600` the file (`700` a folder) and make sure it is yours. `FolderWritableByOthers` or `FolderNotOurs`: a folder above it can be changed by another user; move the file somewhere under your home folder. |
+| `SocketDirNotOurs` or `SocketDirNotPrivate` | The unix socket's folder must be yours and `0700`; use the runtime folder from section 5. |
 | 403 "request from this node's own address" | You opened the page on the Rex machine itself. Use another device. |
 | 403 from your phone through Tailscale | The phone is signed in to a different Tailscale account, or is a tagged or shared device. |
 | 403 through an SSH tunnel | No token or the wrong one: open `http://127.0.0.1:<port>/?token=<token>` once. |

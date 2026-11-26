@@ -8,11 +8,18 @@ const Control = @import("control.zig").Control;
 const wire = @import("wire.zig");
 
 pub const Error = error{
-    /// Rex answered with an error; see `Api.last_error`.
+    /// Rex answered with an error, or the call did not get an answer (the connection is down,
+    /// it timed out); `Api.last_error` says which.
     RexError,
-    /// The answer did not have the shape this client expects.
+    /// The answer did not have the shape this client expects (or nests deeper than
+    /// `max_json_depth`).
     BadShape,
+    /// The task making the call was cancelled.
+    Canceled,
 } || Allocator.Error;
+
+/// Deepest JSON nesting copied out of an answer; deeper is `BadShape`.
+pub const max_json_depth = 64;
 
 /// A result with its memory.
 pub fn Owned(comptime T: type) type {
@@ -79,18 +86,27 @@ pub const Api = struct {
     fn run(a: *Api, method: []const u8, body: ?[]const u8) Error!Owned(std.json.Value) {
         var r = a.ctl.call(method, body) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.RexError,
+            error.Canceled => return error.Canceled,
+            else => {
+                // No answer from Rex: say why, rather than leave an older call's message.
+                a.setLastError("{s}", .{@errorName(e)});
+                return error.RexError;
+            },
         };
         defer r.deinit();
         if (r.err) |er| {
-            if (a.last_error) |old| a.gpa.free(old);
-            a.last_error = std.fmt.allocPrint(a.gpa, "{s}: {s}", .{ er.code, er.message }) catch null;
+            a.setLastError("{s}: {s}", .{ er.code, er.message });
             return error.RexError;
         }
         var arena = std.heap.ArenaAllocator.init(a.gpa);
         errdefer arena.deinit();
-        const v = try cloneValue(arena.allocator(), r.payload orelse .{ .object = .empty });
+        const v = try cloneValue(arena.allocator(), r.payload orelse .{ .object = .empty }, 0);
         return .{ .arena = arena, .value = v };
+    }
+
+    fn setLastError(a: *Api, comptime fmt: []const u8, args: anytype) void {
+        if (a.last_error) |old| a.gpa.free(old);
+        a.last_error = std.fmt.allocPrint(a.gpa, fmt, args) catch null;
     }
 
     fn sessionBody(a: *Api, sid: []const u8, rest: []const u8) ![]u8 {
@@ -541,21 +557,25 @@ fn dupeOpt(al: Allocator, s: ?[]const u8) Allocator.Error!?[]const u8 {
     return if (s) |x| try al.dupe(u8, x) else null;
 }
 
-fn cloneValue(al: Allocator, v: std.json.Value) Allocator.Error!std.json.Value {
+/// A deep copy of `v` into `al`. Recursion is bounded: nesting deeper than `max_json_depth` is
+/// `BadShape` (a hostile answer cannot use up the stack).
+fn cloneValue(al: Allocator, v: std.json.Value, depth: u32) Error!std.json.Value {
     return switch (v) {
         .null, .bool, .integer, .float => v,
         .number_string => |s| .{ .number_string = try al.dupe(u8, s) },
         .string => |s| .{ .string = try al.dupe(u8, s) },
         .array => |a| blk: {
+            if (depth >= max_json_depth) return error.BadShape;
             var out = try std.json.Array.initCapacity(al, a.items.len);
-            for (a.items) |i| out.appendAssumeCapacity(try cloneValue(al, i));
+            for (a.items) |i| out.appendAssumeCapacity(try cloneValue(al, i, depth + 1));
             break :blk .{ .array = out };
         },
         .object => |o| blk: {
+            if (depth >= max_json_depth) return error.BadShape;
             var out: std.json.ObjectMap = .empty;
             try out.ensureTotalCapacity(al, o.count());
             var it = o.iterator();
-            while (it.next()) |e| out.putAssumeCapacity(try al.dupe(u8, e.key_ptr.*), try cloneValue(al, e.value_ptr.*));
+            while (it.next()) |e| out.putAssumeCapacity(try al.dupe(u8, e.key_ptr.*), try cloneValue(al, e.value_ptr.*, depth + 1));
             break :blk .{ .object = out };
         },
     };
@@ -703,4 +723,35 @@ test "live: every typed call on a throwaway session, and what ownership does (ne
     defer released.deinit();
     std.debug.print("ownership: disown result owner = {?s}\n", .{released.value.owner});
     try testing.expect(released.value.owner == null);
+}
+
+test "api: cloneValue stops at max_json_depth" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    for ([_]usize{ max_json_depth, max_json_depth + 1, 5000 }) |depth| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendNTimes(a, '[', depth);
+        try text.appendNTimes(a, ']', depth);
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, al, text.items, .{});
+        if (depth <= max_json_depth) {
+            _ = try cloneValue(al, v, 0);
+        } else try testing.expectError(error.BadShape, cloneValue(al, v, 0));
+    }
+}
+
+test "api: a call that gets no answer says why, and does not keep an older message" {
+    const a = testing.allocator;
+    const f = try fake.Fake.start(a, testing.io);
+    defer f.deinit();
+    const ctl = try Control.open(a, testing.io, .{ .socket_path = f.path, .call_timeout_ms = 100 });
+    defer ctl.close();
+    var api = Api.init(a, ctl);
+    defer api.deinit();
+    try testing.expectError(error.RexError, api.attach("session:none"));
+    try testing.expect(std.mem.indexOf(u8, api.last_error.?, "session_not_found") != null);
+    try testing.expectError(error.RexError, api.run("rweb.test.no_answer", null));
+    try testing.expectEqualStrings("Timeout", api.last_error.?);
 }

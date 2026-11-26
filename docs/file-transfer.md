@@ -27,8 +27,11 @@ into requesting**:
    Origin and (on macOS loopback) backend-secret checks. The bridge refuses when transfer is off, when the
    viewer is read-only, when no terminal is open, when the file is over the limit, or (upload) when no
    upload folder is set. These asks count against the 8-per-second heavy-request cap.
-2. The bridge answers with a **token**: 128 random bits, valid 30 seconds, good for one request, of one kind
-   (a download token cannot start an upload and the reverse). The page then requests `GET /xfer/<token>`
+2. The bridge answers with a **token**: 128 random bits, valid 30 seconds (on a clock that keeps counting
+   while the machine sleeps), good for one request, of one kind (a download token cannot start an upload
+   and the reverse), and tied to the page that asked. An upload token works only while that page may still
+   write to that terminal: it is withdrawn when the page turns read-only or closes, and refused (403) if the
+   page has moved to another terminal, both when the upload arrives and again before its path is pasted. The page then requests `GET /xfer/<token>`
    or `PUT /xfer/<token>`. Those pass the same access check as any request; a `PUT` also needs a matching
    `Origin`, as a WebSocket does, so another site's page cannot send one. The token is compared in constant
    time, and the request log never prints it (`/xfer/(token)`).
@@ -40,11 +43,12 @@ into requesting**:
 | A web page in the owner's browser (CSRF) makes the bridge hand over or accept a file | Tokens exist only inside the page that asked over the Origin-checked socket; `PUT` needs the page's own Origin. Tested: a cross-origin and an Origin-less `PUT` get 403 and the token is not spent. |
 | A guessed or replayed address | 128-bit random, single use, 30 s; unknown/short/odd tokens get a bare 404, same as when transfer is off. Tested. |
 | Reading files the owner never meant to share | Downloads give the page **the same files the owner's terminal can read** (Rex checks it is a regular file). That is the owner's own authority, and the reason it is off by default and logged. It is not a sandbox: there is no per-folder allow-list. |
-| An upload overwriting or escaping | The bridge, not Rex, writes the file, into the one folder (made 0700; refused at startup if others can enter it or it is not ours), with exclusive create, mode 0600, never replacing (`a.txt`, `a (1).txt`, …). The name is the last path component only, with everything but letters, digits and `. _ - + @ , ( )` and space replaced by `_`, no leading dots, at most 100 bytes. Tested with `../../etc/evil;rm -rf ~.txt`. |
+| An upload overwriting or escaping | The bridge, not Rex, writes the file, into the one folder (made 0700; refused at startup if others can enter it or it is not ours, or if a folder above it is another user's or writable by others without the sticky bit). The folder is opened once at startup and kept open, and files are created relative to that open folder, so renaming it or putting a link in its place later cannot send uploads elsewhere. Files are created exclusively, mode 0600, never replacing (`a.txt`, `a (1).txt`, …). The name is the last path component only, with everything but letters, digits and `. _ - + @ , ( )` and space replaced by `_`, no leading dots, at most 100 bytes. Tested with `../../etc/evil;rm -rf ~.txt`. |
 | Shell injection through an uploaded name | The pasted path is single-quoted with `'` escaped, and the name is already sanitized. Nothing is run: no Enter is sent. |
 | Header injection through a download name | `Content-Disposition` is built from a restricted ASCII form plus a percent-encoded `filename*`; control characters and quotes cannot appear. Tested. |
 | Content sniffing / script from a download | `application/octet-stream`, `attachment`, `nosniff`, `no-store`, and the page's CSP (`default-src 'none'`). |
-| Filling the disk or memory | Size announced up front and checked against the limit and against `Content-Length`; a download aborts past the limit; uploads stream in 64 KiB pieces; an incomplete or mismatching upload is deleted. 4 running, 16 waiting. |
+| Filling the disk or memory | Size announced up front and checked against the limit and against `Content-Length`; a download aborts past the limit; uploads stream in 64 KiB pieces; an incomplete or mismatching upload is deleted. 4 running, 16 waiting; a transfer takes a running slot before its token is used, so a busy bridge does not waste a token. |
+| A transfer that stalls | No bytes for 30 seconds, either way, and the connection is cut (a partial upload is deleted), so a stuck phone cannot hold a running slot. |
 | A read-only viewer | Refused at the first step. |
 | Many tokens held open | Capped at 16; expired ones are swept. |
 
@@ -69,7 +73,10 @@ into requesting**:
 - Wire (fake Rex, real HTTP and WebSocket): off by default; download through a token; missing file and
   over-limit file refused; read-only viewers refused; directory listing; upload lands only in the folder
   under a safe, new name with the path pasted; refusal of a foreign Origin, no Origin, wrong size, reuse,
-  oversize announcement, and a download token used for an upload.
+  oversize announcement, and a download token used for an upload; an upload token after its page turned
+  read-only (404) or left the terminal (403, no file made); an upload folder whose path was renamed away and
+  replaced by another folder or a link (the upload still lands in the original); a stalled upload cut and its
+  partial file removed; a busy bridge keeping the token.
 - Live (real Rex): download round trip and listing. Live (real Chrome and Rex, release build, throwaway
   session and folder): picker and typed path; a 300 000-byte download byte-identical by SHA-256, the token
   refused on reuse, the dialog closing; a 2 MB upload byte-identical with a hostile name (`../../phone pic; $(touch pwned).bin`

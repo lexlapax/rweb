@@ -3,6 +3,8 @@
 # always give the same archives (sorted member list, owner 0, fixed modes and timestamps, no
 # extended attributes, gzip without name or time). Works with BSD tar (macOS) and GNU tar (Linux).
 # Usage (from build.zig, in the repository root): sh tools/dist.sh VERSION DIST_DIR
+# DIST_DIR/stage/<target>/rweb is what this build installed; every target folder there is packed. The
+# stage is removed once packed, so a target left from an earlier build cannot be packed again later.
 set -eu
 version=$1
 dist=$2
@@ -18,6 +20,7 @@ fi
 
 rm -rf "$dist/work"
 rm -f "$dist"/rweb-*.tar.gz "$dist/SHA256SUMS"
+ls -d "$stage"/*/ >/dev/null 2>&1 || { echo "dist.sh: nothing staged in $stage" >&2; exit 1; }
 for dir in "$stage"/*/; do
   target=$(basename "$dir")
   name=rweb-$version-$target
@@ -35,7 +38,7 @@ for dir in "$stage"/*/; do
   # shellcheck disable=SC2086 # the member list is meant to split
   (cd "$dist/work" && tarc $members) | gzip -n -9 > "$dist/$name.tar.gz"
 done
-rm -rf "$dist/work"
+rm -rf "$dist/work" "$stage"
 cd "$dist"
 if command -v sha256sum >/dev/null 2>&1; then sha256sum rweb-*.tar.gz > SHA256SUMS; else shasum -a 256 rweb-*.tar.gz > SHA256SUMS; fi
 cat SHA256SUMS

@@ -15,11 +15,22 @@ const Allocator = std.mem.Allocator;
 const ghostty_vt = @import("ghostty-vt");
 const rex1 = @import("rex1.zig");
 const data = @import("data.zig");
+const wire = @import("wire.zig");
 
 const log = std.log.scoped(.rex_mirror);
 
 /// Biggest snapshot accepted.
 pub const max_snapshot = 256 * 1024 * 1024;
+
+/// Largest terminal side, and most cells, a Rex resize may ask for; any other resize is ignored.
+pub const max_resize_axis: u32 = 4096;
+pub const max_resize_cells: u32 = 1_048_576;
+
+pub fn resizeAllowed(cols: u32, rows: u32) bool {
+    if (cols < 1 or rows < 1 or cols > max_resize_axis or rows > max_resize_axis) return false;
+    const cells = std.math.mul(u32, cols, rows) catch return false;
+    return cells <= max_resize_cells;
+}
 
 pub const Status = enum { waiting_for_snapshot, live, failed };
 
@@ -58,6 +69,11 @@ pub const Mirror = struct {
     snap_scan: usize = 0,
     term: ghostty_vt.Terminal = undefined,
     vt: ghostty_vt.TerminalStream = undefined,
+    /// `term` and `vt` exist (from the snapshot on), whatever `status` says since; `deinit`
+    /// frees them. The VT stream holds OSC, APC and DCS buffers a program can fill.
+    term_made: bool = false,
+    /// A resize outside the limits was logged (once per mirror).
+    logged_bad_resize: bool = false,
     /// Set once the channel nonce is known.
     splitter: ?rex1.Splitter = null,
     theme: ?Theme = null,
@@ -92,7 +108,10 @@ pub const Mirror = struct {
     }
 
     pub fn deinit(m: *Mirror) void {
-        if (m.status == .live) m.term.deinit(m.gpa);
+        if (m.term_made) {
+            m.vt.deinit();
+            m.term.deinit(m.gpa);
+        }
         m.snap.deinit(m.gpa);
         if (m.splitter) |*s| s.deinit();
         if (m.theme) |*t| t.arena.deinit();
@@ -107,12 +126,20 @@ pub const Mirror = struct {
 
     fn sinkBytes(ctx: *anyopaque, bytes: []const u8) void {
         const m: *Mirror = @ptrCast(@alignCast(ctx));
-        m.feed(bytes) catch |e| {
-            log.err("mirror failed: {t}", .{e});
-            m.mu.lockUncancelable(m.io);
-            m.status = .failed;
-            m.mu.unlock(m.io);
-        };
+        m.feed(bytes) catch |e| m.fail(e);
+    }
+
+    /// The mirror cannot follow the stream any more (a bad snapshot, or out of memory while live):
+    /// stop applying bytes, and report it once, as the end of the stream (`mirror_failed`), so its
+    /// owner can start a new one. Later bytes are dropped without a word.
+    fn fail(m: *Mirror, e: anyerror) void {
+        m.mu.lockUncancelable(m.io);
+        defer m.mu.unlock(m.io);
+        if (m.status == .failed) return;
+        m.status = .failed;
+        log.warn("mirror failed, so its stream ends: {t}", .{e});
+        m.ended = .mirror_failed;
+        if (m.observer) |o| if (o.ended) |f| f(o.ctx, .mirror_failed);
     }
 
     fn sinkWelcome(ctx: *anyopaque, nonce: u64) void {
@@ -169,6 +196,7 @@ pub const Mirror = struct {
         if (used != end) return error.BadSnapshot;
         m.term = decoded.toOwned();
         m.vt = m.term.vtStream();
+        m.term_made = true;
         switch (decoded.continuation) {
             .ground => {},
             .bytes => |b| m.vt.nextSlice(b),
@@ -182,36 +210,11 @@ pub const Mirror = struct {
         try m.splitter.?.feed(rest, m);
     }
 
+    /// See `wire.snapshotEnd`.
+    pub const snapshotEnd = wire.snapshotEnd;
+
     // Splitter sink.
 
-    /// The length of the snapshot at the start of `buf`, once all of it is there; null while more is
-    /// needed. Reads only the framing (a 10-byte envelope, then records of a 10-byte header, tag
-    /// u16 and payload length u32 little-endian plus a checksum, and the payload, up to the FINISH
-    /// record; see Ghostty's src/terminal/snapshot/main.zig), resuming at `scan.*`. A record that
-    /// would end past `limit` fails at once, before its bytes arrive.
-    pub fn snapshotEnd(buf: []const u8, scan: *usize, limit: usize) error{ BadSnapshot, SnapshotTooLarge }!?usize {
-        const envelope_len = 10;
-        const header_len = 10;
-        const finish_tag: u16 = 6;
-        if (scan.* == 0) {
-            if (buf.len < envelope_len) {
-                if (!std.mem.startsWith(u8, "GHOSTSNP", buf[0..@min(buf.len, 8)])) return error.BadSnapshot;
-                return null;
-            }
-            if (!std.mem.eql(u8, buf[0..8], "GHOSTSNP")) return error.BadSnapshot;
-            scan.* = envelope_len;
-        }
-        while (scan.* <= buf.len and buf.len - scan.* >= header_len) {
-            const h = buf[scan.*..][0..header_len];
-            const tag = std.mem.readInt(u16, h[0..2], .little);
-            const payload: u64 = std.mem.readInt(u32, h[2..6], .little);
-            const record_end = @as(u64, scan.*) + header_len + payload;
-            if (record_end > limit) return error.SnapshotTooLarge;
-            if (tag == finish_tag) return if (buf.len >= record_end) @intCast(record_end) else null;
-            scan.* = @intCast(record_end); // may be past `buf.len` while the payload arrives
-        }
-        return null;
-    }
     pub fn plain(m: *Mirror, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         m.vt.nextSlice(bytes);
@@ -222,9 +225,17 @@ pub const Mirror = struct {
     pub fn message(m: *Mirror, msg: rex1.Message) !void {
         switch (msg) {
             .resize => |r| {
+                if (!resizeAllowed(r.cols, r.rows)) {
+                    if (!m.logged_bad_resize) log.warn("ignoring a resize to {d}x{d} (limits: 1 to {d} per side, {d} cells)", .{ r.cols, r.rows, max_resize_axis, max_resize_cells });
+                    m.logged_bad_resize = true;
+                    return;
+                }
+                // Everything that can fail first, then the swap: a failure leaves the old owner.
+                const new_owner = if (r.owner) |ow| try m.gpa.dupe(u8, ow) else null;
+                errdefer if (new_owner) |o| m.gpa.free(o);
                 try m.term.resize(m.gpa, .{ .cols = r.cols, .rows = r.rows });
                 if (m.owner) |old| m.gpa.free(old);
-                m.owner = if (r.owner) |ow| try m.gpa.dupe(u8, ow) else null;
+                m.owner = new_owner;
                 m.version += 1;
                 if (m.observer) |o| if (o.resized) |f| f(o.ctx, r.cols, r.rows);
             },
@@ -232,14 +243,20 @@ pub const Mirror = struct {
                 var arena = std.heap.ArenaAllocator.init(m.gpa);
                 errdefer arena.deinit();
                 const a = arena.allocator();
+                // Allocate everything first, then build the struct: a literal that copies `arena`
+                // before its other fields allocate would keep a stale copy and leak the rest.
                 const palette = try a.alloc([]const u8, t.palette.len);
                 for (t.palette, palette) |src, *dst| dst.* = try a.dupe(u8, src);
+                const foreground = if (t.foreground) |s| try a.dupe(u8, s) else null;
+                const background = if (t.background) |s| try a.dupe(u8, s) else null;
+                const cursor = if (t.cursor) |s| try a.dupe(u8, s) else null;
+                const scheme = if (t.scheme) |s| try a.dupe(u8, s) else null;
                 const new: Theme = .{
                     .arena = arena,
-                    .foreground = if (t.foreground) |s| try a.dupe(u8, s) else null,
-                    .background = if (t.background) |s| try a.dupe(u8, s) else null,
-                    .cursor = if (t.cursor) |s| try a.dupe(u8, s) else null,
-                    .scheme = if (t.scheme) |s| try a.dupe(u8, s) else null,
+                    .foreground = foreground,
+                    .background = background,
+                    .cursor = cursor,
+                    .scheme = scheme,
                     .palette = palette,
                 };
                 if (m.theme) |*old| old.arena.deinit();
@@ -355,23 +372,40 @@ pub const Mirror = struct {
 
     pub const PlainAll = struct { text: []u8, truncated: bool };
 
-    /// The screen and all scrollback as plain text, soft-wrapped lines joined, trailing spaces
-    /// trimmed. At most `max_bytes` are kept (the end, cut at a line start). Caller frees `text`.
-    pub fn plainTextAll(m: *Mirror, gpa: Allocator, max_bytes: usize) !PlainAll {
+    /// The screen and scrollback as plain text, soft-wrapped lines joined, trailing spaces
+    /// trimmed. Only the last `max_rows` rows are formatted at all (from the first line that starts
+    /// within them), and of that text at most `max_bytes` are kept (the end, cut at a line start).
+    /// `truncated` says either cut something. Caller frees `text`.
+    pub fn plainTextAll(m: *Mirror, gpa: Allocator, max_bytes: usize, max_rows: u32) !PlainAll {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return error.NotLive;
+        const screen = m.term.screens.active;
+        const rows_cut = screen.pages.total_rows > max_rows;
+        if (max_rows == 0) return .{ .text = try gpa.alloc(u8, 0), .truncated = rows_cut };
         var out: Io.Writer.Allocating = .init(gpa);
         errdefer out.deinit();
         var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, .{ .emit = .plain, .unwrap = true, .trim = true });
+        if (rows_cut) f.content = .{ .selection = lastRows(screen, max_rows) };
         try f.format(&out.writer);
         const all = out.written();
-        if (all.len <= max_bytes) return .{ .text = try out.toOwnedSlice(), .truncated = false };
+        if (all.len <= max_bytes) return .{ .text = try out.toOwnedSlice(), .truncated = rows_cut };
         var start = all.len - max_bytes;
         while (start < all.len and all[start - 1] != '\n') start += 1; // begin at a line start
         const kept = try gpa.dupe(u8, all[start..]);
         out.deinit();
         return .{ .text = kept, .truncated = true };
+    }
+
+    /// The last `n` (at least 1) rows of `screen`, starting at a line start: a row that continues a
+    /// soft-wrapped line from above the cut is skipped. Null if the screen has no more than `n` rows.
+    fn lastRows(screen: *ghostty_vt.Screen, n: u32) ?ghostty_vt.Selection {
+        const end = screen.pages.getBottomRight(.screen) orelse return null;
+        var bottom_left = end;
+        bottom_left.x = 0;
+        var start = bottom_left.up(n - 1) orelse return null;
+        while (start.rowAndCell().row.wrap_continuation) start = start.down(1) orelse break;
+        return ghostty_vt.Selection.init(start, end, false);
     }
 
     /// The visible screen as plain text, for tests and logs. Caller frees.
@@ -586,15 +620,167 @@ test "mirror: plainTextAll joins wrapped lines and keeps the end when it must cu
         var buf: [24]u8 = undefined;
         try m.feed(try std.fmt.bufPrint(&buf, "row-{d:0>3}\r\n", .{i}));
     }
-    const all = try m.plainTextAll(a, 1 << 20);
+    const all = try m.plainTextAll(a, 1 << 20, 100_000);
     defer a.free(all.text);
     try testing.expect(!all.truncated);
     try testing.expect(std.mem.indexOf(u8, all.text, "0123456789012345678901234567890123456789ABCDEFGHIJ\n") != null);
-    const cut = try m.plainTextAll(a, 200);
+    const cut = try m.plainTextAll(a, 200, 100_000);
     defer a.free(cut.text);
     try testing.expect(cut.truncated and cut.text.len <= 200);
     try testing.expect(std.mem.indexOf(u8, cut.text, "row-099") != null);
     try testing.expect(cut.text[0] == 'r'); // starts at a line start
+}
+
+test "mirror: plainTextAll formats only the last rows when there are more" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 1, 20, 4, "");
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 1);
+    defer m.deinit();
+    try m.feed(stream);
+    var i: u32 = 0;
+    while (i < 300) : (i += 1) {
+        var buf: [24]u8 = undefined;
+        try m.feed(try std.fmt.bufPrint(&buf, "row-{d:0>3}\r\n", .{i}));
+    }
+    const cut = try m.plainTextAll(a, 1 << 20, 50);
+    defer a.free(cut.text);
+    try testing.expect(cut.truncated); // the byte cap did not cut: the row cap did
+    try testing.expect(std.mem.indexOf(u8, cut.text, "row-299") != null);
+    try testing.expect(std.mem.indexOf(u8, cut.text, "row-200") == null);
+    try testing.expect(std.mem.count(u8, cut.text, "\n") <= 50);
+    try testing.expect(std.mem.startsWith(u8, cut.text, "row-"));
+    // Both caps: the bytes cut what the rows left.
+    const both = try m.plainTextAll(a, 40, 50);
+    defer a.free(both.text);
+    try testing.expect(both.truncated and both.text.len <= 40);
+    try testing.expect(std.mem.indexOf(u8, both.text, "row-299") != null);
+    // A cap above the history: everything, not truncated.
+    const all = try m.plainTextAll(a, 1 << 20, 100_000);
+    defer a.free(all.text);
+    try testing.expect(!all.truncated);
+    try testing.expect(std.mem.indexOf(u8, all.text, "row-000") != null);
+}
+
+/// Counts what a mirror tells its observer.
+const Counter = struct {
+    resized: u32 = 0,
+    ended: u32 = 0,
+    last_end: ?data.End = null,
+    fn onResize(ctx: *anyopaque, _: u16, _: u16) void {
+        const c: *Counter = @ptrCast(@alignCast(ctx));
+        c.resized += 1;
+    }
+    fn onEnded(ctx: *anyopaque, why: data.End) void {
+        const c: *Counter = @ptrCast(@alignCast(ctx));
+        c.ended += 1;
+        c.last_end = why;
+    }
+    fn observer(c: *Counter) Observer {
+        return .{ .ctx = c, .resized = onResize, .ended = onEnded };
+    }
+};
+
+fn resizeMsg(buf: []u8, nonce: u64, cols: u32, rows: u32) ![]const u8 {
+    return std.fmt.bufPrint(buf, "\x1b_rex1;{d};{{\"type\":\"resize\",\"cols\":{d},\"rows\":{d},\"owner\":\"client:2\"}}\x1b\\", .{ nonce, cols, rows });
+}
+
+test "mirror: a resize outside the limits is ignored, and the limits themselves work" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 3, 20, 4, "x");
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 3);
+    defer m.deinit();
+    try m.feed(stream);
+    var count: Counter = .{};
+    m.setObserver(count.observer());
+    var buf: [160]u8 = undefined;
+    const refused = [_][2]u32{ .{ 0, 24 }, .{ 80, 0 }, .{ 4097, 10 }, .{ 10, 4097 }, .{ 2048, 1024 }, .{ 1025, 1024 } };
+    for (refused) |r| {
+        try m.feed(try resizeMsg(&buf, 3, r[0], r[1]));
+        try testing.expectEqual(Mirror.Size{ .cols = 20, .rows = 4 }, m.size().?);
+        try testing.expectEqual(Status.live, m.getStatus());
+    }
+    try testing.expectEqual(@as(u32, 0), count.resized);
+    try testing.expect(m.logged_bad_resize);
+    try testing.expect(m.owner == null); // an ignored resize changes nothing, the owner included
+    try testing.expect(!resizeAllowed(65535, 65535));
+    // The boundaries: 4096 on a side, and exactly 1,048,576 cells.
+    try m.feed(try resizeMsg(&buf, 3, 4096, 256));
+    try testing.expectEqual(Mirror.Size{ .cols = 4096, .rows = 256 }, m.size().?);
+    try m.feed(try resizeMsg(&buf, 3, 1, 1));
+    try testing.expectEqual(Mirror.Size{ .cols = 1, .rows = 1 }, m.size().?);
+    try testing.expectEqual(@as(u32, 2), count.resized);
+    try testing.expectEqualStrings("client:2", m.owner.?);
+    try testing.expect(resizeAllowed(1024, 1024));
+}
+
+test "mirror: an unterminated OSC 52 is freed with the mirror" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 5, 20, 4, "");
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 5);
+    defer m.deinit(); // testing.allocator reports what the VT stream's buffers would leak
+    try m.feed(stream);
+    try m.feed("\x1b]52;c;");
+    const blob = try a.alloc(u8, 400 * 1024);
+    defer a.free(blob);
+    @memset(blob, 'A');
+    var off: usize = 0;
+    while (off < blob.len) : (off += 4096) try m.feed(blob[off..@min(blob.len, off + 4096)]);
+}
+
+test "mirror: a theme with no palette leaks nothing" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 6, 20, 4, "");
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 6);
+    defer m.deinit();
+    try m.feed(stream);
+    try m.feed("\x1b_rex1;6;{\"type\":\"theme\",\"foreground\":\"#eeeeee\",\"background\":\"#111111\",\"cursor\":\"#ff0000\",\"scheme\":\"dark\"}\x1b\\");
+    try m.feed("\x1b_rex1;6;{\"type\":\"theme\",\"background\":\"#222222\"}\x1b\\");
+    try testing.expectEqualStrings("#222222", m.theme.?.background.?);
+    try testing.expect(m.theme.?.foreground == null);
+}
+
+test "mirror: a failure after going live ends the stream once, and later bytes are dropped" {
+    // Fail each allocation in turn while a resize (with an owner) is applied: whichever fails,
+    // the mirror reports `mirror_failed` once, stops, and frees everything without a double free.
+    const a = testing.allocator;
+    const stream = try makeStream(a, 8, 20, 4, "x");
+    defer a.free(stream);
+    var failed_at_least_once = false;
+    var k: usize = 0;
+    while (k < 200) : (k += 1) {
+        var fa = std.testing.FailingAllocator.init(a, .{});
+        const m = try Mirror.init(fa.allocator(), testing.io, 8);
+        defer m.deinit();
+        const s = m.sink();
+        s.bytes(s.ctx, stream);
+        try testing.expectEqual(Status.live, m.getStatus());
+        var count: Counter = .{};
+        m.setObserver(count.observer());
+        fa.fail_index = fa.alloc_index + k;
+        var buf: [160]u8 = undefined;
+        s.bytes(s.ctx, try resizeMsg(&buf, 8, 30, 9));
+        if (!fa.has_induced_failure) {
+            try testing.expectEqual(Status.live, m.getStatus());
+            try testing.expectEqual(Mirror.Size{ .cols = 30, .rows = 9 }, m.size().?);
+            try testing.expectEqual(@as(u32, 0), count.ended);
+            break;
+        }
+        failed_at_least_once = true;
+        try testing.expectEqual(Status.failed, m.getStatus());
+        try testing.expectEqual(@as(u32, 1), count.ended);
+        try testing.expectEqual(@as(?data.End, .mirror_failed), count.last_end);
+        try testing.expectEqual(@as(?data.End, .mirror_failed), m.endReason());
+        // More bytes: not applied, not reported again.
+        s.bytes(s.ctx, "more output");
+        s.bytes(s.ctx, try resizeMsg(&buf, 8, 40, 10));
+        try testing.expectEqual(@as(u32, 1), count.ended);
+        try testing.expect(m.owner == null);
+    } else return error.TestUnexpectedResult;
+    try testing.expect(failed_at_least_once);
 }
 
 test "mirror: not live until the snapshot has arrived" {

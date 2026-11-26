@@ -62,6 +62,9 @@ tar -xzf rweb-<version>-<platform>.tar.gz
 mkdir -p ~/.local/bin && install -m 0755 rweb-<version>-<platform>/rweb ~/.local/bin/rweb
 ```
 
+The checksums catch a damaged download, not a changed release: they come from the same place as the
+archives.
+
 Linux (a unix socket that only Tailscale can reach):
 
 ```sh
@@ -70,7 +73,9 @@ rweb --listen-unix "$XDG_RUNTIME_DIR/rweb/bridge.sock" --owner-from-tailscale &
 sudo tailscale serve --bg --https=12443 "unix:$XDG_RUNTIME_DIR/rweb/bridge.sock"
 ```
 
-macOS (loopback plus a secret path that only Tailscale Serve knows):
+macOS (loopback plus a secret path that only Tailscale Serve knows). Only on a Mac where you are the only
+local account: the secret is part of the Serve target, so other accounts may be able to read it in
+`tailscale serve status`, or in the process list while `tailscale serve` runs.
 
 ```sh
 mkdir -p ~/.config/rweb && (umask 077; head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > ~/.config/rweb/backend-secret)
@@ -88,8 +93,11 @@ rweb can do anything you can do in Rex, so it trusts no one but you. It listens 
 or on loopback, never on the network. Behind Tailscale it accepts only your Tailscale login and refuses
 requests from the public internet (Funnel), from the machine itself, for another host name, or a
 WebSocket opened by another site. Behind an SSH tunnel it requires a long token. It never starts or asks
-for an open Rex listener, and file transfer is off unless you turn it on. Design and review:
-[docs/security-hardening-2026-11-23.md](docs/security-hardening-2026-11-23.md) (in the source repository).
+for an open Rex listener, and file transfer is off unless you turn it on. It reads its secrets only from
+files that are yours and closed to others, in folders no other user can change, and it bounds what every
+browser and Rex can make it hold in memory. Design and reviews:
+[docs/security-hardening-2026-11-23.md](docs/security-hardening-2026-11-23.md) and the later
+[release reviews](docs/release-review-2026-11-25.md) (in the source repository).
 
 ## Building from source
 

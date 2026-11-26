@@ -3,6 +3,12 @@
 // message a second; the bridge answers at once (and the WebSocket variants also get a push a
 // second from the server). Reported: round trips, slow or lost answers, gaps in what the server
 // pushed. Results are also sent to the bridge, which logs them.
+// A token in the address would stay in history; the server has put it in a cookie by now, so the
+// address bar and the sockets use the cookie from here on (as app.js does).
+if (new URLSearchParams(location.search).has('token')) {
+  const q = new URLSearchParams(location.search); q.delete('token');
+  history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash);
+}
 const out = document.getElementById('out');
 const log = s => { out.textContent += s + '\n'; };
 const DURATION_MS = 40000, TICK_MS = 1000;
@@ -73,5 +79,5 @@ document.getElementById('go').onclick = async () => {
     ['plain HTTP requests', () => httpVariant('plain HTTP requests')],
     ['websocket, text frames (again)', () => wsVariant('websocket, text frames (again)', false)],
   ]) { log(`... running ${name}`); await fn(); }
-  log('done. Tell Claude it finished.');
+  log('done.');
 };

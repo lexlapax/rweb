@@ -32,6 +32,9 @@ pub const End = enum {
     restart_needed,
     /// The server could not serve it (REJECT, 1008, 1011, or a protocol error).
     failed,
+    /// The stream may be fine but the mirror following it is not (a bad snapshot, or out of memory):
+    /// it stopped applying bytes. Reported by `mirror.Mirror`, never by `Data`. Start a new stream.
+    mirror_failed,
 };
 
 pub const Sink = struct {
@@ -56,8 +59,12 @@ pub const Data = struct {
     /// How long the server keeps the stream for a resume.
     resume_window_ms: u32,
     conn: ?*ws.Conn,
-    /// Guards `conn`, which the reader replaces when it resumes.
+    /// The socket of a connection still in its handshake (a resume), so `close` can shut it.
+    connecting: ?Io.net.Stream = null,
+    /// Guards `conn` and `connecting`, which the reader replaces when it resumes.
     conn_mu: Io.Mutex = .init,
+    /// Longest wait for a connection's upgrade and WELCOME.
+    handshake_timeout_ms: u32 = ws.handshake_timeout_ms,
     closing: std.atomic.Value(bool) = .init(false),
     reader: ?Io.Future(void) = null,
     /// The last close status seen, for tests and logs.
@@ -65,8 +72,17 @@ pub const Data = struct {
 
     pub const OpenError = error{ Rejected, BadHandshake } || Allocator.Error;
 
+    pub const Options = struct {
+        /// Longest wait for each connection's upgrade and WELCOME (the first, and every resume).
+        handshake_timeout_ms: u32 = ws.handshake_timeout_ms,
+    };
+
     /// Open with a ticket from `data.connect` and complete the handshake.
     pub fn open(gpa: Allocator, io: Io, socket_path: []const u8, ticket: [16]u8, sink: Sink) !*Data {
+        return openWith(gpa, io, socket_path, ticket, sink, .{});
+    }
+
+    pub fn openWith(gpa: Allocator, io: Io, socket_path: []const u8, ticket: [16]u8, sink: Sink, opts: Options) !*Data {
         const d = try gpa.create(Data);
         errdefer gpa.destroy(d);
         const path = try gpa.dupe(u8, socket_path);
@@ -80,6 +96,7 @@ pub const Data = struct {
             .token = undefined,
             .resume_window_ms = 0,
             .conn = null,
+            .handshake_timeout_ms = opts.handshake_timeout_ms,
         };
         var hello: [17]u8 = undefined;
         hello[0] = 0x01;
@@ -103,10 +120,11 @@ pub const Data = struct {
         var r = try control.call("data.connect", body);
         defer r.deinit();
         const p = r.ok() catch return error.TicketRefused;
+        if (p != .object) return error.BadHandshake;
         const t = p.object.get("ticket") orelse return error.BadHandshake;
         if (t != .string) return error.BadHandshake;
         const ticket = try decodeTicket(t.string);
-        return open(gpa, io, control.opts.socket_path, ticket, sink);
+        return openWith(gpa, io, control.opts.socket_path, ticket, sink, .{ .handshake_timeout_ms = control.opts.handshake_timeout_ms });
     }
 
     pub fn close(d: *Data) void {
@@ -115,6 +133,7 @@ pub const Data = struct {
         // on a shut socket returns at once, and the reader sees `closing` and exits.
         d.conn_mu.lockUncancelable(d.io);
         if (d.conn) |c| c.stream.shutdown(d.io, .both) catch {};
+        if (d.connecting) |st| st.shutdown(d.io, .both) catch {};
         d.conn_mu.unlock(d.io);
         if (d.reader) |*r| r.cancel(d.io);
         // A 1000 close ends the stream on the server.
@@ -129,7 +148,18 @@ pub const Data = struct {
     /// Open a socket and run the handshake `first` (HELLO or RESUME); sets `conn`, `token`,
     /// `nonce` and `resume_window_ms` from the WELCOME.
     fn handshake(d: *Data, first: []const u8) !void {
-        const c = try ws.Conn.connect(d.gpa, d.io, d.socket_path, "/api/data", subprotocol);
+        const io = d.io;
+        const addr = try Io.net.UnixAddress.init(d.socket_path);
+        const stream = try addr.connect(io);
+        // While the handshake runs, `close` can shut the socket. On failure it is unpublished
+        // (and the watchdog stopped) before it is closed: defers run in reverse order.
+        errdefer stream.close(io);
+        try d.setConnecting(stream);
+        defer d.setConnecting(null) catch {};
+        var dog = try ws.Watchdog.start(io, stream, d.handshake_timeout_ms);
+        defer dog.stop(io);
+        const c = try ws.Conn.upgrade(d.gpa, io, stream, "/api/data", subprotocol, "");
+        c.owns_stream = false; // until published; the errdefer above closes it
         errdefer c.deinit(d.gpa);
         try c.writeFrame(.binary, first);
         const m = try c.readMessage(d.gpa);
@@ -149,7 +179,15 @@ pub const Data = struct {
         d.conn_mu.lockUncancelable(d.io);
         defer d.conn_mu.unlock(d.io);
         if (d.closing.load(.acquire)) return error.Canceled; // closed while connecting
+        c.owns_stream = true;
         d.conn = c;
+    }
+
+    fn setConnecting(d: *Data, stream: ?Io.net.Stream) error{Canceled}!void {
+        d.conn_mu.lockUncancelable(d.io);
+        defer d.conn_mu.unlock(d.io);
+        if (stream != null and d.closing.load(.acquire)) return error.Canceled;
+        d.connecting = stream;
     }
 
     fn readerMain(d: *Data) void {
@@ -158,6 +196,7 @@ pub const Data = struct {
             if (d.closing.load(.acquire)) return;
             switch (why) {
                 .reconnect => if (d.tryResume()) continue else {
+                    if (d.closing.load(.acquire)) return; // closed while resuming: not an end
                     d.sink.ended(d.sink.ctx, .restart_needed);
                     return;
                 },
@@ -330,10 +369,6 @@ const Setup = struct {
     }
 };
 
-
-
-
-
 test "data: opens a terminal stream and counts bytes" {
     const a = testing.allocator;
     const s = try Setup.init();
@@ -484,4 +519,66 @@ test "live: stream a throwaway terminal on a real Rex (needs REX_SOCKET)" {
     _ = try w.ok();
     try cap.waitFor("rweb-live-42");
     try testing.expectEqual(@as(u64, cap.len()), d.received);
+}
+
+test "data: a data.connect payload that is not an object is an error, not a crash" {
+    const a = testing.allocator;
+    const s = try Setup.init();
+    defer s.deinit();
+    var cap: Capture = .{ .gpa = a, .io = testing.io };
+    defer cap.deinit();
+    for ([_][]const u8{ "[1,2]", "\"ticket\"", "7", "null" }) |raw| {
+        s.f.data_connect_payload = raw;
+        try testing.expectError(error.BadHandshake, Data.openTerminal(a, testing.io, s.ctl, s.session_id, s.block_id, cap.sink()));
+    }
+}
+
+test "data: the handshake has a deadline" {
+    const a = testing.allocator;
+    const silent = try fake.Silent.start(a, testing.io, null);
+    defer silent.deinit();
+    var cap: Capture = .{ .gpa = a, .io = testing.io };
+    defer cap.deinit();
+    const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
+    const ticket: [16]u8 = @splat(1);
+    try testing.expect(std.meta.isError(Data.openWith(a, testing.io, silent.path, ticket, cap.sink(), .{ .handshake_timeout_ms = 200 })));
+    try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 5000);
+}
+
+test "data: close shuts a resume still in its handshake, and that is not an end" {
+    const a = testing.allocator;
+    const f = try fake.Fake.start(a, testing.io);
+    const path = try a.dupe(u8, f.path);
+    defer a.free(path);
+    var cap: Capture = .{ .gpa = a, .io = testing.io };
+    defer cap.deinit();
+    const d = blk: {
+        const ctl = try Control.open(a, testing.io, .{ .socket_path = path, .reconnect = false });
+        defer ctl.close();
+        const made = try f.createSession("rweb-test-resume");
+        const body = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\",\"block_id\":\"{s}\",\"data_ref_id\":\"terminal\"}}", .{ made.session_id, made.block_id });
+        defer a.free(body);
+        const sb = try std.fmt.allocPrint(a, "{{\"session_id\":\"{s}\"}}", .{made.session_id});
+        defer a.free(sb);
+        var at = try ctl.call("session.attach", sb);
+        at.deinit();
+        var r = try ctl.call("data.connect", body);
+        defer r.deinit();
+        const ticket = try decodeTicket((try r.ok()).object.get("ticket").?.string);
+        break :blk try Data.openWith(a, testing.io, path, ticket, cap.sink(), .{ .handshake_timeout_ms = 60_000 });
+    };
+    try cap.waitFor("\"type\":\"resize\"");
+    // The server goes away without a close frame, and something that never answers takes its
+    // socket: the resume connects and waits for a WELCOME that never comes.
+    f.deinit();
+    const silent = try fake.Silent.start(a, testing.io, path);
+    defer silent.deinit();
+    var tries: u32 = 0;
+    while (silent.acceptedCount() == 0 and tries < 1000) : (tries += 1) try testing.io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expect(silent.acceptedCount() > 0);
+    try testing.io.sleep(.fromMilliseconds(50), .awake);
+    const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
+    d.close();
+    try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 5000);
+    try testing.expectEqual(@as(?End, null), cap.ended());
 }

@@ -63,6 +63,15 @@ flowchart TB
   terminal that at least one browser is viewing** (Rex allows one per client per terminal).
 - The page (HTML, JavaScript, the browser terminals wterm and xterm.js) is **embedded in the binary**;
   nothing is loaded from elsewhere, and the vendored files are pinned by checksum.
+- The library treats what Rex sends, and what programs print, as untrusted. It sets its own ceilings
+  (at most 16 MiB per message whatever Rex advertises; a reconnect token of at most 256 printable
+  bytes; JSON nested at most 64 deep), gives every handshake 10 seconds, and keeps Rex's events in a
+  fixed ring (1,024 events, 4 MiB): on overflow the queued events collapse into one "dropped" notice,
+  which makes the hub re-read the tree, and connection notices are never lost. Rex's own messages inside
+  a terminal's output (`rex1`) are split off by a small state machine that keeps every other byte in
+  order; a resize must be 1 to 4,096 cells on each side and at most 1,048,576 cells, or it is ignored.
+  A mirror that fails (a bad snapshot, out of memory) reports it as the stream's end, and the hub opens
+  a new stream, as it does when Rex asks for one.
 
 ## A request, from the browser to rweb
 
@@ -89,7 +98,9 @@ Every check is a pure function in `access.zig`, so each refusal has a test that 
 Linux the unix socket is in a `0700` directory and accepts only root; on macOS the loopback listener
 answers anything without the secret with a bare 404. With an SSH tunnel the token rule replaces the
 owner rule: the token arrives once in the address (`/?token=`), and rweb answers with a redirect to
-`/s/<id>/`, where `<id>` is derived from the token and reveals nothing about it. The token moves into an
+`/s/<id>/`, where `<id>` is a hash of the token. It does not show the token, but anyone who sees it can
+check guesses of the token against it, so tokens are random (the user guide's generator; `--token` must
+be 16 or more URL-safe characters) and the address is kept as private as the token. The token moves into an
 `HttpOnly`, `SameSite=Strict` cookie scoped to that path, and leaves the address bar. A browser sends a
 cookie to every port of a host, so a cookie for `/` on `127.0.0.1` would also reach any other local web
 service you open, and two tunnels on two ports would overwrite each other's; scoped to its own path it
@@ -99,6 +110,24 @@ at `/`.
 Before a request is read, it holds one of a few pending slots. When they are all taken, the oldest
 connection that has not sent a request yet is dropped for the new one: idle connections from a local
 process cannot keep the owner out, while Serve, which sends its request at once, gets through.
+
+A request whose target holds a control byte or a space is refused before anything else looks at it, and
+every redirect is built only from what rweb knows plus a percent-encoded query, after the access check.
+The responses that set the token cookie are never cached (`no-store`); the page's own files and the
+vendored scripts are revalidated on every load (`no-cache` with an ETag), so an upgrade reaches the
+browser at once. `/api/tree` and the lab pages exist only with `--enable-lab`.
+
+Secret files (the backend secret, the token file) and the upload folder are trusted only through an
+open descriptor: every folder from `/` down is opened without following links and must be root's or
+yours and not writable by others (unless sticky, as `/tmp` is); the file itself must be a regular file of
+yours closed to others, and is read from the descriptor that was checked. The upload folder stays open for
+the life of the process and files are created relative to it, so replacing its path later changes
+nothing. The unix socket's folder must be yours and `0700`.
+
+A browser connection that goes quiet for 20 seconds, or whose socket does not take a frame within 30
+seconds, is dropped, so a phone that stopped reading cannot hold a slot, a viewer or a stream. A page
+may send at most 200 messages in any one second, and at most 8 heavy requests (reads, transfers,
+redraws, opening or sizing a terminal, terminal actions, management) a second.
 
 ## Opening a terminal
 
@@ -128,8 +157,17 @@ sequenceDiagram
   no byte-exact resume.
 - A redraw is a terminal reset followed by libghostty-vt's formatter output with every extra (colours,
   modes, cursor); while a full-screen program is up, the main screen is drawn first.
-- Each viewer has a bounded send queue. A viewer that falls behind loses its queue and gets a fresh
-  redraw, so a slow phone never holds up the others or the read from Rex.
+- Each viewer has a bounded send queue. A viewer that falls behind loses its queued output and gets a
+  fresh redraw, so a slow phone never holds up the others or the read from Rex. The bound covers every
+  frame: live output (1 MiB, then a redraw), at most one redraw (its scrollback capped at 10,000 rows,
+  chosen before anything is formatted), replies (256 frames, 8 MiB, then dropped), and state frames
+  (mode, Rex up or down, theme, tree), which replace their own queued copy. `closed` and `exited` always
+  get through. The Copy view's text is built from at most the last 20,000 rows and 1 MiB.
+- A terminal lives while anything refers to it: each viewer looking at it, and each task using it for a
+  moment (a typed key, a redraw, the Copy view, a stream restart). Closing it (its block went away) takes
+  it out of the list and detaches its viewers at once; the last reference destroys it. The hub's main
+  lock is never held while waiting on Rex: attaching, opening a stream, waiting for its snapshot and
+  restarting a stream all happen outside it, so one slow terminal cannot stall the others.
 - The mirror never answers terminal queries: Rex's own terminal already answered the program, and the
   page drops any reply the browser terminal produces.
 
