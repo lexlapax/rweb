@@ -19,7 +19,12 @@ Zig, `-dirty` stamps; spike removed (owner's decision); README "About this proje
 plan):** commit locally (not pushed), build archives with `tools/release.sh`, swap the live service on
 laptop-mac and linux-box through a setup-repo worktree pin, test through Serve with the iOS Simulator
 (laptop-mac → linux-box) and the Android emulator (linux-box → laptop-mac), then the owner tests; push only
-after that.
+after that. Live test so far (f13222f on laptop-mac and linux-box through setup-repo): both started with their
+live config; through linux-box's Serve from desktop Chrome a Unicode paste (`’ € ß`, Cyrillic, emoji, CJK)
+and a two-line paste into zsh worked, and rapid terminal switching never sent typing to a terminal not on
+screen; but keystrokes typed right after a switch were dropped (the round-3 page waited for `opened`
+before sending input; not needed for safety since the bridge handles a page's messages in order). Fixed in
+the next commit; the tools scripts are now executable (`tools/release.sh` never was).
 
 ## 2026-11-25: third review round of `4c383fb` and its fixes
 

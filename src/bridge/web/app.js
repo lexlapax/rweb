@@ -106,9 +106,12 @@ function send(obj) { if (state.ws && state.ws.readyState === 1) state.ws.send(JS
 // `opened`: the bridge has said it shows state.current (an `opened` for it arrived). Until then the
 // bridge may still be on the terminal shown before, so nothing is typed and its output is not drawn.
 function ready() { return !!state.current && state.opened; }
-function canType() { return ready() && !state.observe && state.rexUp && link.healthy; }
+// Typing does not wait for `opened`: the bridge handles one page's messages in order, so input sent after
+// an `open` reaches that terminal, or nothing if the open was refused (a refused open also leaves the old
+// terminal). Waiting would drop what is typed in the moment after a switch.
+function canType() { return !!state.current && !state.observe && state.rexUp && link.healthy; }
 // Why typing was refused, for the notice.
-function whyNot() { return !link.healthy ? 'Not connected: not sent' : !state.opened ? 'Opening…' : 'Typing is off'; }
+function whyNot() { return !link.healthy ? 'Not connected: not sent' : 'Typing is off'; }
 
 function clearLatched() {
   state.latched = {ctrl: false, alt: false, shift: false};
@@ -120,7 +123,7 @@ function clearLatched() {
 term.onData(d => {
   d = K.stripReplies(d);                    // never type a terminal's answer to a program's question
   if (!d) return;
-  if (!canType()) { if (state.current && (!link.healthy || !state.opened)) notice(whyNot()); return; }
+  if (!canType()) { if (state.current && !link.healthy) notice(whyNot()); return; }
   if (d === '\r') softReset();                       // a new line starts: forget what was typed
   const r = K.applyLatched(state.latched, d);
   if (r.used) clearLatched();
@@ -245,7 +248,7 @@ term.attachCustomKeyEventHandler(e => {
   if (state.soft && (e.key === 'Enter' || e.key === 'Backspace')) return true;
   if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'v') return true;      // paste
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection()) return true; // copy
-  if (!canType()) { if (e.type === 'keydown' && state.current && (!link.healthy || !state.opened)) notice(whyNot()); return false; }
+  if (!canType()) { if (e.type === 'keydown' && state.current && !link.healthy) notice(whyNot()); return false; }
   const mods = {shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, super: e.metaKey};
   const text = (e.key.length === 1 && !e.ctrlKey && !e.metaKey) ? e.key : '';
   send({t: 'key', key: K.keyObject(K.snake(e.code), mods, e.type === 'keyup' ? 'release' : (e.repeat ? 'repeat' : 'press'), text)});
