@@ -114,6 +114,9 @@ test "fuzz: the streaming splitter agrees with the reference, however the stream
             defer whole.deinit();
             try rex1.streamSplit(a, 1, input.items, &.{}, &whole);
             try want.expectSame(&whole);
+            // Fed in one piece, program output between two messages is one call; only a
+            // candidate the stream ends inside goes separately, at `finish`.
+            try testing.expect(whole.adjacent_plain <= 1);
 
             // One cut anywhere, then pieces of a varying size.
             const cut = if (input.items.len == 0) 0 else cut_seed % (input.items.len + 1);

@@ -12,7 +12,8 @@ pub const usage =
     \\  rweb --version
     \\
     \\Where to listen (exactly one):
-    \\  --listen-unix PATH        unix socket, created 0600 in a 0700 directory
+    \\  --listen-unix PATH        unix socket (absolute path, no links on it), created 0600 in a
+    \\                            0700 directory of yours under folders only you or root can change
     \\  --listen-tcp PORT         loopback TCP only (127.0.0.1); 0 picks a port
     \\
     \\Who may connect:
@@ -42,7 +43,10 @@ pub const usage =
     \\                            machine with one user
     \\
     \\Behaviour:
-    \\  --rex-socket PATH         Rex's unix socket (default: found from XDG_RUNTIME_DIR or the Mac app)
+    \\  --rex-socket PATH         Rex's unix socket (default: the Mac app's, else XDG_RUNTIME_DIR's)
+    \\  --tailscale PATH          the tailscale program to ask for this node's login, name and
+    \\                            addresses (absolute; default: a fixed list of install locations,
+    \\                            never PATH). It and its folders must be root's or yours
     \\  --observe-only            never write, resize or change anything in Rex
     \\  --history-lines N         scrollback rows sent when a terminal opens (default 1000)
     \\  --debug-input             log what browsers send (typed text included): for testing a keyboard, never for deployment
@@ -58,6 +62,8 @@ pub const Listen = union(enum) { unix: []const u8, tcp: u16 };
 
 pub const Parsed = struct {
     rex_socket: ?[]const u8 = null,
+    /// `--tailscale`: the program to run, by absolute path. Null: the fixed install locations.
+    tailscale: ?[]const u8 = null,
     listen: Listen,
     owner: ?[]const u8 = null,
     owner_from_tailscale: bool = false,
@@ -111,6 +117,8 @@ pub const Error = error{
     NeedAllowHost,
     /// `--token` that is too short or holds characters other than letters, digits, `-` and `_`.
     BadToken,
+    /// `--listen-unix` or `--tailscale` with a relative path.
+    NotAbsolute,
 } || Allocator.Error;
 
 /// Parse `args` (without the program name). Slices in the result point into `args`, except
@@ -129,7 +137,10 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
         if (eql(u8, a, "--version")) return error.Version;
         if (eql(u8, a, "--listen-unix")) {
             if (listen != null) return error.TwoListeners;
-            listen = .{ .unix = try value(args, &i) };
+            const path = try value(args, &i);
+            // Serve and the bridge must name the same file, whatever the working directory.
+            if (!isAbsolute(path)) return error.NotAbsolute;
+            listen = .{ .unix = path };
         } else if (eql(u8, a, "--listen-tcp")) {
             if (listen != null) return error.TwoListeners;
             listen = .{ .tcp = std.fmt.parseInt(u16, try value(args, &i), 10) catch return error.BadNumber };
@@ -173,6 +184,9 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
             if (eql(u8, v, "self")) try uids.append(arena, .self) else try uids.append(arena, .{ .uid = std.fmt.parseInt(u32, v, 10) catch return error.BadNumber });
         } else if (eql(u8, a, "--rex-socket")) {
             p.rex_socket = try value(args, &i);
+        } else if (eql(u8, a, "--tailscale")) {
+            p.tailscale = try value(args, &i);
+            if (!isAbsolute(p.tailscale.?)) return error.NotAbsolute;
         } else if (eql(u8, a, "--observe-only")) {
             p.observe_only = true;
         } else if (eql(u8, a, "--debug-input")) {
@@ -215,6 +229,10 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
     return p;
 }
 
+fn isAbsolute(path: []const u8) bool {
+    return path.len > 0 and path[0] == '/';
+}
+
 fn value(args: []const []const u8, i: *usize) Error![]const u8 {
     i.* += 1;
     if (i.* >= args.len) return error.MissingValue;
@@ -244,6 +262,7 @@ fn parseT(args: []const []const u8) Error!Parsed {
         .detect_own_addresses = p.detect_own_addresses,
         .observe_only = p.observe_only,
         .history_lines = p.history_lines,
+        .tailscale = p.tailscale,
         .peer_uids = if (p.peer_uids) |u| (if (u.len == 1 and u[0] == .uid and u[0].uid == 0) &[_]PeerUid{.{ .uid = 0 }} else &[_]PeerUid{.self}) else null,
     };
 }
@@ -251,6 +270,16 @@ fn parseT(args: []const []const u8) Error!Parsed {
 test "a listener is required, and only one" {
     try testing.expectError(error.NoListener, parseT(&.{ "--owner", "a@b" }));
     try testing.expectError(error.TwoListeners, parseT(&.{ "--listen-tcp", "0", "--listen-unix", "/x" }));
+}
+
+test "--listen-unix and --tailscale take absolute paths only" {
+    try testing.expectError(error.NotAbsolute, parseT(&.{ "--listen-unix", "rweb/b.sock", "--owner-from-tailscale" }));
+    try testing.expectError(error.NotAbsolute, parseT(&.{ "--listen-unix", "./b.sock", "--owner-from-tailscale" }));
+    try testing.expectError(error.NotAbsolute, parseT(&.{ "--listen-unix", "", "--owner-from-tailscale" }));
+    try testing.expectError(error.NotAbsolute, parseT(&.{ "--listen-tcp", "0", "--tailscale", "tailscale" }));
+    const p = try parseT(&.{ "--listen-unix", "/run/user/1000/rweb/b.sock", "--owner-from-tailscale", "--tailscale", "/usr/bin/tailscale" });
+    try testing.expectEqualStrings("/usr/bin/tailscale", p.tailscale.?);
+    try testing.expectEqualStrings("/run/user/1000/rweb/b.sock", p.listen.unix);
 }
 
 test "a unix socket needs an access rule and defaults to root as the only peer" {

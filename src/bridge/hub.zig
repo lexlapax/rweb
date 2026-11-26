@@ -42,7 +42,7 @@ pub const Config = struct {
 };
 
 /// What a queued frame is, so that stale ones are replaced instead of piling up.
-pub const Kind = enum { live, reply, opened, theme, redraw, mode, rex, tree, closed, exited };
+pub const Kind = enum { live, reply, copy, opened, theme, redraw, mode, rex, tree, closed, exited };
 
 pub const Frame = struct {
     binary: bool,
@@ -65,6 +65,15 @@ pub const max_redraw_history_rows: u32 = 10_000;
 /// live-output cap and at most one queued redraw (bounded in rows), this bounds a viewer's queue.
 pub const max_text_frames = 256;
 pub const max_text_bytes: usize = 8 << 20;
+/// Live output joins the last unsent live frame up to this size, and every live frame is charged this
+/// much on top of its bytes, so output in tiny pieces cannot fill a queue with tiny frames.
+pub const max_live_frame: usize = 64 << 10;
+pub const live_frame_overhead: usize = 64;
+/// Cells (rows times columns) a redraw's scrollback, or the Copy view's text, is built from at most.
+pub const max_redraw_cells: usize = 1_000_000;
+pub const max_copy_cells: usize = 2_000_000;
+/// A viewer that fell behind is redrawn at most this often.
+pub const overflow_redraw_ms: i64 = 1000;
 
 pub const Viewer = struct {
     hub: *Hub,
@@ -82,6 +91,12 @@ pub const Viewer = struct {
     text_bytes: usize = 0,
     closed: bool = false,
     needs_redraw: bool = false,
+    /// Goes up with every redraw request, so a redraw that fails clears only the requests it saw.
+    redraw_seq: u64 = 0,
+    /// No redraw before this time (awake clock, ms): set when the viewer falls behind.
+    redraw_after_ms: i64 = 0,
+    /// The tree generation last queued for this viewer.
+    tree_gen: u64 = 0,
     /// Rows of scrollback in the next redraw; null for as much as a redraw may carry.
     history_lines: ?u32,
     /// This viewer's read-only switch.
@@ -95,6 +110,8 @@ pub const Viewer = struct {
     /// browser tab into a load on Rex.
     heavy_window_start: i64 = 0,
     heavy_count: u32 = 0,
+    read_window_start: i64 = 0,
+    read_count: u32 = 0,
 
     /// Wait up to `timeout_ms` for the next frame; null on timeout or when closed. Does any
     /// pending redraw first. The caller frees the frame.
@@ -105,7 +122,10 @@ pub const Viewer = struct {
                 v.mu.unlock(v.hub.io);
                 return null;
             }
-            const redraw = v.needs_redraw and v.term != null;
+            const now = std.Io.Clock.awake.now(v.hub.io).toMilliseconds();
+            const due = v.needs_redraw and v.term != null;
+            const redraw = due and now >= v.redraw_after_ms;
+            // Queued frames go out while a paced redraw waits (output was dropped; replies stay).
             if (!redraw and v.head < v.frames.items.len) {
                 const f = v.frames.items[v.head];
                 v.head += 1;
@@ -114,8 +134,8 @@ pub const Viewer = struct {
                     v.head = 0;
                 } else if (v.head >= 64 and v.head * 2 >= v.frames.items.len) v.compactLocked();
                 switch (f.kind) {
-                    .live => v.live_bytes -|= f.data.len,
-                    .reply => {
+                    .live => v.live_bytes -|= f.data.len + live_frame_overhead,
+                    .reply, .copy => {
                         v.text_frames -|= 1;
                         v.text_bytes -|= f.data.len;
                     },
@@ -129,10 +149,12 @@ pub const Viewer = struct {
                 v.hub.redrawFor(v) catch |e| log.debug("redraw: {t}", .{e});
                 continue;
             }
+            // A redraw that is due later: wait for it (or for anything else) at most that long.
+            const wait: u32 = if (due) @intCast(std.math.clamp(v.redraw_after_ms - now, 1, @as(i64, timeout_ms))) else timeout_ms;
             v.wake.reset();
             v.mu.unlock(v.hub.io);
-            v.wake.waitTimeout(v.hub.io, .{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } }) catch |e| switch (e) {
-                error.Timeout => return null,
+            v.wake.waitTimeout(v.hub.io, .{ .duration = .{ .raw = .fromMilliseconds(wait), .clock = .awake } }) catch |e| switch (e) {
+                error.Timeout => if (due) continue else return null,
                 else => |x| return x,
             };
         }
@@ -161,20 +183,33 @@ pub const Viewer = struct {
         defer v.mu.unlock(v.hub.io);
         if (v.closed) return gpa.free(copy);
         switch (kind) {
-            .mode, .rex, .theme, .tree => for (v.frames.items[v.head..]) |*f| if (f.kind == kind) {
-                gpa.free(f.data);
-                f.data = copy;
-                v.wake.set(v.hub.io);
-                return;
+            // Latest value wins: the first queued copy takes the new value, any later copy goes.
+            .mode, .rex, .theme, .tree => {
+                var placed = false;
+                var w: usize = v.head;
+                for (v.frames.items[v.head..]) |f| {
+                    if (f.kind == kind) {
+                        gpa.free(f.data);
+                        if (placed) continue;
+                        v.frames.items[w] = .{ .binary = false, .data = copy, .kind = kind };
+                        placed = true;
+                    } else v.frames.items[w] = f;
+                    w += 1;
+                }
+                v.frames.items.len = w;
+                if (placed) {
+                    v.wake.set(v.hub.io);
+                    return;
+                }
             },
-            .reply => if (v.text_frames >= max_text_frames or v.text_bytes + copy.len > max_text_bytes) {
-                v.overflows += 1;
+            .reply, .copy => if (v.text_frames >= max_text_frames or v.text_bytes + copy.len > max_text_bytes) {
+                v.overflows +|= 1;
                 return gpa.free(copy);
             },
             else => {},
         }
         v.frames.append(gpa, .{ .binary = false, .data = copy, .kind = kind }) catch return gpa.free(copy);
-        if (kind == .reply) {
+        if (kind == .reply or kind == .copy) {
             v.text_frames += 1;
             v.text_bytes += copy.len;
         }
@@ -187,27 +222,39 @@ pub const Viewer = struct {
         v.mu.lockUncancelable(v.hub.io);
         defer v.mu.unlock(v.hub.io);
         if (v.closed or v.needs_redraw) return; // a redraw is coming, which includes this
-        if (v.live_bytes + bytes.len > v.hub.cfg.max_live_bytes) {
-            v.dropScreenLocked();
-            v.needs_redraw = true;
-            v.overflows += 1;
-            v.wake.set(v.hub.io);
-            return;
+        const gpa = v.hub.gpa;
+        // Join the last unsent live frame when there is room: output often arrives in tiny pieces.
+        if (v.frames.items.len > v.head) {
+            const last = &v.frames.items[v.frames.items.len - 1];
+            if (last.kind == .live and last.data.len + bytes.len <= max_live_frame) {
+                if (v.live_bytes + bytes.len > v.hub.cfg.max_live_bytes) return v.overflowLocked();
+                if (gpa.realloc(last.data, last.data.len + bytes.len)) |grown| {
+                    @memcpy(grown[last.data.len..], bytes);
+                    last.data = grown;
+                    v.live_bytes += bytes.len;
+                    v.wake.set(v.hub.io);
+                    return;
+                } else |_| return v.overflowLocked();
+            }
         }
-        const copy = v.hub.gpa.dupe(u8, bytes) catch {
-            v.dropScreenLocked();
-            v.needs_redraw = true;
-            v.wake.set(v.hub.io);
-            return;
+        if (v.live_bytes + bytes.len + live_frame_overhead > v.hub.cfg.max_live_bytes) return v.overflowLocked();
+        const copy = gpa.dupe(u8, bytes) catch return v.overflowLocked();
+        v.frames.append(gpa, .{ .binary = true, .data = copy, .kind = .live }) catch {
+            gpa.free(copy);
+            return v.overflowLocked();
         };
-        v.frames.append(v.hub.gpa, .{ .binary = true, .data = copy, .kind = .live }) catch {
-            v.hub.gpa.free(copy);
-            v.dropScreenLocked();
-            v.needs_redraw = true;
-            v.wake.set(v.hub.io);
-            return;
-        };
-        v.live_bytes += bytes.len;
+        v.live_bytes += bytes.len + live_frame_overhead;
+        v.wake.set(v.hub.io);
+    }
+
+    /// The viewer fell behind: drop its queued screen content and redraw it, at most once a second.
+    fn overflowLocked(v: *Viewer) void {
+        v.dropScreenLocked();
+        v.needs_redraw = true;
+        v.redraw_seq +%= 1;
+        v.overflows +|= 1;
+        const now = std.Io.Clock.awake.now(v.hub.io).toMilliseconds();
+        v.redraw_after_ms = @max(v.redraw_after_ms, now + overflow_redraw_ms);
         v.wake.set(v.hub.io);
     }
 
@@ -217,7 +264,7 @@ pub const Viewer = struct {
         const gpa = v.hub.gpa;
         var w: usize = 0;
         for (v.frames.items[v.head..]) |f| switch (f.kind) {
-            .live, .redraw, .opened => f.deinit(gpa),
+            .live, .redraw, .opened, .theme => f.deinit(gpa), // a redraw brings the current theme
             else => {
                 v.frames.items[w] = f;
                 w += 1;
@@ -238,6 +285,7 @@ pub const Viewer = struct {
         v.mu.lockUncancelable(v.hub.io);
         defer v.mu.unlock(v.hub.io);
         v.needs_redraw = true;
+        v.redraw_seq +%= 1;
         v.wake.set(v.hub.io);
     }
 
@@ -321,6 +369,28 @@ pub const Terminal = struct {
     }
 };
 
+/// `text` without ESC (0x1b) and without the C1 controls (U+0080 to U+009F, encoded C2 80 to C2 9F,
+/// and a bare 0x9b byte). Caller frees.
+fn cleanPaste(gpa: Allocator, text: []const u8) ![]u8 {
+    var out = try std.ArrayList(u8).initCapacity(gpa, text.len);
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c == 0x1b or (c >= 0x80 and c <= 0x9f)) {
+            i += 1;
+            continue;
+        }
+        if (c == 0xc2 and i + 1 < text.len and text[i + 1] >= 0x80 and text[i + 1] <= 0x9f) {
+            i += 2;
+            continue;
+        }
+        out.appendAssumeCapacity(c);
+        i += 1;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 fn themeFrame(gpa: Allocator, theme: *const rex.mirror.Theme) ![]u8 {
     return std.json.Stringify.valueAlloc(gpa, .{
         .t = "theme",
@@ -331,6 +401,22 @@ fn themeFrame(gpa: Allocator, theme: *const rex.mirror.Theme) ![]u8 {
         .palette = theme.palette,
     }, .{});
 }
+
+/// Immutable text shared by reference (the session tree): copied for each viewer outside `Hub.mu`.
+const SharedText = struct {
+    refs: std.atomic.Value(u32) = .init(1),
+    bytes: []u8,
+
+    fn retain(t: *SharedText) void {
+        _ = t.refs.fetchAdd(1, .monotonic);
+    }
+
+    fn release(t: *SharedText, gpa: Allocator) void {
+        if (t.refs.fetchSub(1, .acq_rel) != 1) return;
+        gpa.free(t.bytes);
+        gpa.destroy(t);
+    }
+};
 
 /// Server events that change the tree.
 const tree_events = [_][]const u8{ "session_created", "session_destroyed", "session_label_changed", "session_view_changed", "block_created", "block_closed", "block_owner_changed", "window_created", "window_closed" };
@@ -371,7 +457,14 @@ pub const Hub = struct {
     next_viewer_id: u64 = 0,
     /// Sessions this bridge has attached (to open data streams), to redo after a reconnect.
     attached: std.StringHashMapUnmanaged(void) = .empty,
-    tree_json: ?[]u8 = null,
+    /// The session tree as JSON, and its generation (goes up with every new tree).
+    tree: ?*SharedText = null,
+    tree_gen: u64 = 0,
+    /// The hub-wide budget for work done under a mirror's lock (opening, redraws, Copy), over all
+    /// viewers. Guarded by `rate_mu`.
+    rate_mu: Io.Mutex = .init,
+    work_window_start: i64 = 0,
+    work_count: u32 = 0,
     /// Terminal keys (`session|block`) in the last tree, and `session|*` for a session whose blocks
     /// could not be read (its terminals are kept). Null before the first tree.
     known: ?Known = null,
@@ -417,7 +510,7 @@ pub const Hub = struct {
         while (ai.next()) |k| h.gpa.free(k.*);
         h.attached.deinit(h.gpa);
         h.viewers.deinit(h.gpa);
-        if (h.tree_json) |t| h.gpa.free(t);
+        if (h.tree) |t| t.release(h.gpa);
         if (h.known) |*k| k.arena.deinit();
         h.api.deinit();
         h.xfers.deinit();
@@ -437,7 +530,10 @@ pub const Hub = struct {
         try h.viewers.append(h.gpa, v);
         // First frames: the mode, the Rex state and the tree.
         h.pushModeLocked(v);
-        if (h.tree_json) |t| v.push(.tree, t);
+        if (h.tree) |t| {
+            v.push(.tree, t.bytes);
+            v.tree_gen = h.tree_gen;
+        }
         return v;
     }
 
@@ -503,29 +599,67 @@ pub const Hub = struct {
 
     // ---- commands from a browser ----
 
-    /// At most this many heavy requests a second from one browser.
+    /// At most this many requests a second from one browser that make Rex or the mirror work
+    /// (opening, sizing, redraws, Copy, transfers, terminal actions, management), and this many reads
+    /// (info, clipboard, tree): a tab switch (open, fit, two info polls) stays well inside both.
     pub const max_heavy_per_second: u32 = 8;
+    pub const max_reads_per_second: u32 = 16;
+    /// Work under a mirror's lock (open, redraw, more history, Copy) a second over all browsers.
+    pub const max_hub_work_per_second: u32 = 32;
 
-    fn allowHeavy(h: *Hub, v: *Viewer) bool {
+    const Class = enum { free, read, work };
+
+    fn classOf(msg: protocol.Msg) Class {
+        return switch (msg) {
+            .info, .clip, .tree => .read,
+            .text, .ls, .dl, .ul, .redraw, .more_history, .open, .fit, .term_action, .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => .work,
+            else => .free,
+        };
+    }
+
+    fn underMirrorLock(msg: protocol.Msg) bool {
+        return switch (msg) {
+            .open, .redraw, .more_history, .text => true,
+            else => false,
+        };
+    }
+
+    fn allowRate(h: *Hub, v: *Viewer, msg: protocol.Msg) bool {
+        const class = classOf(msg);
+        if (class == .free) return true;
         const now = std.Io.Clock.awake.now(h.io).toMilliseconds();
-        v.mu.lockUncancelable(h.io);
-        defer v.mu.unlock(h.io);
-        if (now - v.heavy_window_start >= 1000) {
-            v.heavy_window_start = now;
-            v.heavy_count = 0;
+        {
+            v.mu.lockUncancelable(h.io);
+            defer v.mu.unlock(h.io);
+            const start = if (class == .read) &v.read_window_start else &v.heavy_window_start;
+            const count = if (class == .read) &v.read_count else &v.heavy_count;
+            if (now - start.* >= 1000) {
+                start.* = now;
+                count.* = 0;
+            }
+            count.* +|= 1;
+            if (count.* > (if (class == .read) max_reads_per_second else max_heavy_per_second)) return false;
         }
-        v.heavy_count += 1;
-        return v.heavy_count <= max_heavy_per_second;
+        if (!underMirrorLock(msg)) return true;
+        h.rate_mu.lockUncancelable(h.io);
+        defer h.rate_mu.unlock(h.io);
+        if (now - h.work_window_start >= 1000) {
+            h.work_window_start = now;
+            h.work_count = 0;
+        }
+        h.work_count +|= 1;
+        return h.work_count <= max_hub_work_per_second;
     }
 
     /// Run one message from a viewer. Problems are answered as `error` frames, not returned.
     pub fn handle(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
-        switch (msg) {
-            // Everything that makes Rex or the mirror do real work: reads, transfers, redraws,
-            // opening a terminal (a stream and a snapshot), sizing it (every viewer redraws), terminal
-            // actions and management.
-            .text, .info, .clip, .ls, .dl, .ul, .redraw, .more_history, .open, .fit, .term_action, .new_session, .new_terminal, .rename_session, .rename_block, .close_block, .destroy_session => if (!h.allowHeavy(v)) return h.refuse(v, "rate", "too many requests"),
-            else => {},
+        if (!h.allowRate(v, msg)) {
+            // A refused open still leaves the terminal being viewed: the page has already switched
+            // its view, and typing must not go to a terminal it no longer shows.
+            if (msg == .open) h.unsubscribe(v);
+            const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = @tagName(msg), .msg = "too many requests", .rate = true }, .{}) catch return;
+            defer h.gpa.free(text);
+            return v.pushText(text);
         }
         switch (msg) {
             .ping => v.pushText("{\"t\":\"pong\"}"),
@@ -553,11 +687,7 @@ pub const Hub = struct {
                 defer h.api_mu.unlock(h.io);
                 h.api.termAction(term.session_id, term.block_id, @tagName(act)) catch |e| h.fail(v, "term_action", e);
             },
-            .tree => {
-                h.mu.lockUncancelable(h.io);
-                defer h.mu.unlock(h.io);
-                if (h.tree_json) |t| v.push(.tree, t);
-            },
+            .tree => h.sendTree(v),
             .open => |o| h.openTerminal(v, o.session, o.block) catch |e| h.fail(v, "open", e),
             .close_view => h.unsubscribe(v),
             .redraw => {
@@ -667,16 +797,26 @@ pub const Hub = struct {
 
     /// The Copy view: the terminal's text, for the browser to select from.
     fn sendText(h: *Hub, v: *Viewer) void {
+        // One Copy reply at a time, refused before any work when it could not be queued (its JSON
+        // can be up to six times the text).
+        const busy = blk: {
+            v.mu.lockUncancelable(h.io);
+            defer v.mu.unlock(h.io);
+            for (v.frames.items[v.head..]) |f| if (f.kind == .copy) break :blk true;
+            break :blk v.text_bytes + 6 * max_copy_bytes > max_text_bytes;
+        };
+        if (busy) return h.refuse(v, "text", "busy: the last Copy has not been sent yet");
         const term = h.pin(v) orelse return h.refuse(v, "text", "no terminal open");
         defer h.unpin(term);
         term.tmu.lockUncancelable(h.io);
-        const res = term.mirror.plainTextAll(h.gpa, max_copy_bytes, max_copy_rows);
+        // Capped in rows and in cells (rows times columns, read under the mirror's lock).
+        const res = term.mirror.plainTextAllCells(h.gpa, max_copy_bytes, max_copy_rows, max_copy_cells);
         term.tmu.unlock(h.io);
         const pt = res catch |e| return h.fail(v, "text", e);
         defer h.gpa.free(pt.text);
         const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "text", .text = pt.text, .truncated = pt.truncated }, .{}) catch return;
         defer h.gpa.free(out);
-        v.pushText(out);
+        v.push(.copy, out);
     }
 
     fn fail(h: *Hub, v: *Viewer, what: []const u8, e: anyerror) void {
@@ -703,8 +843,19 @@ pub const Hub = struct {
         defer h.unpin(term);
         switch (msg) {
             .in => |d| term.input.writeText(d) catch |e| h.fail(v, "in", e),
-            .paste => |d| {
-                const body = std.json.Stringify.valueAlloc(h.gpa, .{ .text = d }, .{}) catch return;
+            .paste => |p| {
+                // ESC and C1 never go through: a pasted "end of paste" would type the rest. The page
+                // removes them too; this is the second line.
+                const clean = cleanPaste(h.gpa, p.text) catch return;
+                defer h.gpa.free(clean);
+                // Without bracketed paste a program reads a pasted newline as Enter: several lines
+                // would run one by one. The page asks the user, then sends `force`.
+                if (!p.force and std.mem.indexOfAny(u8, clean, "\r\n") != null and !term.mirror.bracketedPaste()) {
+                    const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = "paste", .code = "confirm_multiline", .msg = "this program does not take pastes as one block; each line would run on its own" }, .{}) catch return;
+                    defer h.gpa.free(text);
+                    return v.pushText(text);
+                }
+                const body = std.json.Stringify.valueAlloc(h.gpa, .{ .text = clean }, .{}) catch return;
                 defer h.gpa.free(body);
                 term.input.blockEvent("paste", body) catch |e| h.fail(v, "paste", e);
             },
@@ -949,6 +1100,8 @@ pub const Hub = struct {
             v: *Viewer,
             t: *Terminal,
             subscribe: bool,
+            /// The viewer's redraw requests seen when this redraw started.
+            seq: u64,
             fn deliver(ctx: *anyopaque, bytes: []const u8) anyerror!void {
                 const c: *@This() = @ptrCast(@alignCast(ctx));
                 const gpa = c.h.gpa;
@@ -997,17 +1150,20 @@ pub const Hub = struct {
                 // Not live output: one redraw at most is queued, and its rows are capped.
                 vw.frames.appendAssumeCapacity(.{ .binary = true, .data = body, .kind = .redraw });
                 queued = true;
-                vw.needs_redraw = false;
+                if (vw.redraw_seq == c.seq) vw.needs_redraw = false; // a later request still stands
+                if (vw.history_lines == null) vw.history_lines = c.h.cfg.history_lines; // "all" is once
                 vw.wake.set(c.h.io);
             }
         };
-        var ctx: Ctx = .{ .h = h, .v = v, .t = t, .subscribe = subscribe };
+        var ctx: Ctx = .{ .h = h, .v = v, .t = t, .subscribe = subscribe, .seq = 0 };
         v.mu.lockUncancelable(h.io);
-        const lines = @min(v.history_lines orelse max_redraw_history_rows, max_redraw_history_rows);
+        ctx.seq = v.redraw_seq;
+        const wanted = @min(v.history_lines orelse max_redraw_history_rows, max_redraw_history_rows);
         v.mu.unlock(h.io);
         t.tmu.lockUncancelable(h.io);
         defer t.tmu.unlock(h.io);
-        try t.mirror.redrawLocked(h.gpa, .{ .history_lines = lines }, &ctx, Ctx.deliver);
+        // Scrollback is capped in cells too, so a very wide terminal sends fewer rows.
+        try t.mirror.redrawLocked(h.gpa, .{ .history_lines = wanted, .history_cells = max_redraw_cells }, &ctx, Ctx.deliver);
     }
 
     /// From a viewer's own `next`: its queue is stale (overflow, resize, history request).
@@ -1019,10 +1175,14 @@ pub const Hub = struct {
             return;
         };
         defer h.unpin(t);
+        v.mu.lockUncancelable(h.io);
+        const seq = v.redraw_seq;
+        v.mu.unlock(h.io);
         h.redrawInto(v, t, false) catch |e| {
-            // A restart can leave a moment with no live mirror; the restart asks again.
+            // A restart can leave a moment with no live mirror; the restart asks again. Clear only
+            // the requests this redraw saw: one that came meanwhile (the restart's) still stands.
             v.mu.lockUncancelable(h.io);
-            v.needs_redraw = false;
+            if (v.redraw_seq == seq) v.needs_redraw = false;
             v.mu.unlock(h.io);
             return e;
         };
@@ -1063,8 +1223,8 @@ pub const Hub = struct {
     pub fn treeJson(h: *Hub) ?[]u8 {
         h.mu.lockUncancelable(h.io);
         defer h.mu.unlock(h.io);
-        const t = h.tree_json orelse return null;
-        return h.gpa.dupe(u8, t) catch null;
+        const t = h.tree orelse return null;
+        return h.gpa.dupe(u8, t.bytes) catch null;
     }
 
     pub fn markTreeDirty(h: *Hub) void {
@@ -1132,15 +1292,45 @@ pub const Hub = struct {
             .observe_only = h.cfg.observe_only,
             .sessions = out.items,
         }, .{});
+        const shared = gpa.create(SharedText) catch |e| {
+            gpa.free(text);
+            return e;
+        };
+        shared.* = .{ .bytes = text };
         h.mu.lockUncancelable(h.io);
         defer h.mu.unlock(h.io);
-        if (h.tree_json) |old| gpa.free(old);
-        h.tree_json = text;
+        if (h.tree) |old| old.release(gpa);
+        h.tree = shared;
+        h.tree_gen += 1;
         if (h.known) |*old| old.arena.deinit();
         h.known = known;
         keep_known = true;
         h.tree_dirty = false;
-        for (h.viewers.items) |v| v.push(.tree, text);
+        for (h.viewers.items) |v| {
+            v.push(.tree, text);
+            v.mu.lockUncancelable(h.io);
+            v.tree_gen = h.tree_gen;
+            v.mu.unlock(h.io);
+        }
+    }
+
+    /// The tree, for a viewer that asks: only if it does not have the current one queued or sent
+    /// already, and copied outside `mu`.
+    fn sendTree(h: *Hub, v: *Viewer) void {
+        h.mu.lockUncancelable(h.io);
+        const t = h.tree orelse return h.mu.unlock(h.io);
+        const gen = h.tree_gen;
+        t.retain();
+        h.mu.unlock(h.io);
+        defer t.release(h.gpa);
+        v.mu.lockUncancelable(h.io);
+        const have = v.tree_gen == gen;
+        v.mu.unlock(h.io);
+        if (have) return;
+        v.push(.tree, t.bytes);
+        v.mu.lockUncancelable(h.io);
+        v.tree_gen = gen;
+        v.mu.unlock(h.io);
     }
 
     // ---- supervisor: Rex events, reconnects, stream restarts ----
@@ -1269,9 +1459,11 @@ pub const Hub = struct {
         h.unregisterLocked(t);
         const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "closed", .block = t.block_id, .reason = reason }, .{}) catch null;
         defer if (text) |x| h.gpa.free(x);
+        // Detach every viewer and empty the list in one step under `vmu`: a subscribe in progress
+        // either finishes before (and is emptied out) or finds `term` cleared (and adds nothing).
+        var detached: std.ArrayList(*Viewer) = .empty;
+        defer detached.deinit(h.gpa);
         t.vmu.lockUncancelable(h.io);
-        t.viewers.clearRetainingCapacity();
-        t.vmu.unlock(h.io);
         for (h.viewers.items) |v| {
             v.mu.lockUncancelable(h.io);
             const was = v.term == t;
@@ -1279,8 +1471,11 @@ pub const Hub = struct {
             v.mu.unlock(h.io);
             if (!was) continue;
             t.refs -= 1;
-            if (text) |x| v.push(.closed, x);
+            detached.append(h.gpa, v) catch {}; // only for the notice below
         }
+        t.viewers.clearRetainingCapacity();
+        t.vmu.unlock(h.io);
+        if (text) |x| for (detached.items) |v| v.push(.closed, x);
         return t.refs == 0;
     }
 
@@ -1879,4 +2074,194 @@ test "hub: opening, sizing and terminal actions count against the heavy-request 
         refused = !f.binary and std.mem.indexOf(u8, f.data, "too many requests") != null;
     }
     try testing.expect(refused);
+}
+
+fn liveFrames(v: *Viewer) usize {
+    v.mu.lockUncancelable(testing.io);
+    defer v.mu.unlock(testing.io);
+    var n: usize = 0;
+    for (v.frames.items[v.head..]) |f| if (f.kind == .live) {
+        n += 1;
+    };
+    return n;
+}
+
+fn hasText(comptime needle: []const u8) fn ([]const u8, bool) bool {
+    return struct {
+        fn f(d: []const u8, bin: bool) bool {
+            return bin and std.mem.indexOf(u8, d, needle) != null;
+        }
+    }.f;
+}
+
+test "hub: an open refused by the rate limit also leaves the terminal being viewed" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    // Use up this second's work allowance, then ask to open again.
+    for (0..Hub.max_heavy_per_second) |_| hs.hub.handle(v, .{ .redraw = {} });
+    hs.hub.handle(v, .{ .open = .{ .session = hs.session_id, .block = hs.block_id } });
+    v.mu.lockUncancelable(testing.io);
+    const t = v.term;
+    v.mu.unlock(testing.io);
+    try testing.expect(t == null); // typing now goes nowhere, not into the old terminal
+    var named = false;
+    var tries: u32 = 0;
+    while (!named and tries < 200) : (tries += 1) {
+        const f = (try v.next(20)) orelse break;
+        defer f.deinit(testing.allocator);
+        named = !f.binary and std.mem.indexOf(u8, f.data, "\"for\":\"open\"") != null and std.mem.indexOf(u8, f.data, "\"rate\":true") != null;
+    }
+    try testing.expect(named);
+    hs.hub.handle(v, .{ .in = "x" });
+    (try waitFrame(v, isError)).?.deinit(testing.allocator); // "no terminal open"
+}
+
+test "hub: reads and work have separate allowances, so a tab switch's info polls do not block opening" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    for (0..Hub.max_reads_per_second) |_| try testing.expect(hs.hub.allowRate(v, .{ .tree = {} }));
+    try testing.expect(!hs.hub.allowRate(v, .{ .tree = {} }));
+    for (0..Hub.max_heavy_per_second) |_| try testing.expect(hs.hub.allowRate(v, .{ .fit = .{ .cols = 80, .rows = 24 } }));
+    try testing.expect(!hs.hub.allowRate(v, .{ .fit = .{ .cols = 80, .rows = 24 } }));
+    try testing.expect(hs.hub.allowRate(v, .{ .ping = {} }));
+}
+
+test "hub: work under a mirror's lock has a budget over all viewers" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    var vs: [8]*Viewer = undefined;
+    for (&vs) |*v| v.* = try hs.hub.addViewer();
+    defer for (vs) |v| hs.hub.removeViewer(v);
+    var allowed: u32 = 0;
+    for (0..Hub.max_heavy_per_second) |_| for (vs) |v| {
+        if (hs.hub.allowRate(v, .{ .redraw = {} })) allowed += 1;
+    };
+    try testing.expectEqual(Hub.max_hub_work_per_second, allowed);
+}
+
+test "hub: output in tiny pieces joins one frame, and each frame costs its overhead" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    for (0..1000) |_| v.pushLive("\x1b");
+    try testing.expectEqual(@as(usize, 1), liveFrames(v));
+    v.mu.lockUncancelable(testing.io);
+    const bytes = v.live_bytes;
+    v.mu.unlock(testing.io);
+    try testing.expectEqual(@as(usize, 1000 + live_frame_overhead), bytes);
+    // A frame that is already sent is not added to: the next piece starts a new frame.
+    while (try v.next(10)) |g| {
+        const was_live = g.kind == .live;
+        g.deinit(testing.allocator);
+        if (was_live) break;
+    }
+    v.pushLive("y");
+    try testing.expectEqual(@as(usize, 1), liveFrames(v));
+}
+
+test "hub: at most one theme is queued, the newest, whatever redraws and updates interleave" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    v.push(.theme, "{\"t\":\"theme\",\"n\":1}");
+    v.mu.lockUncancelable(testing.io);
+    // As a redraw's delivery does: drop the screen, then queue its own theme.
+    v.dropScreenLocked();
+    v.frames.append(testing.allocator, .{ .binary = false, .data = try testing.allocator.dupe(u8, "{\"t\":\"theme\",\"n\":2}"), .kind = .theme }) catch unreachable;
+    // And a stray older copy behind it, as before this fix.
+    v.frames.append(testing.allocator, .{ .binary = false, .data = try testing.allocator.dupe(u8, "{\"t\":\"theme\",\"n\":0}"), .kind = .theme }) catch unreachable;
+    v.mu.unlock(testing.io);
+    v.push(.theme, "{\"t\":\"theme\",\"n\":3}");
+    v.mu.lockUncancelable(testing.io);
+    defer v.mu.unlock(testing.io);
+    var themes: u32 = 0;
+    var last: []const u8 = "";
+    for (v.frames.items[v.head..]) |f| if (f.kind == .theme) {
+        themes += 1;
+        last = f.data;
+    };
+    try testing.expectEqual(@as(u32, 1), themes);
+    try testing.expectEqualStrings("{\"t\":\"theme\",\"n\":3}", last);
+}
+
+test "hub: a viewer that already has the current tree is not sent another copy" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isTree)).?.deinit(testing.allocator);
+    hs.hub.handle(v, .{ .tree = {} });
+    v.mu.lockUncancelable(testing.io);
+    const queued = v.frames.items.len - v.head;
+    v.mu.unlock(testing.io);
+    try testing.expectEqual(@as(usize, 0), queued);
+    try hs.hub.refreshTree();
+    (try waitFrame(v, isTree)).?.deinit(testing.allocator); // a new tree is sent once
+}
+
+test "hub: a second Copy before the first is sent is refused before any work" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    hs.hub.handle(v, .{ .text = {} });
+    hs.hub.handle(v, .{ .text = {} });
+    v.mu.lockUncancelable(testing.io);
+    var copies: u32 = 0;
+    var busy = false;
+    for (v.frames.items[v.head..]) |f| {
+        if (f.kind == .copy) copies += 1;
+        if (std.mem.indexOf(u8, f.data, "busy") != null) busy = true;
+    }
+    v.mu.unlock(testing.io);
+    try testing.expectEqual(@as(u32, 1), copies);
+    try testing.expect(busy);
+}
+
+test "hub: a multi-line paste needs confirming when the program has no bracketed paste; ESC never goes through" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.openViewer();
+    defer hs.hub.removeViewer(v);
+    (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    hs.hub.handle(v, .{ .paste = .{ .text = "one\ntwo" } });
+    const asked = (try waitFrame(v, isError)).?;
+    defer asked.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, asked.data, "confirm_multiline") != null);
+    hs.hub.handle(v, .{ .paste = .{ .text = "line-a\x1b[201~line-b\xc2\x9b\nnext", .force = true } });
+    (try waitFrame(v, hasText("line-a[201~line-b\nnext"))).?.deinit(testing.allocator);
+    // Once the program turns bracketed paste on, no confirmation is needed.
+    try hs.f.feed(hs.block_id, "\x1b[?2004h");
+    try testing.io.sleep(.fromMilliseconds(50), .awake);
+    hs.hub.handle(v, .{ .paste = .{ .text = "three\nfour" } });
+    (try waitFrame(v, hasText("three\nfour"))).?.deinit(testing.allocator);
+}
+
+test "hub: cleanPaste removes ESC and C1, in both encodings, and keeps everything else" {
+    const a = testing.allocator;
+    const out = try cleanPaste(a, "a\x1bb\xc2\x9bc\x9bd\xc2\xa0e\u{00e9}\t\n");
+    defer a.free(out);
+    try testing.expectEqualStrings("abcd\xc2\xa0e\u{00e9}\t\n", out);
+}
+
+test "hub: a viewer that falls behind is redrawn at most once a second" {
+    const hs = try Harness.init(.{ .max_live_bytes = 4096 });
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    const before = std.Io.Clock.awake.now(testing.io).toMilliseconds();
+    var big: [5000]u8 = @splat('x');
+    v.pushLive(&big);
+    v.mu.lockUncancelable(testing.io);
+    defer v.mu.unlock(testing.io);
+    try testing.expect(v.needs_redraw);
+    try testing.expect(v.redraw_after_ms >= before + overflow_redraw_ms);
 }

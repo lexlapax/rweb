@@ -207,8 +207,7 @@ pub const Control = struct {
         var hello_buf: [max_hello]u8 = undefined;
         const hello = try c.buildHello(&hello_buf);
 
-        const addr = try Io.net.UnixAddress.init(c.opts.socket_path);
-        const stream = try addr.connect(io);
+        const stream = try ws.connectUnix(io, c.opts.socket_path);
         // While the handshake runs, `close` can shut the socket. On failure it is unpublished
         // (and the watchdog stopped) before it is closed: defers run in reverse order.
         errdefer stream.close(io);
@@ -220,6 +219,7 @@ pub const Control = struct {
         const cn = try ws.Conn.upgrade(gpa, io, stream, "/api/control", subprotocol, "");
         cn.owns_stream = false; // until published; the errdefer above closes it
         errdefer cn.deinit(gpa);
+        cn.max_message = ws.handshake_max_message; // the WELCOME; raised to Rex's limit below
         try cn.writeFrame(.text, hello);
         const m = try cn.readMessage(gpa);
         defer gpa.free(m.data);
@@ -228,6 +228,8 @@ pub const Control = struct {
         const w = try wire.parseWelcome(gpa, m.data);
         errdefer if (w.token) |t| gpa.free(t);
         if (w.revision < c.opts.api_min or w.revision > c.opts.api_max) return error.BadWelcome;
+        // A watchdog that fired has shut the socket, even if the WELCOME got in first.
+        try dog.finish(io);
 
         // Publish. Nothing below can fail, except finding the Control closing.
         c.mu.lockUncancelable(io);
@@ -407,9 +409,14 @@ pub const Control = struct {
     }
 
     /// Call `method` with `payload_json` (a JSON object text, or null for none) and wait for
-    /// the response. A failed call comes back as a `Response` with `err` set; transport
-    /// problems are Zig errors.
+    /// the response, up to `opts.call_timeout_ms`. A failed call comes back as a `Response` with
+    /// `err` set; transport problems are Zig errors.
     pub fn call(c: *Control, method: []const u8, payload_json: ?[]const u8) !Response {
+        return c.callTimeout(method, payload_json, c.opts.call_timeout_ms);
+    }
+
+    /// As `call`, waiting at most `timeout_ms` for the answer.
+    pub fn callTimeout(c: *Control, method: []const u8, payload_json: ?[]const u8, timeout_ms: u32) !Response {
         const gpa = c.gpa;
         var pend: Pending = .{};
         var idbuf: [24]u8 = undefined;
@@ -456,11 +463,15 @@ pub const Control = struct {
         defer gpa.free(req);
         if (req.len > max_message) return error.MessageTooLarge;
         const wrote = cn.writeFrame(.text, req);
+        // A failed write may have left part of a frame on the socket, and every frame after it
+        // would be read as garbage: shut it, so the reader drops the connection and reconnects.
+        // (`writers` keeps the connection alive until `releaseWriter`.)
+        if (wrote) |_| {} else |_| cn.stream.shutdown(c.io, .both) catch {};
         c.releaseWriter();
         writing = false;
         wrote catch return error.ConnectionLost;
 
-        pend.done.waitTimeout(c.io, .{ .duration = .{ .raw = .fromMilliseconds(c.opts.call_timeout_ms), .clock = .awake } }) catch |e| switch (e) {
+        pend.done.waitTimeout(c.io, .{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } }) catch |e| switch (e) {
             error.Timeout => return error.Timeout,
             else => |x| return x,
         };
@@ -540,17 +551,27 @@ pub const Control = struct {
             if (closing or !c.opts.reconnect) return;
 
             while (true) {
+                // `close` may have come while Rex is down; its cancel request can be used up by a
+                // connect that fails anyway, so look at `closing` itself on every round.
+                if (c.isClosing()) return;
                 c.io.sleep(.fromMilliseconds(backoff_ms), .awake) catch return;
+                if (c.isClosing()) return;
                 if (c.connectOnce()) |_| {
                     backoff_ms = 100;
                     break;
                 } else |e| {
-                    if (e == error.Closed) return;
+                    if (e == error.Closed or e == error.Canceled) return;
                     log.debug("reconnect: {t}", .{e});
                     backoff_ms = @min(backoff_ms * 2, 2000);
                 }
             }
         }
+    }
+
+    fn isClosing(c: *Control) bool {
+        c.mu.lockUncancelable(c.io);
+        defer c.mu.unlock(c.io);
+        return c.closing;
     }
 
     fn readLoop(c: *Control) void {
@@ -990,4 +1011,59 @@ test "control: close shuts a reconnect still in its handshake" {
     const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
     c.close();
     try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 5000);
+}
+
+test "control: a write that fails part-way drops the connection, and it reconnects" {
+    const a = testing.allocator;
+    const f = try fake.Fake.start(a, testing.io);
+    defer f.deinit();
+    const c = try Control.open(a, testing.io, .{ .socket_path = f.path });
+    defer c.close();
+    var first = (try c.nextEvent(1000)).?;
+    first.deinit(a);
+    // Writes on the connection now fail, but reads still work: without dropping the connection
+    // the reader would wait on it forever, and every call after would fail.
+    {
+        c.mu.lockUncancelable(testing.io);
+        defer c.mu.unlock(testing.io);
+        try c.conn.?.stream.shutdown(testing.io, .send);
+    }
+    try testing.expectError(error.ConnectionLost, c.call("session.list", null));
+    var reconnected = false;
+    var tries: u32 = 0;
+    while (!reconnected and tries < 50) : (tries += 1) {
+        const e = (try c.nextEvent(100)) orelse continue;
+        defer e.deinit(a);
+        if (e == .connected and e.connected.generation == 2) reconnected = true;
+    }
+    try testing.expect(reconnected);
+    var r = try c.call("session.list", null);
+    r.deinit();
+}
+
+test "control: close while Rex is down returns at once" {
+    const a = testing.allocator;
+    // Close at different moments of the reconnect loop: in its sleep, in a connect that fails.
+    for (0..12) |i| {
+        const f = try fake.Fake.start(a, testing.io);
+        const path = try a.dupe(u8, f.path);
+        defer a.free(path);
+        const c = try Control.open(a, testing.io, .{ .socket_path = path });
+        f.deinit(); // Rex is gone, and so is its socket
+        try testing.io.sleep(.fromMilliseconds(@intCast(i * 37 % 300)), .awake);
+        const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
+        c.close();
+        try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 1000);
+    }
+}
+
+test "control: a connection's limit is set from its first read" {
+    const a = testing.allocator;
+    const f = try fake.Fake.start(a, testing.io);
+    defer f.deinit();
+    const c = try Control.open(a, testing.io, .{ .socket_path = f.path });
+    defer c.close();
+    c.mu.lockUncancelable(testing.io);
+    defer c.mu.unlock(testing.io);
+    try testing.expectEqual(@as(u64, 1 << 20), c.conn.?.max_message); // the fake's WELCOME limit
 }

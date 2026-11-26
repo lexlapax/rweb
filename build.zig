@@ -1,16 +1,23 @@
 const std = @import("std");
 const zon = @import("build.zig.zon");
 
-/// The checkout's commit, or "unknown" outside a git checkout (an export has no .git).
-fn gitCommit(b: *std.Build) []const u8 {
-    var code: u8 = 0;
-    const out = b.runAllowFail(&.{ "git", "rev-parse", "HEAD" }, &code, .ignore) catch return "unknown";
-    const t = std.mem.trim(u8, out, " \n\r");
-    return if (t.len == 40) t else "unknown";
+/// A module `git_commit` with `pub const commit`: the -Dcommit value when given (setup-repo and release
+/// builds pass it: they build from a `git archive` export, which has no .git); otherwise the checkout's
+/// commit, read by a step that runs on every build, or "unknown" outside a git checkout. Not read while
+/// configuring: Zig caches the configure step, so a commit read there goes stale after a `git pull`.
+fn commitFile(b: *std.Build, given: ?[]const u8) std.Build.LazyPath {
+    if (given) |c| {
+        const wf = b.addWriteFiles();
+        return wf.add("git_commit.zig", b.fmt("pub const commit = \"{f}\";\n", .{std.zig.fmtString(c)}));
+    }
+    const stamp = b.addSystemCommand(&.{ "sh", "-c", "c=$(git rev-parse HEAD 2>/dev/null) && [ ${#c} -eq 40 ] || c=unknown; printf 'pub const commit = \"%s\";\\n' \"$c\"" });
+    stamp.setCwd(b.path("."));
+    stamp.has_side_effects = true;
+    return stamp.captureStdOut(.{ .basename = "git_commit.zig" });
 }
 
 /// The bridge for one target, with its own Rex library and Ghostty built for that target.
-fn bridgeExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: anytype, opts: *std.Build.Step.Options, strip: ?bool) ?*std.Build.Step.Compile {
+fn bridgeExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: anytype, opts: *std.Build.Step.Options, commit: std.Build.LazyPath, strip: ?bool) ?*std.Build.Step.Compile {
     const ghostty = b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize }) orelse return null;
     const rex = b.createModule(.{ .root_source_file = b.path("src/rex/root.zig"), .target = target, .optimize = optimize });
     rex.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
@@ -18,6 +25,7 @@ fn bridgeExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: anytype,
     m.addImport("rex", rex);
     m.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
     m.addOptions("build_options", opts);
+    m.addAnonymousImport("git_commit", .{ .root_source_file = commit });
     return b.addExecutable(.{ .name = "rweb", .root_module = m });
 }
 
@@ -54,13 +62,13 @@ pub fn build(b: *std.Build) void {
     });
     bridge_mod.addImport("rex", rex);
     if (ghostty) |dep| bridge_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
-    // What `rweb --version` reports. The commit comes from -Dcommit (setup-repo and release builds
-    // pass it: they build from a `git archive` export, which has no .git) or else from git.
+    // What `rweb --version` reports (the commit: see `commitFile`).
     const opts = b.addOptions();
     opts.addOption([]const u8, "version", zon.version);
-    opts.addOption([]const u8, "commit", b.option([]const u8, "commit", "Commit this build is from (default: git rev-parse HEAD)") orelse gitCommit(b));
     opts.addOption([]const u8, "ghostty", ghosttyTag(zon.dependencies.ghostty.url));
     bridge_mod.addOptions("build_options", opts);
+    const commit = commitFile(b, b.option([]const u8, "commit", "Commit this build is from (default: git rev-parse HEAD at build time)"));
+    bridge_mod.addAnonymousImport("git_commit", .{ .root_source_file = commit });
     const exe = b.addExecutable(.{ .name = "rweb", .root_module = bridge_mod });
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);
@@ -78,7 +86,7 @@ pub fn build(b: *std.Build) void {
     pack.addDirectoryArg(b.graph.path(.install_prefix, "dist"));
     pack.has_side_effects = true;
     for (dist_targets) |t| {
-        const d = bridgeExe(b, b.resolveTargetQuery(t.query), .safe, opts, true) orelse continue;
+        const d = bridgeExe(b, b.resolveTargetQuery(t.query), .safe, opts, commit, true) orelse continue;
         const inst = b.addInstallArtifact(d, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("dist/stage/{s}", .{t.name}) } } });
         pack.step.dependOn(&inst.step);
     }

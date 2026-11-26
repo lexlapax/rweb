@@ -17,7 +17,9 @@ const Hub = hub_mod.Hub;
 const log = std.log.scoped(.server);
 
 pub const Listen = union(enum) {
-    /// A unix socket: created 0600 in a directory that must not be open to others.
+    /// A unix socket, by absolute path: created 0600 in a folder of ours that is closed to others,
+    /// under folders only we or root can change, none of them a link (Tailscale Serve reaches the
+    /// socket by this path, so the path itself must stay ours).
     unix: []const u8,
     /// Loopback TCP only (port 0 picks one).
     tcp_loopback: u16,
@@ -27,6 +29,11 @@ pub const Options = struct {
     listen: Listen,
     access: access.Config,
     max_connections: u32 = 64,
+    /// WebSocket viewers at once, at most. Fewer than `max_connections`, so plain requests (the
+    /// page's files, transfers) always find a connection slot; one more upgrade gets 503.
+    max_viewers: u32 = 32,
+    /// With a unix listener: where a failed check of the socket's folders was, for the message.
+    problem: ?*xfer.Problem = null,
     /// Log what browsers send, typed text included. For keyboard testing only.
     debug_input: bool = false,
     /// A secret first path segment every request must carry, for a loopback TCP listener where
@@ -93,12 +100,25 @@ pub fn targetIsClean(target: []const u8) bool {
     return true;
 }
 
-/// Whether a viewer's connection is still alive: what the reader last heard, and when the frame
-/// being written started (0 while none is).
+/// Whether a viewer's connection is still alive: what the reader last heard, when the frame being
+/// written started (0 while none is), and since when the reader has been busy in a handler (0 while
+/// it is not): a reader waiting on Rex cannot hear the browser, which is not silent for that.
 const Liveness = struct {
     last_rx: std.atomic.Value(i64),
     write_since: std.atomic.Value(i64) = .init(0),
+    busy_since: std.atomic.Value(i64) = .init(0),
 };
+
+/// Whether the watchdog should drop a viewer as silent: quiet for longer than the limit, and its
+/// reader not busy in a handler (a handler waiting on Rex keeps the reader from hearing the browser;
+/// Rex calls end on their own timeout).
+fn isSilent(now: i64, last_rx: i64, busy_since: i64, limit_ms: u32) bool {
+    return busy_since == 0 and now - last_rx > limit_ms;
+}
+
+/// What the page is told before a connection that sent a message over the limit is closed (the
+/// stream cannot be resynchronized, so it is closed either way).
+const too_large_text = "{\"t\":\"error\",\"for\":\"message\",\"msg\":\"too large\"}";
 
 /// When a transfer last moved bytes.
 const Progress = struct {
@@ -127,6 +147,13 @@ pub const Server = struct {
     /// reliable on its own).
     conns_mu: Io.Mutex = .init,
     conns: std.ArrayList(Io.net.Stream) = .empty,
+    /// WebSocket viewers (and lab sockets) open now, at most `opts.max_viewers`.
+    viewers: std.atomic.Value(u32) = .init(0),
+    /// A unix listener's folder, checked and kept open for the server's life; the socket's name in
+    /// it; and the device and inode of the socket this server bound, so `stop` removes only that.
+    sock_dir: ?std.posix.fd_t = null,
+    sock_name: []const u8 = "",
+    sock_id: ?struct { dev: u64, ino: u64 } = null,
     /// Accepted connections that have not sent a request head yet, oldest first (under `conns_mu`).
     waiting: std.ArrayList(Io.net.Stream) = .empty,
     /// Connections evicted from `waiting`, for tests and logs.
@@ -153,12 +180,33 @@ pub const Server = struct {
         if (opts.access.token) |t| s.token_prefix = tokenPrefix(&s.token_prefix_buf, t);
         switch (opts.listen) {
             .unix => |path| {
-                try prepareSocketDir(io, path);
-                try clearStaleSocket(io, path);
-                const old = umask(0o177); // the socket is created 0600
-                defer _ = umask(old);
-                const addr = try Io.net.UnixAddress.init(path);
-                s.listener = try addr.listen(io, .{});
+                var own_problem: xfer.Problem = .{};
+                const dir = try openSocketDir(io, path, opts.problem orelse &own_problem);
+                s.sock_dir = dir.fd;
+                s.sock_name = dir.name;
+                errdefer {
+                    (Io.Dir{ .handle = dir.fd }).close(io);
+                    s.sock_dir = null;
+                }
+                try clearStaleSocket(io, dir.fd, dir.name, path);
+                {
+                    const old = umask(0o177); // the socket is created 0600
+                    defer _ = umask(old);
+                    // Bound by path: every folder on it was just checked (only we or root can change
+                    // them), so the path leads into the folder that is held open.
+                    const addr = try Io.net.UnixAddress.init(path);
+                    s.listener = try addr.listen(io, .{});
+                }
+                // What was bound, seen in the kept folder: removed at `stop` only if still the same.
+                const n = xfer.statAt(dir.fd, dir.name) catch |e| {
+                    s.listener.deinit(io);
+                    return e;
+                };
+                if (!xfer.isSocket(n)) {
+                    s.listener.deinit(io);
+                    return error.NotASocket;
+                }
+                s.sock_id = .{ .dev = n.dev, .ino = n.ino };
             },
             .tcp_loopback => |port| {
                 var addr = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -167,6 +215,7 @@ pub const Server = struct {
             },
         }
         errdefer s.listener.deinit(io);
+        errdefer if (s.sock_dir) |fd| (Io.Dir{ .handle = fd }).close(io);
         s.accept_task = try io.concurrent(acceptLoop, .{s});
         return s;
     }
@@ -183,14 +232,31 @@ pub const Server = struct {
         s.waiting.deinit(s.gpa);
         for (s.gz) |z| if (z) |bytes| s.gpa.free(bytes);
         s.listener.deinit(s.io);
-        if (s.opts.listen == .unix) Io.Dir.deleteFileAbsolute(s.io, s.opts.listen.unix) catch {};
+        if (s.sock_dir) |fd| {
+            const dir: Io.Dir = .{ .handle = fd };
+            // Only the socket this server made: something put in its place is left alone.
+            if (s.ownSocketInPlace()) dir.deleteFile(s.io, s.sock_name) catch {};
+            dir.close(s.io);
+        }
         s.gpa.destroy(s);
+    }
+
+    /// Whether the unix socket's name in its folder is still the socket this server bound (same
+    /// device and inode).
+    fn ownSocketInPlace(s: *Server) bool {
+        const fd = s.sock_dir orelse return false;
+        const want = s.sock_id orelse return false;
+        const n = xfer.statAt(fd, s.sock_name) catch return false;
+        return n.dev == want.dev and n.ino == want.ino;
     }
 
     /// Make a blocked `accept` return, by connecting to ourselves.
     fn wakeAccept(s: *Server) void {
         switch (s.opts.listen) {
             .unix => |path| {
+                // Only while the path still names our socket: something put in its place is not
+                // ours to connect to (and the task's cancellation wakes `accept` anyway).
+                if (!s.ownSocketInPlace()) return;
                 const addr = Io.net.UnixAddress.init(path) catch return;
                 const c = addr.connect(s.io) catch return;
                 c.close(s.io);
@@ -437,6 +503,8 @@ pub const Server = struct {
                     return;
                 },
             };
+            if (!s.takeViewerSlot()) return s.refuseViewer(&req);
+            defer _ = s.viewers.fetchSub(1, .acq_rel);
             var sock = try req.respondWebSocket(.{ .key = key });
             try sock.flush();
             return s.viewerSession(conn, &sock);
@@ -446,6 +514,8 @@ pub const Server = struct {
                 .websocket => |k| k orelse return error.NoKey,
                 else => return,
             };
+            if (!s.takeViewerSlot()) return s.refuseViewer(&req);
+            defer _ = s.viewers.fetchSub(1, .acq_rel);
             var sock = try req.respondWebSocket(.{ .key = key });
             try sock.flush();
             return s.labSession(conn, &sock);
@@ -594,6 +664,21 @@ pub const Server = struct {
         try req.respond(body, .{ .keep_alive = false, .extra_headers = withSecurity(&hb, extra[0..n]) });
     }
 
+    /// Reserve one of the `max_viewers` WebSocket places; false when all are taken.
+    fn takeViewerSlot(s: *Server) bool {
+        while (true) {
+            const n = s.viewers.load(.acquire);
+            if (n >= s.opts.max_viewers) return false;
+            if (s.viewers.cmpxchgWeak(n, n + 1, .acq_rel, .acquire) == null) return true;
+        }
+    }
+
+    fn refuseViewer(s: *Server, req: *std.http.Server.Request) !void {
+        _ = s;
+        log.warn("refused a WebSocket: every viewer place is taken", .{});
+        try req.respond("too many viewers\n", .{ .status = .service_unavailable, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
+    }
+
     fn refuseXfer(req: *std.http.Server.Request, status: std.http.Status, text: []const u8) !void {
         try req.respond(text, .{ .status = status, .keep_alive = false, .extra_headers = &(security_headers ++ no_store) });
     }
@@ -669,7 +754,9 @@ pub const Server = struct {
     /// paste its quoted path into the terminal. The file is created relative to the folder opened
     /// at startup (`upload_dir_handle`), never by path.
     fn serveUpload(s: *Server, conn: Io.net.Stream, req: *std.http.Server.Request, xtoken: []const u8) !void {
-        const dir_path = s.hub.cfg.transfer.upload_dir orelse return refuseXfer(req, .not_found, "not found\n");
+        // The folder's real path, resolved when it was opened, not the path as given (a link in it
+        // could later lead elsewhere).
+        const dir_path = s.hub.cfg.transfer.upload_dir_real orelse s.hub.cfg.transfer.upload_dir orelse return refuseXfer(req, .not_found, "not found\n");
         const dir = s.hub.cfg.transfer.upload_dir_handle orelse return refuseXfer(req, .not_found, "not found\n");
         if (!s.hub.xfers.acquire()) return refuseXfer(req, .too_many_requests, "too many transfers\n");
         defer s.hub.xfers.release();
@@ -804,8 +891,13 @@ pub const Server = struct {
         // `max_messages_per_second` in any one-second window closes the socket.
         var window_start: i64 = nowMs(s.io);
         var window_count: u32 = 0;
+        var too_large = false;
         while (true) {
-            const m = c.readMessage(gpa) catch break;
+            const m = c.readMessage(gpa) catch |e| {
+                too_large = e == error.TooLarge;
+                if (too_large) log.warn("closing a browser that sent a message over {d} bytes", .{protocol.max_message_bytes});
+                break;
+            };
             defer gpa.free(m.data);
             const now = nowMs(s.io);
             live.last_rx.store(now, .release);
@@ -829,14 +921,21 @@ pub const Server = struct {
                         v.pushText(text);
                         continue;
                     };
+                    // While the handler waits (on Rex, say) this reader cannot hear the browser: it
+                    // counts as alive meanwhile, and its silence is measured from the handler's end.
+                    live.busy_since.store(@max(1, nowMs(s.io)), .release);
                     s.hub.handle(v, msg);
+                    live.last_rx.store(nowMs(s.io), .release);
+                    live.busy_since.store(0, .release);
                 },
                 else => {}, // binary from a browser is not part of the protocol
             }
         }
         s.hub.closeViewer(v);
         writer.cancel(s.io);
-        // The goodbye is written under the same deadline as any frame (the watchdog still runs).
+        // The rest of an oversize message is never read, so the stream cannot go on; the page is
+        // told why first. Written under the same deadline as any frame (the watchdog still runs).
+        if (too_large) s.writeTimed(c, &live, .text, too_large_text) catch {};
         s.writeTimed(c, &live, .close, &.{ 0x03, 0xe8 }) catch {};
         s.hub.removeViewer(v);
     }
@@ -853,8 +952,9 @@ pub const Server = struct {
     /// reader and the writer, which then clean up.
     fn dropIfDead(s: *Server, c: *rex.ws.Conn, live: *Liveness) bool {
         const now = nowMs(s.io);
-        const quiet = now - live.last_rx.load(.acquire);
-        if (quiet > s.opts.silent_limit_ms) {
+        const last = live.last_rx.load(.acquire);
+        const quiet = now - last;
+        if (isSilent(now, last, live.busy_since.load(.acquire), s.opts.silent_limit_ms)) {
             log.info("dropping a browser that has been silent for {d} s", .{@divTrunc(quiet, 1000)});
             c.stream.shutdown(s.io, .both) catch {};
             return true;
@@ -959,36 +1059,54 @@ fn knownPath(path: []const u8) []const u8 {
     return "(other)";
 }
 
-/// Remove a stale socket file at `path`, but never anything else: a file that is not a socket,
-/// or a socket something is still listening on, is an error.
-fn clearStaleSocket(io: Io, path: []const u8) !void {
-    const st = Io.Dir.cwd().statFile(io, path, .{}) catch |e| switch (e) {
+/// Remove a stale socket `name` in the socket's folder `dir_fd` (at `path`), but never anything
+/// else: an entry that is not a socket (a link included: it is never followed), or a socket
+/// something is still listening on, is an error.
+fn clearStaleSocket(io: Io, dir_fd: std.posix.fd_t, name: []const u8, path: []const u8) !void {
+    const n = xfer.statAt(dir_fd, name) catch |e| switch (e) {
         error.FileNotFound => return,
         else => return e,
     };
-    if (st.kind != .unix_domain_socket) return error.NotASocket;
+    if (!xfer.isSocket(n)) return error.NotASocket;
     const addr = try Io.net.UnixAddress.init(path);
     if (addr.connect(io)) |c| {
         c.close(io);
         return error.AddressInUse;
     } else |_| {}
-    try Io.Dir.deleteFileAbsolute(io, path);
+    try (Io.Dir{ .handle = dir_fd }).deleteFile(io, name);
 }
 
 // ---- OS bits ----
 
 extern "c" fn umask(mask: c_uint) c_uint;
 
-/// Create the socket's directory 0700 if it is missing; refuse one that is not ours or that others
-/// can enter.
-fn prepareSocketDir(io: Io, socket_path: []const u8) !void {
+/// The unix socket's folder, opened and checked: every folder above it passes `xfer.checkAncestor`
+/// (walked from `/` without following a link; missing ones are made 0700 inside their checked
+/// parent), and the folder itself, made 0700 if missing, must be ours and closed to others, or
+/// another user could replace the socket. The caller keeps the descriptor; `name` is the socket's
+/// name in it (a slice of `socket_path`).
+fn openSocketDir(io: Io, socket_path: []const u8, problem: *xfer.Problem) !struct { fd: std.posix.fd_t, name: []const u8 } {
+    problem.path = socket_path;
+    if (socket_path.len == 0 or socket_path[0] != '/') return error.SocketPathNotAbsolute;
+    const name = std.fs.path.basename(socket_path);
+    if (socket_path[socket_path.len - 1] == '/' or name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.BadSocketPath;
     const dir = std.fs.path.dirname(socket_path) orelse return error.BadSocketPath;
-    _ = Io.Dir.cwd().createDirPathStatus(io, dir, @enumFromInt(0o700)) catch {}; // new directories are 0700
-    var d = try Io.Dir.cwd().openDir(io, dir, .{});
-    defer d.close(io);
-    const om = xfer.fdOwnerMode(d.handle) catch return error.SocketDirNotPrivate;
-    if (om.uid != std.c.getuid()) return error.SocketDirNotOurs; // another user could replace the socket
-    if (om.mode & 0o077 != 0) return error.SocketDirNotPrivate;
+    const above = std.fs.path.dirname(dir) orelse return error.SocketDirNotOurs; // the socket right in `/`
+    const dir_name = std.fs.path.basename(dir);
+    if (std.mem.eql(u8, dir_name, ".") or std.mem.eql(u8, dir_name, "..")) return error.BadSocketPath;
+    const parent = try xfer.openChain(io, above, true, problem);
+    defer (Io.Dir{ .handle = parent }).close(io);
+    problem.path = dir;
+    const fd = try xfer.openFolderAt(io, parent, dir_name, true);
+    errdefer (Io.Dir{ .handle = fd }).close(io);
+    const om = xfer.fdOwnerMode(fd) catch return error.SocketDirNotPrivate;
+    xfer.checkPrivateDir(om, @intCast(std.c.getuid())) catch |e| return switch (e) {
+        error.NotOwned => error.SocketDirNotOurs,
+        error.TooOpen => error.SocketDirNotPrivate,
+        else => e,
+    };
+    problem.path = socket_path;
+    return .{ .fd = fd, .name = name };
 }
 
 /// The uid of the process on the other end of a unix socket, if the OS will say.
@@ -1020,7 +1138,14 @@ extern "c" fn getpeereid(fd: c_int, uid: *std.c.uid_t, gid: *std.c.gid_t) c_int;
 const testing = std.testing;
 const fake = rex.fake;
 
-const token = "test-token-0123456789abcdef";
+/// A fresh random token for one test bridge: 32 hex characters from `io.random`, never a constant,
+/// so no other local process can guess its way into a test server.
+fn randomToken(buf: *[32]u8) []const u8 {
+    var raw: [16]u8 = undefined;
+    testing.io.random(&raw);
+    buf.* = std.fmt.bytesToHex(raw, .lower);
+    return buf;
+}
 
 const Rig = struct {
     f: *fake.Fake,
@@ -1029,11 +1154,14 @@ const Rig = struct {
     srv: *Server,
     session_id: []const u8,
     block_id: []const u8,
+    /// This rig's own random token (used when its access rule has one).
+    tok: *[32]u8,
 
     const Extra = struct {
         backend_secret: ?[]const u8 = null,
         head_timeout_ms: u32 = 10_000,
         max_pending: u32 = 16,
+        max_viewers: u32 = 32,
         lab: bool = true,
         silent_limit_ms: u32 = 20_000,
         write_deadline_ms: u32 = 30_000,
@@ -1044,8 +1172,14 @@ const Rig = struct {
         return initExtra(hub_cfg, acc, listen, .{});
     }
 
-    fn initExtra(hub_cfg: hub_mod.Config, acc: access.Config, listen: Listen, extra: Extra) !Rig {
+    /// `acc.token`, when set, only says "use a token": the rig makes its own random one.
+    fn initExtra(hub_cfg: hub_mod.Config, acc_in: access.Config, listen: Listen, extra: Extra) !Rig {
         const a = testing.allocator;
+        const tok = try a.create([32]u8);
+        errdefer a.destroy(tok);
+        var acc = acc_in;
+        const random = randomToken(tok);
+        if (acc.token != null) acc.token = random;
         const f = try fake.Fake.start(a, testing.io);
         errdefer f.deinit();
         const made = try f.createSession("rweb-test-server");
@@ -1059,12 +1193,13 @@ const Rig = struct {
             .backend_secret = extra.backend_secret,
             .head_timeout_ms = extra.head_timeout_ms,
             .max_pending = extra.max_pending,
+            .max_viewers = extra.max_viewers,
             .lab = extra.lab,
             .silent_limit_ms = extra.silent_limit_ms,
             .write_deadline_ms = extra.write_deadline_ms,
             .transfer_idle_ms = extra.transfer_idle_ms,
         });
-        return .{ .f = f, .ctl = ctl, .hub = h, .srv = srv, .session_id = made.session_id, .block_id = made.block_id };
+        return .{ .f = f, .ctl = ctl, .hub = h, .srv = srv, .session_id = made.session_id, .block_id = made.block_id, .tok = tok };
     }
 
     fn deinit(r: Rig) void {
@@ -1072,6 +1207,17 @@ const Rig = struct {
         r.hub.close();
         r.ctl.close();
         r.f.deinit();
+        testing.allocator.destroy(r.tok);
+    }
+
+    fn token(r: Rig) []const u8 {
+        return r.tok;
+    }
+
+    /// `path` with this rig's token added to its query. The caller frees it.
+    fn withToken(r: Rig, path: []const u8) ![]u8 {
+        const sep: []const u8 = if (std.mem.indexOfScalar(u8, path, '?') != null) "&" else "?";
+        return std.fmt.allocPrint(testing.allocator, "{s}{s}token={s}", .{ path, sep, r.tok });
     }
 
     fn tcp(r: Rig) !Io.net.Stream {
@@ -1111,19 +1257,27 @@ fn get(r: Rig, path: []const u8, headers: []const u8) !Http {
     return httpRequest(try r.tcp(), req);
 }
 
-const token_cfg: access.Config = .{ .token = token };
+/// `get` with the rig's token added to the query.
+fn getT(r: Rig, path: []const u8, headers: []const u8) !Http {
+    const p = try r.withToken(path);
+    defer testing.allocator.free(p);
+    return get(r, p, headers);
+}
 
-/// The page's address under the test token's prefix, with the token: `/s/<id>/?token=...`.
-fn pagePath(buf: []u8) []const u8 {
+/// A token rule; each rig replaces the placeholder with its own random token (`Rig.initExtra`).
+const token_cfg: access.Config = .{ .token = "replaced-by-each-rig" };
+
+/// The page's address under the rig token's prefix, with the token: `/s/<id>/?token=...`.
+fn pagePath(rig: Rig, buf: []u8) []const u8 {
     var pb: [35]u8 = undefined;
-    return std.fmt.bufPrint(buf, "{s}/?token={s}", .{ tokenPrefix(&pb, token), token }) catch unreachable;
+    return std.fmt.bufPrint(buf, "{s}/?token={s}", .{ tokenPrefix(&pb, rig.token()), rig.token() }) catch unreachable;
 }
 
 test "server: assets are served with a strict content security policy" {
     const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
     defer rig.deinit();
     var ppb: [128]u8 = undefined;
-    const h = try get(rig, pagePath(&ppb), "");
+    const h = try get(rig, pagePath(rig, &ppb), "");
     defer freeHttp(h);
     try testing.expectEqual(@as(u16, 200), h.status);
     try testing.expect(std.mem.indexOf(u8, h.body, "<title>rweb</title>") != null);
@@ -1133,17 +1287,15 @@ test "server: assets are served with a strict content security policy" {
     try testing.expect(std.mem.indexOf(u8, h.body, "http://") == null and std.mem.indexOf(u8, h.body, "https://") == null);
 
     for ([_][]const u8{ "/app.js", "/keys.js", "/lab", "/lab.js", "/app.css", "/vendor/xterm.js", "/vendor/xterm.css", "/vendor/addon-fit.js", "/vendor/LICENSE-xterm.txt", "/wterm-shim.js", "/vendor/wterm.js", "/vendor/wterm.css", "/vendor/ghostty-vt.wasm", "/vendor/LICENSE-wterm.txt" }) |p| {
-        const path = try std.fmt.allocPrint(testing.allocator, "{s}?token={s}", .{ p, token });
-        defer testing.allocator.free(path);
-        const a = try get(rig, path, "");
+        const a = try getT(rig, p, "");
         defer freeHttp(a);
         try testing.expectEqual(@as(u16, 200), a.status);
         try testing.expect(a.body.len > 100);
     }
-    const nf = try get(rig, "/nope?token=" ++ token, "");
+    const nf = try getT(rig, "/nope", "");
     defer freeHttp(nf);
     try testing.expectEqual(@as(u16, 404), nf.status);
-    const tree = try get(rig, "/api/tree?token=" ++ token, "");
+    const tree = try getT(rig, "/api/tree", "");
     defer freeHttp(tree);
     try testing.expectEqual(@as(u16, 200), tree.status);
     try testing.expect(std.mem.indexOf(u8, tree.body, rig.session_id) != null);
@@ -1161,7 +1313,8 @@ fn headerValue(head: []const u8, name: []const u8) ?[]const u8 {
 test "server: assets are compressed, validated and cached, so a phone loads them fast" {
     const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
     defer rig.deinit();
-    const path = "/vendor/xterm.js?token=" ++ token;
+    const path = try rig.withToken("/vendor/xterm.js");
+    defer testing.allocator.free(path);
     const original = assets.find("/vendor/xterm.js").?.body.len;
 
     // Without Accept-Encoding: the whole file.
@@ -1194,14 +1347,14 @@ test "server: assets are compressed, validated and cached, so a phone loads them
 
     // A token page sets the cookie: never stored, and never a 304.
     var ppb: [128]u8 = undefined;
-    const page = try get(rig, pagePath(&ppb), "");
+    const page = try get(rig, pagePath(rig, &ppb), "");
     defer freeHttp(page);
     try testing.expectEqualStrings("no-store", headerValue(page.head, "cache-control").?);
     try testing.expect(headerValue(page.head, "set-cookie") != null);
     const page_tag = headerValue(page.head, "etag").?;
     const hdr2 = try std.fmt.allocPrint(testing.allocator, "If-None-Match: {s}\r\n", .{page_tag});
     defer testing.allocator.free(hdr2);
-    const page2 = try get(rig, pagePath(&ppb), hdr2);
+    const page2 = try get(rig, pagePath(rig, &ppb), hdr2);
     defer freeHttp(page2);
     try testing.expectEqual(@as(u16, 200), page2.status);
 
@@ -1217,6 +1370,7 @@ test "server: the token cookie is scoped to the token's own path, never to the w
     // other loopback service the browser visits, and two tunnels would overwrite each other's.
     const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
     defer rig.deinit();
+    const token = rig.token();
     var pb: [35]u8 = undefined;
     const pfx = tokenPrefix(&pb, token);
     try testing.expect(std.mem.startsWith(u8, pfx, "/s/") and pfx.len == 35);
@@ -1226,12 +1380,13 @@ test "server: the token cookie is scoped to the token's own path, never to the w
 
     // Opening `/?token=` moves to the prefix, keeps other parameters, drops the token, sets the
     // prefix-scoped cookie and deletes 0.1.0's site-wide one.
-    const r = try get(rig, "/?dbg=1&token=" ++ token ++ "&term=xterm", "");
+    var tb: [96]u8 = undefined;
+    const r = try get(rig, try std.fmt.bufPrint(&tb, "/?dbg=1&token={s}&term=xterm", .{token}), "");
     defer freeHttp(r);
     try testing.expectEqual(@as(u16, 303), r.status);
     var lb: [128]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&lb, "{s}/?dbg=1&term=xterm", .{pfx}), headerValue(r.head, "location").?);
-    try testing.expect(std.mem.indexOf(u8, r.head, token ++ "&") == null and std.mem.indexOf(u8, headerValue(r.head, "location").?, token) == null);
+    try testing.expect(std.mem.indexOf(u8, r.head, try std.fmt.bufPrint(&tb, "{s}&", .{token})) == null and std.mem.indexOf(u8, headerValue(r.head, "location").?, token) == null);
     var cb: [160]u8 = undefined;
     const want_cookie = try std.fmt.bufPrint(&cb, "rweb-token={s}; Path={s}/; HttpOnly; SameSite=Strict", .{ token, pfx });
     try testing.expect(std.mem.indexOf(u8, r.head, want_cookie) != null);
@@ -1271,7 +1426,8 @@ test "server: the token cookie is scoped to the token's own path, never to the w
         try testing.expectEqual(@as(u16, 200), page.status);
     }
     var wb: [96]u8 = undefined;
-    const c = try rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), try std.fmt.bufPrint(&wb, "{s}/ws", .{pfx}), null, "Origin: http://localhost\r\nCookie: rweb-token=" ++ token ++ "\r\n");
+    var wh: [96]u8 = undefined;
+    const c = try rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), try std.fmt.bufPrint(&wb, "{s}/ws", .{pfx}), null, try std.fmt.bufPrint(&wh, "Origin: http://localhost\r\nCookie: rweb-token={s}\r\n", .{token}));
     c.deinit(testing.allocator);
     // Without the cookie or token, under the prefix: refused.
     var ub2: [96]u8 = undefined;
@@ -1333,7 +1489,8 @@ test "server: Tailscale identity rules, each shown to refuse" {
 test "server: a WebSocket needs a matching Origin" {
     const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
     defer rig.deinit();
-    const path = "/ws?token=" ++ token;
+    const path = try rig.withToken("/ws");
+    defer testing.allocator.free(path);
     // Another site's page: refused at the upgrade.
     try testing.expectError(error.UpgradeRefused, rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), path, null, "Origin: https://evil.example\r\n"));
     try testing.expectEqual(@intFromEnum(access.Refusal.bad_origin), rig.srv.last_refusal.load(.acquire));
@@ -1370,7 +1527,9 @@ fn waitBinary(c: *rex.ws.Conn, needle: []const u8) !void {
 }
 
 fn browser(rig: Rig) !*rex.ws.Conn {
-    return rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), "/ws?token=" ++ token, null, "Origin: http://localhost\r\n");
+    const path = try rig.withToken("/ws");
+    defer testing.allocator.free(path);
+    return rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), path, null, "Origin: http://localhost\r\n");
 }
 
 fn sendJson(c: *rex.ws.Conn, comptime fmt: []const u8, args: anytype) !void {
@@ -1473,10 +1632,13 @@ test "server: malformed browser messages are answered, not trusted" {
     try waitText(c, "pong"); // still alive
 }
 
+/// `/tmp` by its real path: a socket's path may not pass through a link, and on macOS `/tmp` is one.
+const tmp_root = if (builtin.os.tag.isDarwin()) "/private/tmp" else "/tmp";
+
 fn tmpSocketPath(buf: []u8, io: Io) ![]const u8 {
     var rnd: [4]u8 = undefined;
     io.random(&rnd);
-    return std.fmt.bufPrint(buf, "/tmp/rweb-test-{x}/bridge.sock", .{rnd});
+    return std.fmt.bufPrint(buf, tmp_root ++ "/rweb-test-{x}/bridge.sock", .{rnd});
 }
 
 fn unixGet(rig: Rig, path: []const u8) !Http {
@@ -1549,7 +1711,7 @@ test "server: refuses to start without any access rule, and in a directory other
     }
     try testing.expectError(error.SocketDirNotPrivate, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = owner_cfg }));
     // A folder that is not ours (here root's /tmp) is refused too: its owner could replace the socket.
-    if (std.c.getuid() != 0) try testing.expectError(error.SocketDirNotOurs, Server.start(a, testing.io, h, .{ .listen = .{ .unix = "/tmp/rweb-test-not-ours.sock" }, .access = owner_cfg }));
+    if (std.c.getuid() != 0) try testing.expectError(error.SocketDirNotOurs, Server.start(a, testing.io, h, .{ .listen = .{ .unix = tmp_root ++ "/rweb-test-not-ours.sock" }, .access = owner_cfg }));
 }
 
 test "live: a browser socket drives a throwaway terminal on a real Rex (needs REX_SOCKET)" {
@@ -1560,7 +1722,9 @@ test "live: a browser socket drives a throwaway terminal on a real Rex (needs RE
     defer ctl.close();
     const h = try Hub.open(a, testing.io, ctl, .{});
     defer h.close();
-    const srv = try Server.start(a, testing.io, h, .{ .listen = .{ .tcp_loopback = 0 }, .access = token_cfg });
+    var tb: [32]u8 = undefined;
+    const tk = randomToken(&tb);
+    const srv = try Server.start(a, testing.io, h, .{ .listen = .{ .tcp_loopback = 0 }, .access = .{ .token = tk } });
     defer srv.stop();
 
     // A throwaway session, made through the bridge's own protocol.
@@ -1574,7 +1738,8 @@ test "live: a browser socket drives a throwaway terminal on a real Rex (needs RE
 
     var addr = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(srv.port) };
     const stream = try addr.connect(testing.io, .{ .mode = .stream });
-    const c = try rex.ws.Conn.connectStream(a, testing.io, stream, "/ws?token=" ++ token, null, "Origin: http://localhost\r\n");
+    var wp: [64]u8 = undefined;
+    const c = try rex.ws.Conn.connectStream(a, testing.io, stream, try std.fmt.bufPrint(&wp, "/ws?token={s}", .{tk}), null, "Origin: http://localhost\r\n");
     defer c.deinit(a);
     try waitText(c, "\"t\":\"tree\"");
     try sendJson(c, "{{\"t\":\"open\",\"session\":\"{s}\",\"block\":\"{s}\"}}", .{ sid, bid });
@@ -1671,14 +1836,12 @@ test "server: the diagnostic pages are off unless asked for, and never log a que
     const rig = try Rig.initExtra(.{}, token_cfg, .{ .tcp_loopback = 0 }, .{ .lab = false });
     defer rig.deinit();
     for ([_][]const u8{ "/lab", "/lab.js", "/labsel", "/labsel.js", "/api/lab/hb", "/api/lab/result", "/api/tree" }) |p| {
-        const path = try std.fmt.allocPrint(testing.allocator, "{s}?token={s}", .{ p, token });
-        defer testing.allocator.free(path);
-        const h = try get(rig, path, "");
+        const h = try getT(rig, p, "");
         defer freeHttp(h);
         try testing.expectEqual(@as(u16, 404), h.status);
     }
     var ppb: [128]u8 = undefined;
-    const ok = try get(rig, pagePath(&ppb), "");
+    const ok = try get(rig, pagePath(rig, &ppb), "");
     defer freeHttp(ok);
     try testing.expectEqual(@as(u16, 200), ok.status);
 }
@@ -1694,7 +1857,7 @@ test "server: a connection that never sends a request is cut, and cannot fill th
     try testing.io.sleep(.fromMilliseconds(600), .awake);
     // After the deadline the idle ones are gone and a real request is served.
     var ppb: [128]u8 = undefined;
-    const ok = try get(rig, pagePath(&ppb), "");
+    const ok = try get(rig, pagePath(rig, &ppb), "");
     defer freeHttp(ok);
     try testing.expectEqual(@as(u16, 200), ok.status);
 }
@@ -1714,7 +1877,7 @@ test "server: idle connections filling the pending slots do not keep a real requ
     for (0..3) |_| {
         var ppb: [128]u8 = undefined;
         const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
-        const ok = try get(rig, pagePath(&ppb), "");
+        const ok = try get(rig, pagePath(rig, &ppb), "");
         defer freeHttp(ok);
         try testing.expectEqual(@as(u16, 200), ok.status);
         try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 5_000);
@@ -1731,7 +1894,7 @@ test "server: a unix socket path that is a file, or in use, is never replaced" {
     const path = try tmpSocketPath(&pb, testing.io);
     const dir = std.fs.path.dirname(path).?;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
-    try prepareSocketDir(testing.io, path);
+    _ = try Io.Dir.cwd().createDirPathStatus(testing.io, dir, @enumFromInt(0o700));
 
     const a = testing.allocator;
     const f = try fake.Fake.start(a, testing.io);
@@ -1740,22 +1903,192 @@ test "server: a unix socket path that is a file, or in use, is never replaced" {
     defer ctl.close();
     const h = try Hub.open(a, testing.io, ctl, .{});
     defer h.close();
+    var tb: [32]u8 = undefined;
+    const acc: access.Config = .{ .token = randomToken(&tb) };
 
-    // A regular file is not ours to delete.
+    // A regular file is not ours to delete, nor a link (never followed, even to a socket).
     {
         const file = try Io.Dir.cwd().createFile(testing.io, path, .{});
         file.close(testing.io);
-        try testing.expectError(error.NotASocket, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = token_cfg }));
+        try testing.expectError(error.NotASocket, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc }));
         const st = try Io.Dir.cwd().statFile(testing.io, path, .{});
         try testing.expect(st.kind == .file);
         try Io.Dir.cwd().deleteFile(testing.io, path);
+        try Io.Dir.cwd().symLink(testing.io, f.path, path, .{});
+        try testing.expectError(error.NotASocket, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc }));
+        const ls = try Io.Dir.cwd().statFile(testing.io, path, .{ .follow_symlinks = false });
+        try testing.expect(ls.kind == .sym_link);
+        try Io.Dir.cwd().deleteFile(testing.io, path);
     }
-    // A live listener is not ours to replace; once it is gone, its stale file is.
-    const first = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = token_cfg });
-    try testing.expectError(error.AddressInUse, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = token_cfg }));
+    // A live listener is not ours to replace.
+    const first = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc });
+    try testing.expectError(error.AddressInUse, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc }));
     first.stop();
-    const again = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = token_cfg });
+    // A stale socket, left by a bridge that did not exit cleanly, is replaced.
+    {
+        const addr = try Io.net.UnixAddress.init(path);
+        var stale = try addr.listen(testing.io, .{});
+        stale.deinit(testing.io); // closed, its file left behind
+        _ = try Io.Dir.cwd().statFile(testing.io, path, .{});
+    }
+    const again = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc });
     again.stop();
+}
+
+test "server: the unix socket's folders are checked to the root, and only our own socket is removed" {
+    const a = testing.allocator;
+    const f = try fake.Fake.start(a, testing.io);
+    defer f.deinit();
+    const ctl = try rex.control.Control.open(a, testing.io, .{ .socket_path = f.path });
+    defer ctl.close();
+    const h = try Hub.open(a, testing.io, ctl, .{});
+    defer h.close();
+    var tb: [32]u8 = undefined;
+    const acc: access.Config = .{ .token = randomToken(&tb) };
+    var rnd: [4]u8 = undefined;
+    testing.io.random(&rnd);
+    var bb: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&bb, tmp_root ++ "/rweb-test-{x}", .{rnd});
+    try Io.Dir.cwd().createDirPath(testing.io, base);
+    defer Io.Dir.cwd().deleteTree(testing.io, base) catch {};
+    var pb: [128]u8 = undefined;
+    var problem: xfer.Problem = .{};
+
+    // The documented layout: a 0700 folder of ours (made if missing) under a safe chain.
+    {
+        const path = try std.fmt.bufPrint(&pb, "{s}/run/rweb/bridge.sock", .{base});
+        const srv = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc, .problem = &problem });
+        const st = try Io.Dir.cwd().statFile(testing.io, path, .{ .follow_symlinks = false });
+        try testing.expect(st.kind == .unix_domain_socket);
+        srv.stop();
+        // Its own socket is removed at shutdown.
+        try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, path, .{ .follow_symlinks = false }));
+    }
+    // A private folder of ours under a folder others can write to (not sticky): refused, and named.
+    {
+        var ob: [128]u8 = undefined;
+        const open = try std.fmt.bufPrint(&ob, "{s}/open", .{base});
+        try Io.Dir.cwd().createDirPath(testing.io, open);
+        var z: [128:0]u8 = undefined;
+        try testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}", .{open}, 0), 0o777));
+        _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/priv", .{open}), @enumFromInt(0o700));
+        const path = try std.fmt.bufPrint(&pb, "{s}/priv/bridge.sock", .{open});
+        try testing.expectError(error.FolderWritableByOthers, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc, .problem = &problem }));
+        try testing.expectEqualStrings(open, problem.path);
+    }
+    // Through a linked folder (which whoever can write its folder could point elsewhere): refused.
+    {
+        _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/real/sock", .{base}), @enumFromInt(0o700));
+        var lb: [128]u8 = undefined;
+        try Io.Dir.cwd().symLink(testing.io, try std.fmt.bufPrint(&lb, "{s}/real", .{base}), try std.fmt.bufPrint(&pb, "{s}/link", .{base}), .{});
+        const path = try std.fmt.bufPrint(&pb, "{s}/link/sock/bridge.sock", .{base});
+        try testing.expectError(error.SymLink, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc }));
+    }
+    // A relative path, or one with `..`, is refused.
+    try testing.expectError(error.SocketPathNotAbsolute, Server.start(a, testing.io, h, .{ .listen = .{ .unix = "rweb/bridge.sock" }, .access = acc }));
+    try testing.expectError(error.BadPath, Server.start(a, testing.io, h, .{ .listen = .{ .unix = try std.fmt.bufPrint(&pb, "{s}/real/../real/sock/bridge.sock", .{base}) }, .access = acc }));
+    // Shutdown leaves alone whatever was put in the socket's place.
+    {
+        const path = try std.fmt.bufPrint(&pb, "{s}/real/sock/bridge.sock", .{base});
+        const srv = try Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc });
+        var mb: [128]u8 = undefined;
+        try Io.Dir.cwd().rename(path, Io.Dir.cwd(), try std.fmt.bufPrint(&mb, "{s}/real/sock/moved.sock", .{base}), testing.io);
+        const other = try Io.Dir.cwd().createFile(testing.io, path, .{});
+        other.close(testing.io);
+        srv.stop();
+        const st = try Io.Dir.cwd().statFile(testing.io, path, .{ .follow_symlinks = false });
+        try testing.expect(st.kind == .file);
+    }
+}
+
+test "server: at most max_viewers WebSockets, and plain requests still get in" {
+    const rig = try Rig.initExtra(.{}, token_cfg, .{ .tcp_loopback = 0 }, .{ .max_viewers = 2 });
+    defer rig.deinit();
+    try testing.expect((Options{ .listen = .{ .tcp_loopback = 0 }, .access = .{} }).max_viewers < (Options{ .listen = .{ .tcp_loopback = 0 }, .access = .{} }).max_connections);
+    const one = try browser(rig);
+    defer one.deinit(testing.allocator);
+    try waitText(one, "\"t\":\"tree\"");
+    const two = try browser(rig);
+    defer two.deinit(testing.allocator);
+    try waitText(two, "\"t\":\"tree\"");
+    // The third upgrade: 503, before any WebSocket is made.
+    const path = try rig.withToken("/ws");
+    defer testing.allocator.free(path);
+    const req = try std.fmt.allocPrint(testing.allocator, "GET {s} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", .{path});
+    defer testing.allocator.free(req);
+    const third = try httpRequest(try rig.tcp(), req);
+    defer freeHttp(third);
+    try testing.expectEqual(@as(u16, 503), third.status);
+    // The page's files are still served.
+    var ppb: [128]u8 = undefined;
+    const page = try get(rig, pagePath(rig, &ppb), "");
+    defer freeHttp(page);
+    try testing.expectEqual(@as(u16, 200), page.status);
+    // A viewer that leaves frees its place.
+    try one.writeFrame(.close, &.{ 0x03, 0xe8 });
+    const t0 = nowMs(testing.io);
+    while (rig.srv.viewers.load(.acquire) >= 2) {
+        if (nowMs(testing.io) - t0 > 3_000) return error.PlaceNotFreed;
+        try testing.io.sleep(.fromMilliseconds(20), .awake);
+    }
+    const again = try browser(rig);
+    defer again.deinit(testing.allocator);
+    try waitText(again, "\"t\":\"tree\"");
+}
+
+test "server: a viewer is silent only when its reader is not busy in a handler" {
+    try testing.expect(isSilent(10_000, 1_000, 0, 5_000));
+    try testing.expect(!isSilent(10_000, 6_000, 0, 5_000));
+    // Busy waiting on Rex since long ago: not dropped, however old the last message is.
+    try testing.expect(!isSilent(100_000, 1_000, 2_000, 5_000));
+}
+
+test "server: a browser whose handler waits on Rex is not dropped as silent" {
+    const o = try openRigExtra(.{}, .{ .silent_limit_ms = 600 });
+    defer o.rig.deinit();
+    defer o.c.deinit(testing.allocator);
+    // Rex is slow: the call this message needs waits far past the silence limit.
+    o.rig.hub.api_mu.lockUncancelable(testing.io);
+    var locked = true;
+    defer if (locked) o.rig.hub.api_mu.unlock(testing.io);
+    try sendJson(o.c, "{{\"t\":\"clip\"}}", .{});
+    try testing.io.sleep(.fromMilliseconds(2_000), .awake);
+    try testing.expectEqual(@as(u32, 1), o.rig.srv.active.load(.acquire));
+    o.rig.hub.api_mu.unlock(testing.io);
+    locked = false;
+    // The reply arrives, and the connection goes on.
+    try waitText(o.c, "\"t\":\"clip\"");
+    try sendJson(o.c, "{{\"t\":\"ping\"}}", .{});
+    try waitText(o.c, "pong");
+}
+
+test "server: a message over the limit is answered with an error, then the socket is closed" {
+    const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    const c = try browser(rig);
+    defer c.deinit(testing.allocator);
+    try waitText(c, "\"t\":\"tree\"");
+    const big = try testing.allocator.alloc(u8, protocol.max_message_bytes + 1);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+    try c.writeFrame(.text, big);
+    const msg = try textWith(c, "too large");
+    defer testing.allocator.free(msg);
+    try testing.expectEqualStrings(too_large_text, msg);
+    // Then the conversation ends.
+    var ended = false;
+    for (0..1000) |_| {
+        const m = c.readMessage(testing.allocator) catch {
+            ended = true;
+            break;
+        };
+        defer testing.allocator.free(m.data);
+        if (m.opcode == .close) {
+            ended = true;
+            break;
+        }
+    }
+    try testing.expect(ended);
 }
 
 test "server: a browser cannot make Rex do heavy work more than a few times a second" {
@@ -1809,7 +2142,7 @@ fn uploadDir(buf: []u8) !UploadDir {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var problem: xfer.Problem = .{};
-    return .{ .path = path, .dir = try xfer.openUploadDir(arena.allocator(), testing.io, path, &problem) };
+    return .{ .path = path, .dir = (try xfer.openUploadDir(arena.allocator(), testing.io, path, &problem)).dir };
 }
 
 const Opened = struct { rig: Rig, c: *rex.ws.Conn };
@@ -1830,7 +2163,7 @@ fn openRigExtra(cfg: hub_mod.Config, extra: Rig.Extra) !Opened {
 }
 
 fn put(rig: Rig, token_path: []const u8, headers: []const u8, body: []const u8) !Http {
-    const req = try std.fmt.allocPrint(testing.allocator, "PUT {s}?token={s} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\n{s}Connection: close\r\n\r\n", .{ token_path, token, body.len, headers });
+    const req = try std.fmt.allocPrint(testing.allocator, "PUT {s}?token={s} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\n{s}Connection: close\r\n\r\n", .{ token_path, rig.token(), body.len, headers });
     defer testing.allocator.free(req);
     const all = try testing.allocator.alloc(u8, req.len + body.len);
     defer testing.allocator.free(all);
@@ -1849,7 +2182,7 @@ test "server: file transfer is off by default, and says so" {
     try sendJson(o.c, "{{\"t\":\"ul\",\"name\":\"a\",\"size\":1}}", .{});
     testing.allocator.free(try textWith(o.c, "file transfer is off"));
     // And its address answers nothing.
-    const h = try get(o.rig, "/xfer/00000000000000000000000000000000?token=" ++ token, "");
+    const h = try getT(o.rig, "/xfer/00000000000000000000000000000000", "");
     defer freeHttp(h);
     try testing.expectEqual(@as(u16, 404), h.status);
 }
@@ -1871,12 +2204,11 @@ test "server: a download goes through a one-time token and nothing else" {
     const o = try openRig(.{ .transfer = .{ .enabled = true, .max_bytes = 1 << 20 } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
+    try o.rig.f.setFilesRoot(dir); // the fake serves only this folder
 
     // Without a token, nothing: not even a guess at the shape.
     for ([_][]const u8{ "/xfer/", "/xfer/short", "/xfer/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "/xfer/00000000000000000000000000000000" }) |p| {
-        const pp = try std.fmt.allocPrint(testing.allocator, "{s}?token={s}", .{ p, token });
-        defer testing.allocator.free(pp);
-        const h = try get(o.rig, pp, "");
+        const h = try getT(o.rig, p, "");
         defer freeHttp(h);
         try testing.expectEqual(@as(u16, 404), h.status);
     }
@@ -1887,7 +2219,7 @@ test "server: a download goes through a one-time token and nothing else" {
     try testing.expect(std.mem.indexOf(u8, msg, "\"kind\":\"download\"") != null);
     try testing.expect(std.mem.indexOf(u8, msg, "\"name\":\"my notes.txt\"") != null);
     const tok = try tokenIn(msg);
-    const url = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}?token={s}", .{ tok, token });
+    const url = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}?token={s}", .{ tok, o.rig.token() });
     defer testing.allocator.free(url);
 
     const h = try get(o.rig, url, "");
@@ -1938,6 +2270,7 @@ test "server: a download of a missing file, or one over the size limit, is refus
     const o = try openRig(.{ .transfer = .{ .enabled = true, .max_bytes = 1 << 20 } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
+    try o.rig.f.setFilesRoot(dir); // the fake serves only this folder
     try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}/nope\"}}", .{dir});
     testing.allocator.free(try textWith(o.c, "\"for\":\"dl\""));
     try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\"}}", .{big});
@@ -1968,6 +2301,7 @@ test "server: a directory listing for the picker" {
     const o = try openRig(.{ .transfer = .{ .enabled = true } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
+    try o.rig.f.setFilesRoot(dir); // the fake serves only this folder
     try sendJson(o.c, "{{\"t\":\"ls\",\"path\":\"{s}\"}}", .{dir});
     const m = try textWith(o.c, "\"t\":\"ls\"");
     defer testing.allocator.free(m);
@@ -1982,7 +2316,10 @@ test "server: an upload lands only in the upload folder, under a safe new name, 
     const dir = up.path;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
     defer up.dir.close(testing.io);
-    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
+    // What is pasted and returned is the folder's real path (on macOS `/tmp` is a link).
+    const real = try Io.Dir.cwd().realPathFileAlloc(testing.io, dir, testing.allocator);
+    defer testing.allocator.free(real);
+    const o = try openRig(.{ .transfer = .{ .enabled = true, .upload_dir = dir, .upload_dir_real = real, .upload_dir_handle = up.dir, .max_bytes = 1 << 20 } });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
     const content = "hello from a phone\nsecond line\n";
@@ -2005,12 +2342,14 @@ test "server: an upload lands only in the upload folder, under a safe new name, 
     try testing.expectEqualStrings(content, got);
     const st = try Io.Dir.cwd().statFile(testing.io, saved, .{});
     try testing.expectEqual(@as(u32, 0o600), @intFromEnum(st.permissions) & 0o777);
-    try testing.expect(std.mem.indexOf(u8, r.body, "evil_rm -rf _.txt") != null);
+    const saved_real = try std.fmt.allocPrint(testing.allocator, "{s}/evil_rm -rf _.txt", .{real});
+    defer testing.allocator.free(saved_real);
+    try testing.expect(std.mem.indexOf(u8, r.body, saved_real) != null);
     // Nothing escaped into the folders above it.
     try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, "/tmp/etc/evil;rm -rf ~.txt", .{}));
 
-    // The terminal was given the quoted path, to type or not.
-    const quoted = try std.fmt.allocPrint(testing.allocator, "'{s}' ", .{saved}); // with the space that separates it from the next
+    // The terminal was given the quoted real path, to type or not.
+    const quoted = try std.fmt.allocPrint(testing.allocator, "'{s}' ", .{saved_real}); // with the space that separates it from the next
     defer testing.allocator.free(quoted);
     try waitBinary(o.c, quoted);
 
@@ -2072,7 +2411,10 @@ test "server: an upload is refused without the page's Origin, with the wrong siz
     try testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(testing.io, ghost, .{}));
 
     // A download token cannot be used to upload.
-    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"/etc/hosts\"}}", .{});
+    const served = try std.fmt.allocPrint(testing.allocator, "{s}/served.txt", .{o.rig.f.files_root.?});
+    defer testing.allocator.free(served);
+    (try Io.Dir.cwd().createFile(testing.io, served, .{})).close(testing.io);
+    try sendJson(o.c, "{{\"t\":\"dl\",\"path\":\"{s}\"}}", .{served});
     const d = try textWith(o.c, "\"kind\":\"download\"");
     defer testing.allocator.free(d);
     const durl = try std.fmt.allocPrint(testing.allocator, "/xfer/{s}", .{try tokenIn(d)});
@@ -2087,6 +2429,7 @@ test "server: an upload is refused without the page's Origin, with the wrong siz
 test "server: a target with a control byte or a space is refused before routing" {
     const rig = try Rig.init(.{}, token_cfg, .{ .tcp_loopback = 0 });
     defer rig.deinit();
+    const token = rig.token();
     var pb: [35]u8 = undefined;
     const pfx = tokenPrefix(&pb, token);
     for ([_][]const u8{ "\x01", "\x7f", "\t", "\r", "\x00" }) |bad| {
@@ -2207,7 +2550,7 @@ test "server: an upload that stops sending is cut, and its partial file removed"
     const msg = try textWith(o.c, "\"kind\":\"upload\"");
     defer a.free(msg);
     // Ten of the hundred bytes announced, then nothing.
-    const req = try std.fmt.allocPrint(a, "PUT /xfer/{s}?token={s} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: 100\r\n\r\n0123456789", .{ try tokenIn(msg), token });
+    const req = try std.fmt.allocPrint(a, "PUT /xfer/{s}?token={s} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: 100\r\n\r\n0123456789", .{ try tokenIn(msg), o.rig.token() });
     defer a.free(req);
     const stream = try o.rig.tcp();
     defer stream.close(testing.io);

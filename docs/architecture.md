@@ -64,12 +64,17 @@ flowchart TB
 - The page (HTML, JavaScript, the browser terminals wterm and xterm.js) is **embedded in the binary**;
   nothing is loaded from elsewhere, and the vendored files are pinned by checksum.
 - The library treats what Rex sends, and what programs print, as untrusted. It sets its own ceilings
-  (at most 16 MiB per message whatever Rex advertises; a reconnect token of at most 256 printable
-  bytes; JSON nested at most 64 deep), gives every handshake 10 seconds, and keeps Rex's events in a
+  (at most 16 MiB per control message whatever Rex advertises, 64 KiB until the handshake is done, 1 MiB
+  per data or download message; a reconnect token of at most 256 printable bytes; JSON nested at most
+  64 deep; at most 64 pings a second), gives every handshake 10 seconds, writes each frame whole even
+  when its task is cancelled, gives directory listings, downloads and terminal info 5 seconds instead of
+  30, and checks after every connect that Rex's socket is served by this same user. It keeps Rex's events in a
   fixed ring (1,024 events, 4 MiB): on overflow the queued events collapse into one "dropped" notice,
   which makes the hub re-read the tree, and connection notices are never lost. Rex's own messages inside
   a terminal's output (`rex1`) are split off by a small state machine that keeps every other byte in
-  order; a resize must be 1 to 4,096 cells on each side and at most 1,048,576 cells, or it is ignored.
+  order and hands contiguous output on in one piece; a resize must be 1 to 4,096 cells on each side and
+  at most 1,048,576 cells, or it is ignored. A stream that breaks the protocol ends (and is reopened)
+  instead of resuming the same bad message forever.
   A mirror that fails (a bad snapshot, out of memory) reports it as the stream's end, and the hub opens
   a new stream, as it does when Rex asks for one.
 
@@ -117,17 +122,26 @@ The responses that set the token cookie are never cached (`no-store`); the page'
 vendored scripts are revalidated on every load (`no-cache` with an ETag), so an upgrade reaches the
 browser at once. `/api/tree` and the lab pages exist only with `--enable-lab`.
 
-Secret files (the backend secret, the token file) and the upload folder are trusted only through an
-open descriptor: every folder from `/` down is opened without following links and must be root's or
-yours and not writable by others (unless sticky, as `/tmp` is); the file itself must be a regular file of
-yours closed to others, and is read from the descriptor that was checked. The upload folder stays open for
-the life of the process and files are created relative to it, so replacing its path later changes
-nothing. The unix socket's folder must be yours and `0700`.
+Secret files (the backend secret, the token file), the upload folder, the unix socket's folder and the
+`tailscale` program are trusted only through an open descriptor: every folder from `/` down is opened
+without following links and must be root's or yours and not writable by others (unless sticky, as `/tmp`
+is; a folder its group can write to only when that group holds nobody else, or is macOS's root-equivalent
+`admin`). A secret must be a regular file of yours closed to others, read from the descriptor that was
+checked. The upload folder is created only once the folders above it pass, stays open for the life of the
+process, and files are created relative to it; the path pasted is its real path. The unix socket's folder
+stays open too: stale sockets are inspected and removed relative to it, and at shutdown the socket is
+removed only if the entry is still the one rweb bound. `tailscale` comes from `--tailscale` or a fixed
+list of install locations, never from `PATH`.
 
-A browser connection that goes quiet for 20 seconds, or whose socket does not take a frame within 30
-seconds, is dropped, so a phone that stopped reading cannot hold a slot, a viewer or a stream. A page
-may send at most 200 messages in any one second, and at most 8 heavy requests (reads, transfers,
-redraws, opening or sizing a terminal, terminal actions, management) a second.
+A browser connection that goes quiet for 20 seconds (unless rweb is still working on its last request),
+or whose socket does not take a frame within 30 seconds, is dropped, so a phone that stopped reading
+cannot hold a slot, a viewer or a stream. At most 32 browsers are connected at once, so ordinary
+requests always find one of the 64 connection slots. A page may send at most 200 messages in any one
+second; of those, at most 16 reads (terminal info, the clipboard, the tree) and 8 pieces of work
+(opening or sizing a terminal, redraws, Copy, transfers, terminal actions, management). Opening,
+redraws and Copy also share a budget of 32 a second across all browsers, because they run under a
+terminal's lock. A refused request names itself; a refused open also leaves the terminal that was
+open, and the page types only into the terminal it shows.
 
 ## Opening a terminal
 
@@ -159,10 +173,14 @@ sequenceDiagram
   modes, cursor); while a full-screen program is up, the main screen is drawn first.
 - Each viewer has a bounded send queue. A viewer that falls behind loses its queued output and gets a
   fresh redraw, so a slow phone never holds up the others or the read from Rex. The bound covers every
-  frame: live output (1 MiB, then a redraw), at most one redraw (its scrollback capped at 10,000 rows,
-  chosen before anything is formatted), replies (256 frames, 8 MiB, then dropped), and state frames
-  (mode, Rex up or down, theme, tree), which replace their own queued copy. `closed` and `exited` always
-  get through. The Copy view's text is built from at most the last 20,000 rows and 1 MiB.
+  frame: live output (1 MiB, then a redraw, at most one a second; output joins the last unsent frame
+  up to 64 KiB, and each frame counts 64 bytes extra, so tiny pieces cannot pile up), at most one
+  redraw (its scrollback capped at 10,000 rows and 1,000,000 cells, chosen before anything is
+  formatted; "all scrollback" applies to one redraw), replies (256 frames, 8 MiB, then dropped; one Copy
+  at a time, refused before any work while one is queued), and state frames (mode, Rex up or down,
+  theme, tree), of which at most one each is queued and the newest wins; a tree is sent only when it is
+  newer than the one the browser has. `closed` and `exited` always get through. The Copy view's text is
+  built from at most the last 20,000 rows, 2,000,000 cells and 1 MiB.
 - A terminal lives while anything refers to it: each viewer looking at it, and each task using it for a
   moment (a typed key, a redraw, the Copy view, a stream restart). Closing it (its block went away) takes
   it out of the list and detaches its viewers at once; the last reference destroys it. The hub's main

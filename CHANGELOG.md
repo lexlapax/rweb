@@ -77,6 +77,41 @@ From the second review (details: `docs/security-review-2026-11-25-round2.md`):
 - `tools/release.sh` will not overwrite a version it already built; `tools/dist.sh` removes its stage
   after packing.
 
+From the third review (details: `docs/security-review-2026-11-25-round3.md`):
+
+- Fixed: an open refused by the rate limit left the bridge on the old terminal while the page showed the
+  new one, so typing could go to a terminal not on screen. A refused open now also leaves the old
+  terminal, refusals name the request, and the page types only into the terminal it has confirmed.
+  Reads (info, clipboard, tree, 16 a second) and work (8 a second) have separate allowances, and
+  opening, redraws and Copy share a budget across all browsers.
+- Fixed a race in which a terminal closing while a browser opened it could leave that browser on the
+  closed terminal's output list.
+- Queues: output in tiny pieces joins one frame (each frame also counts 64 bytes); at most one theme is
+  queued; a browser that falls behind is redrawn at most once a second; "all scrollback" applies once;
+  redraws and Copy are capped in cells as well as rows; one Copy at a time; the tree is sent only when
+  newer; at most 32 browsers at once; pings count against a per-second limit.
+- A connection waiting on a slow Rex call is not dropped as silent; directory listings, downloads and
+  terminal info time out after 5 seconds.
+- Pastes: a multi-line paste into a program without bracketed paste asks first; the bridge also removes
+  ESC and C1; text a phone keyboard inserts in one go is treated as a paste; a paste over 32 KB is refused
+  with a message; program-set clipboard text is shown without control characters.
+- The unix socket: an absolute path with no links, every folder above it checked, the folder kept open,
+  and the socket removed at shutdown only if it is still rweb's. Rex's socket must be served by your own
+  user, and on macOS the app's socket is tried first. `tailscale` is run from `--tailscale PATH` or fixed
+  locations, never from `PATH`, and must pass the same folder checks. The upload folder is created only
+  after its parent folders pass, and the real path is pasted.
+- Folder checks accept a group-writable folder whose group holds only you, and macOS's `admin` group.
+- The Rex client: a frame is written whole even if its task is cancelled; closing during a reconnect
+  returns at once; a stream that breaks the protocol ends instead of resuming forever; message limits
+  from the first read (64 KiB in handshakes, 1 MiB per data message); a fired handshake deadline fails
+  the handshake; a terminal's stream is closed cleanly; a long input write is never cut inside an escape
+  sequence; cancellation passes through every call.
+- `rweb --version` shows the commit being built (it is read at build time, not cached from an earlier
+  configure); `-Dcommit` still overrides it.
+- Tests: every test bridge uses a random token, and the stand-in Rex serves files only from its own
+  folder.
+- Docs name reviewers generically.
+
 ## 0.1.0 (2026-11-25, built and installed; not published)
 
 The first numbered version: the bridge and page as used daily on Linux and macOS, plus the fixes from

@@ -5,6 +5,7 @@
 //! without a socket.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -122,30 +123,124 @@ pub const Client = Conn;
 /// How long a handshake (the HTTP upgrade and the protocol's first messages) may take.
 pub const handshake_timeout_ms: u32 = 10_000;
 
+/// Largest message read during a handshake (the control WELCOME, a data WELCOME or REJECT):
+/// every connection has a limit from its first read, raised once the handshake is done.
+pub const handshake_max_message: u64 = 64 * 1024;
+
 /// A deadline for a handshake: shuts `stream` (so a blocked read returns) unless stopped first.
-/// Stop it before the stream is closed, on every path.
+/// Stop it before the stream is closed, on every path, and call `finish` before publishing what
+/// the handshake made: a watchdog that fired has shut the socket, so the handshake has failed
+/// even when its last read got in first.
 pub const Watchdog = struct {
-    future: Io.Future(void),
+    /// The result is whether it fired (shut the stream).
+    future: Io.Future(bool),
 
     pub fn start(io: Io, stream: Io.net.Stream, timeout_ms: u32) Io.ConcurrentError!Watchdog {
         return .{ .future = try io.concurrent(run, .{ io, stream, timeout_ms }) };
     }
 
-    fn run(io: Io, stream: Io.net.Stream, timeout_ms: u32) void {
-        io.sleep(.fromMilliseconds(timeout_ms), .awake) catch return; // stopped in time
+    fn run(io: Io, stream: Io.net.Stream, timeout_ms: u32) bool {
+        io.sleep(.fromMilliseconds(timeout_ms), .awake) catch return false; // stopped in time
         stream.shutdown(io, .both) catch {};
+        return true;
+    }
+
+    /// Stop it (again is fine) and say whether it fired first.
+    pub fn stopFired(w: *Watchdog, io: Io) bool {
+        return w.future.cancel(io);
     }
 
     pub fn stop(w: *Watchdog, io: Io) void {
-        w.future.cancel(io);
+        _ = w.stopFired(io);
+    }
+
+    /// Stop it; `error.HandshakeTimeout` if it had already fired.
+    pub fn finish(w: *Watchdog, io: Io) error{HandshakeTimeout}!void {
+        if (w.stopFired(io)) return error.HandshakeTimeout;
+    }
+};
+
+pub const PeerError = error{
+    /// The process on the other end of Rex's socket is not running as this user (or the OS
+    /// would not say who it is): something else took the socket's path.
+    WrongPeer,
+};
+
+/// Connect to the unix socket at `socket_path` and check that the server runs as this user.
+pub fn connectUnix(io: Io, socket_path: []const u8) !Io.net.Stream {
+    const addr = try Io.net.UnixAddress.init(socket_path);
+    const stream = try addr.connect(io);
+    errdefer stream.close(io);
+    try checkPeer(stream);
+    return stream;
+}
+
+/// `error.WrongPeer` unless the other end of the unix socket `stream` runs as this user.
+pub fn checkPeer(stream: Io.net.Stream) PeerError!void {
+    const uid = peerUid(stream) orelse return error.WrongPeer;
+    if (!peerAllowed(uid, myUid())) return error.WrongPeer;
+}
+
+/// This process's effective uid: what the kernel reports to a peer as us.
+pub fn myUid() u32 {
+    return if (builtin.os.tag == .linux) std.os.linux.geteuid() else @intCast(std.c.geteuid());
+}
+
+/// Who may serve Rex's socket: only this user (not even root, which has no reason to).
+pub fn peerAllowed(peer_uid: u32, my_uid: u32) bool {
+    return peer_uid == my_uid;
+}
+
+/// The uid of the process on the other end of a unix socket, if the OS will say.
+pub fn peerUid(stream: Io.net.Stream) ?u32 {
+    const fd = stream.socket.handle;
+    switch (builtin.os.tag) {
+        .macos, .freebsd, .netbsd, .openbsd => {
+            var uid: std.c.uid_t = undefined;
+            var gid: std.c.gid_t = undefined;
+            if (getpeereid(fd, &uid, &gid) != 0) return null;
+            return @intCast(uid);
+        },
+        .linux => {
+            var cred: extern struct { pid: i32, uid: u32, gid: u32 } = undefined;
+            // The system call itself, so this needs no libc (the fuzz build links none).
+            const linux = std.os.linux;
+            var len: linux.socklen_t = @sizeOf(@TypeOf(cred));
+            const rc = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &len);
+            if (linux.errno(rc) != .SUCCESS) return null;
+            if (len != @sizeOf(@TypeOf(cred))) return null;
+            return cred.uid;
+        },
+        else => return null,
+    }
+}
+
+extern "c" fn getpeereid(fd: c_int, uid: *std.c.uid_t, gid: *std.c.gid_t) c_int;
+
+/// Most pings and pongs a peer may send in any one second: each ping makes us write a pong, so a
+/// flood is work we do for the peer. A connection that stays idle with a ping every few seconds is
+/// far below it.
+pub const max_control_per_second = 64;
+/// Most frames in one fragmented message.
+pub const max_frames_per_message: u32 = 4096;
+
+/// A sliding one-second window over the times of the last `max_control_per_second` control frames.
+pub const ControlRate = struct {
+    times: [max_control_per_second]i64 = undefined,
+    next: usize = 0,
+    seen: usize = 0,
+
+    /// Count a control frame at `now_ms`; false if it is one too many for the last second.
+    pub fn allow(r: *ControlRate, now_ms: i64) bool {
+        if (r.seen >= max_control_per_second and now_ms - r.times[r.next] < 1000) return false;
+        r.times[r.next] = now_ms;
+        r.next = (r.next + 1) % max_control_per_second;
+        if (r.seen < max_control_per_second) r.seen += 1;
+        return true;
     }
 };
 
 /// One end of a WebSocket. A client masks what it sends; a server does not.
-/// Most pings and pongs between two data messages, and most frames in one fragmented message.
-pub const max_control_run: u32 = 256;
-pub const max_frames_per_message: u32 = 4096;
-
 pub const Conn = struct {
     io: Io,
     stream: Io.net.Stream,
@@ -163,9 +258,12 @@ pub const Conn = struct {
     subprotocol: []const u8 = "",
     /// Largest message accepted, after reassembly.
     max_message: u64 = 64 * 1024 * 1024,
-    /// Ping and pong frames seen since the last data message. A peer that sends nothing else is
-    /// making us write a pong for each: past `max_control_run` the connection is a protocol error.
-    control_run: u32 = 0,
+    /// Ping and pong frames in the last second: past `max_control_per_second` the connection is a
+    /// protocol error.
+    control_rate: ControlRate = .{},
+    /// Ping and pong frames read so far, for a caller that counts them against its own limits
+    /// (`readMessage` answers and drops them).
+    control_frames: u64 = 0,
     read_buf: [64 * 1024]u8 = undefined,
     write_buf: [64 * 1024]u8 = undefined,
 
@@ -223,7 +321,7 @@ pub const Conn = struct {
         return c;
     }
 
-    /// Connect to `socket_path`, then upgrade `path` to a WebSocket with `subprotocol`.
+    /// Connect to `socket_path` (checking that its server runs as this user), then upgrade `path` to a WebSocket with `subprotocol`.
     pub fn connect(
         gpa: Allocator,
         io: Io,
@@ -231,8 +329,7 @@ pub const Conn = struct {
         path: []const u8,
         subprotocol: []const u8,
     ) !*Conn {
-        const addr = try Io.net.UnixAddress.init(socket_path);
-        const stream = try addr.connect(io);
+        const stream = try connectUnix(io, socket_path);
         return connectStream(gpa, io, stream, path, subprotocol, "");
     }
 
@@ -327,8 +424,14 @@ pub const Conn = struct {
         gpa.destroy(c);
     }
 
-    /// Send one masked frame. Safe to call from several tasks.
+    /// Send one frame (masked by a client). Safe to call from several tasks. A frame is written
+    /// whole or not at all as far as cancellation goes: the task cannot be cancelled inside it
+    /// (a half-written frame would corrupt every frame after it). An error from the stream can
+    /// still leave part of a frame written: the connection is then unusable, and the caller
+    /// must drop it.
     pub fn writeFrame(c: *Conn, op: Opcode, data: []const u8) !void {
+        const old_protection = c.io.swapCancelProtection(.blocked);
+        defer _ = c.io.swapCancelProtection(old_protection);
         c.write_mutex.lockUncancelable(c.io);
         defer c.write_mutex.unlock(c.io);
 
@@ -353,6 +456,11 @@ pub const Conn = struct {
             off += len;
         }
         try w.flush();
+    }
+
+    fn countControl(c: *Conn) error{Protocol}!void {
+        c.control_frames +|= 1;
+        if (!c.control_rate.allow(Io.Clock.awake.now(c.io).toMilliseconds())) return error.Protocol;
     }
 
     /// Read one complete message, answering pings. Close frames are returned.
@@ -398,8 +506,7 @@ pub const Conn = struct {
 
             switch (op) {
                 .ping => {
-                    c.control_run += 1;
-                    if (c.control_run > max_control_run) return error.Protocol;
+                    try c.countControl();
                     const payload = try gpa.dupe(u8, buf.items[start..]);
                     defer gpa.free(payload);
                     buf.shrinkRetainingCapacity(start);
@@ -407,8 +514,7 @@ pub const Conn = struct {
                     continue;
                 },
                 .pong => {
-                    c.control_run += 1;
-                    if (c.control_run > max_control_run) return error.Protocol;
+                    try c.countControl();
                     buf.shrinkRetainingCapacity(start);
                     continue;
                 },
@@ -421,7 +527,6 @@ pub const Conn = struct {
                 else => msg_op = op,
             }
             if (h.fin) {
-                c.control_run = 0;
                 return .{ .opcode = msg_op.?, .data = try buf.toOwnedSlice(gpa) };
             }
         }
@@ -517,12 +622,12 @@ test "a server refuses an unmasked frame, a client refuses a masked one" {
     try std.testing.expectEqualStrings("hi", m2.data);
 }
 
-test "a peer that sends only pings, or endless empty fragments, is cut off" {
+test "a peer that floods pings, or sends endless empty fragments, is cut off" {
     const gpa = std.testing.allocator;
     var sink: std.Io.Writer.Allocating = .init(gpa);
     defer sink.deinit();
     var r: std.Io.Reader = undefined;
-    // 300 masked pings in a row: the 257th is a protocol error.
+    // 300 masked pings at once: one past `max_control_per_second` is a protocol error.
     var pings: std.ArrayList(u8) = .empty;
     defer pings.deinit(gpa);
     for (0..300) |_| {
@@ -532,7 +637,7 @@ test "a peer that sends only pings, or endless empty fragments, is cut off" {
     }
     var c = memConn(pings.items, &sink.writer, &r, false);
     try std.testing.expectError(error.Protocol, c.readMessage(gpa));
-    try std.testing.expect(c.control_run > max_control_run);
+    try std.testing.expectEqual(@as(u64, max_control_per_second + 1), c.control_frames);
 
     // A text frame then 5000 empty continuation frames, never finished.
     var frags: std.ArrayList(u8) = .empty;
@@ -548,11 +653,11 @@ test "a peer that sends only pings, or endless empty fragments, is cut off" {
     var c2 = memConn(frags.items, &sink.writer, &r, false);
     try std.testing.expectError(error.Protocol, c2.readMessage(gpa));
 
-    // Pings between real messages are fine, and the count starts again after each message.
+    // Up to the limit, pings between real messages are fine, and data does not reset the count.
     var ok: std.ArrayList(u8) = .empty;
     defer ok.deinit(gpa);
-    for (0..3) |_| {
-        for (0..200) |_| {
+    for (0..4) |_| {
+        for (0..max_control_per_second / 4) |_| {
             const f = try maskedFrame(gpa, 0x9, true, "");
             defer gpa.free(f);
             try ok.appendSlice(gpa, f);
@@ -561,11 +666,155 @@ test "a peer that sends only pings, or endless empty fragments, is cut off" {
         defer gpa.free(t);
         try ok.appendSlice(gpa, t);
     }
+    const one_more = try maskedFrame(gpa, 0xA, true, "");
+    defer gpa.free(one_more);
+    try ok.appendSlice(gpa, one_more);
     var c3 = memConn(ok.items, &sink.writer, &r, false);
-    for (0..3) |_| {
+    for (0..4) |_| {
         const m = try c3.readMessage(gpa);
         gpa.free(m.data);
     }
+    try std.testing.expectError(error.Protocol, c3.readMessage(gpa)); // the 65th within a second
+}
+
+test "control frames are limited per second, not per run: an idle connection pinged forever is fine" {
+    var rate: ControlRate = .{};
+    // A ping every 20 ms (50 a second) for an hour of pings and no data.
+    var t: i64 = 0;
+    for (0..200_000) |_| {
+        try std.testing.expect(rate.allow(t));
+        t += 20;
+    }
+    // A burst: 64 in one millisecond pass, the 65th within the second does not, and a second later
+    // the window has room again.
+    var burst: ControlRate = .{};
+    for (0..max_control_per_second) |_| try std.testing.expect(burst.allow(5000));
+    try std.testing.expect(!burst.allow(5999));
+    try std.testing.expect(burst.allow(6000));
+    // In any one second, never more than the limit, whatever the spacing.
+    var any: ControlRate = .{};
+    var allowed: std.ArrayList(i64) = .empty;
+    defer allowed.deinit(std.testing.allocator);
+    var prng = std.Random.DefaultPrng.init(7);
+    var now: i64 = 0;
+    for (0..20_000) |_| {
+        now += prng.random().uintLessThan(u32, 40);
+        if (any.allow(now)) try allowed.append(std.testing.allocator, now);
+    }
+    var lo: usize = 0;
+    for (allowed.items, 0..) |x, hi| {
+        while (x - allowed.items[lo] >= 1000) lo += 1;
+        try std.testing.expect(hi - lo + 1 <= max_control_per_second);
+    }
+}
+
+test "peer check: only this user may serve Rex's socket" {
+    try std.testing.expect(peerAllowed(501, 501));
+    try std.testing.expect(!peerAllowed(0, 501)); // not even root
+    try std.testing.expect(!peerAllowed(502, 501));
+    try std.testing.expect(!peerAllowed(501, 0));
+}
+
+/// A listening unix socket of our own under /tmp, for tests that need a real stream pair.
+const TestListener = struct {
+    path_buf: [64]u8 = undefined,
+    path: []const u8 = "",
+    server: Io.net.Server = undefined,
+
+    fn init(l: *TestListener, io: Io) !void {
+        var rnd: [6]u8 = undefined;
+        io.random(&rnd);
+        l.path = try std.fmt.bufPrint(&l.path_buf, "/tmp/rweb-ws-test-{x}.sock", .{rnd});
+        const addr = try Io.net.UnixAddress.init(l.path);
+        l.server = try addr.listen(io, .{});
+    }
+
+    fn deinit(l: *TestListener, io: Io) void {
+        l.server.deinit(io);
+        Io.Dir.deleteFileAbsolute(io, l.path) catch {};
+    }
+};
+
+test "peer check: a socket served by this user passes" {
+    const io = std.testing.io;
+    var l: TestListener = .{};
+    try l.init(io);
+    defer l.deinit(io);
+    const client = try connectUnix(io, l.path);
+    defer client.close(io);
+    const server_side = try l.server.accept(io);
+    defer server_side.close(io);
+    try std.testing.expectEqual(@as(?u32, myUid()), peerUid(client));
+    try checkPeer(server_side);
+}
+
+test "watchdog: one that fired fails the handshake, one stopped in time does not" {
+    const io = std.testing.io;
+    var l: TestListener = .{};
+    try l.init(io);
+    defer l.deinit(io);
+    const client = try connectUnix(io, l.path);
+    defer client.close(io);
+    const server_side = try l.server.accept(io);
+    defer server_side.close(io);
+
+    var early = try Watchdog.start(io, client, 10_000);
+    try early.finish(io);
+    early.stop(io); // stopping again, as a `defer` does, is fine
+
+    var late = try Watchdog.start(io, client, 10);
+    defer late.stop(io);
+    try io.sleep(.fromMilliseconds(100), .awake); // a WELCOME read now would still succeed
+    try std.testing.expectError(error.HandshakeTimeout, late.finish(io));
+}
+
+test "writeFrame: a task cancelled inside a frame still writes it whole" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var l: TestListener = .{};
+    try l.init(io);
+    defer l.deinit(io);
+    const client_stream = try connectUnix(io, l.path);
+    const server_stream = try l.server.accept(io);
+
+    var client: Conn = .{ .io = io, .stream = client_stream, .reader = undefined, .writer = undefined };
+    client.reader = client_stream.reader(io, &client.read_buf);
+    client.writer = client_stream.writer(io, &client.write_buf);
+    client.r = &client.reader.interface;
+    client.w = &client.writer.interface;
+    defer client_stream.close(io);
+    var server: Conn = .{ .io = io, .stream = server_stream, .reader = undefined, .writer = undefined, .is_client = false, .max_message = 8 << 20 };
+    server.reader = server_stream.reader(io, &server.read_buf);
+    server.writer = server_stream.writer(io, &server.write_buf);
+    server.r = &server.reader.interface;
+    server.w = &server.writer.interface;
+    defer server_stream.close(io);
+
+    // Far more than the socket buffers hold, so the write blocks until the other side reads.
+    const payload = try gpa.alloc(u8, 4 << 20);
+    defer gpa.free(payload);
+    for (payload, 0..) |*b, i| b.* = @truncate(i *% 31);
+
+    const T = struct {
+        fn write(c: *Conn, data: []const u8) anyerror!void {
+            try c.writeFrame(.binary, data);
+        }
+        fn read(c: *Conn, a: Allocator) anyerror!Message {
+            try c.io.sleep(.fromMilliseconds(150), .awake); // the cancel arrives while the write is blocked
+            return c.readMessage(a);
+        }
+    };
+    var writer = try io.concurrent(T.write, .{ &client, payload });
+    try io.sleep(.fromMilliseconds(50), .awake);
+    var reader = try io.concurrent(T.read, .{ &server, gpa });
+    const wrote = writer.cancel(io);
+    // Without the protection the write stops part-way and the reader would wait forever.
+    if (wrote) |_| {} else |_| client_stream.shutdown(io, .both) catch {};
+    try wrote;
+    const m = try reader.await(io);
+    defer gpa.free(m.data);
+    try std.testing.expectEqual(Opcode.binary, m.opcode);
+    try std.testing.expectEqualSlices(u8, payload, m.data);
 }
 
 test "live: control hello against a real Rex (needs REX_SOCKET)" {

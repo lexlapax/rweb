@@ -49,9 +49,17 @@ window.makeWtermTerminal = async function (host, {fontSize}) {
     drag.acc = rest; drag.y = t.clientY;
     if (!rows) return;
     if (drag.mode === 'wheel') {
-      // wterm turns a wheel event into the report the program asked for (its own mouse encoding).
-      for (let i = 0; i < Math.min(Math.abs(rows), 100); i++)
-        host.dispatchEvent(new WheelEvent('wheel', {deltaY: rows > 0 ? -rh : rh, deltaMode: 0, clientX: t.clientX, clientY: t.clientY, bubbles: true, cancelable: true}));
+      // wterm turns a wheel event into the report the program asked for (its own mouse encoding). It
+      // hands each report to onData on its own; they are gathered here and sent as one message, so a
+      // fast flick is one message per touch move, not one per row (the bridge caps messages a second).
+      const send = handlers.data;
+      let reports = '';
+      handlers.data = d => { reports += d; };
+      try {
+        for (let i = 0; i < Math.min(Math.abs(rows), 100); i++)
+          host.dispatchEvent(new WheelEvent('wheel', {deltaY: rows > 0 ? -rh : rh, deltaMode: 0, clientX: t.clientX, clientY: t.clientY, bubbles: true, cancelable: true}));
+      } finally { handlers.data = send; }
+      if (reports) send(reports);
     } else handlers.data(K.scrollKeys(rows, b.cursorKeysApp()));
   }, {passive: false});
   for (const type of ['touchend', 'touchcancel']) host.addEventListener(type, () => { drag = null; }, {passive: true});

@@ -52,16 +52,28 @@ pub const Splitter = struct {
     /// gets each Rex message (its slices are valid only during the call). Plain bytes and messages
     /// reach the sink in exactly the order they appear in the stream. Iterative: each input byte
     /// is looked at once, or twice when it ends a candidate (it may start the next one).
+    ///
+    /// Program output that is contiguous in `bytes` reaches the sink in one `plain` call, escape
+    /// sequences included: a candidate that turns out not to be a message is not passed on by
+    /// itself but joins the plain run it sits in (ordinary colour output is one call, not one per
+    /// ESC). Only a candidate begun in an earlier call is passed on separately.
     pub fn feed(s: *Splitter, bytes: []const u8, sink: anytype) anyerror!void {
+        // Program output in `bytes[pending..]` not yet passed on: it ends where the current
+        // candidate begins (`cand`), or at `i` when there is none.
+        var pending: ?usize = null;
+        // Where the held candidate begins in `bytes`, if it began in this call (then `held` is a
+        // copy of `bytes[cand..i]`).
+        var cand: ?usize = null;
         var i: usize = 0;
         while (i < bytes.len) {
             const h = s.held.items.len;
             if (h == 0) {
                 // Ground: everything up to the next ESC is program output.
+                if (pending == null) pending = i;
                 const esc = std.mem.indexOfScalarPos(u8, bytes, i, 0x1b) orelse bytes.len;
-                if (esc > i) try sink.plain(bytes[i..esc]);
-                if (esc == bytes.len) return;
+                if (esc == bytes.len) break;
                 try s.held.append(s.gpa, 0x1b);
+                cand = esc;
                 i = esc + 1;
                 continue;
             }
@@ -73,7 +85,7 @@ pub const Splitter = struct {
                 } else {
                     // Not ours. The held bytes hold no other ESC, so they are all program output;
                     // `b` is looked at again from ground, where an ESC starts a new candidate.
-                    try s.flushHeld(sink);
+                    try s.dropCandidate(&cand, sink);
                 }
                 continue;
             }
@@ -81,17 +93,25 @@ pub const Splitter = struct {
                 s.esc_pending = false;
                 if (b == '\\') {
                     i += 1;
+                    // A message: the program output before it goes first.
+                    if (pending) |p| if (cand.? > p) try sink.plain(bytes[p..cand.?]);
+                    pending = null;
+                    cand = null;
                     defer s.held.clearRetainingCapacity();
                     try s.deliver(s.held.items[s.prefix.len .. h - 1], sink);
                     continue;
                 }
                 // An ESC inside the body that is not the terminator: the candidate was program
                 // output up to that ESC, and the ESC may start a new candidate with `b`.
-                defer {
-                    s.held.items[0] = 0x1b;
-                    s.held.items.len = 1;
+                if (cand == null) {
+                    try sink.plain(s.held.items[0 .. h - 1]);
+                    // The ESC is the last byte held; if it came in this call, the output after
+                    // the candidate can still join it in one run.
+                    if (i > 0) pending = i - 1;
                 }
-                try sink.plain(s.held.items[0 .. h - 1]);
+                if (i > 0) cand = i - 1;
+                s.held.items[0] = 0x1b;
+                s.held.items.len = 1;
                 continue;
             }
             if (b == 0x1b) {
@@ -106,12 +126,29 @@ pub const Splitter = struct {
             if (run_end - i > room) {
                 // Too long to be a message: program output. The bytes after the held ones are
                 // plain too (no ESC among them), and ground passes them on.
-                try s.flushHeld(sink);
+                try s.dropCandidate(&cand, sink);
                 continue;
             }
             try s.held.appendSlice(s.gpa, bytes[i..run_end]);
             i = run_end;
         }
+        // The program output not passed on yet: up to the candidate still held, or all of it.
+        if (pending) |p| {
+            const end = if (s.held.items.len > 0) cand.? else bytes.len;
+            if (end > p) try sink.plain(bytes[p..end]);
+        }
+    }
+
+    /// The held candidate is program output. One that began in this call stays in `bytes` and
+    /// joins the pending run; one from an earlier call is passed on now.
+    fn dropCandidate(s: *Splitter, cand: *?usize, sink: anytype) anyerror!void {
+        if (cand.* != null) {
+            s.held.clearRetainingCapacity();
+            s.esc_pending = false;
+            cand.* = null;
+            return;
+        }
+        try s.flushHeld(sink);
     }
 
     /// Hand everything held to the sink as program output.
@@ -247,6 +284,10 @@ pub const Trace = struct {
     /// One entry per message: how many plain bytes came before it, then what it said.
     log: std.ArrayList(u8) = .empty,
     messages: usize = 0,
+    /// `plain` calls that came right after another `plain` call: program output split in two
+    /// where nothing came between.
+    adjacent_plain: usize = 0,
+    last_was_plain: bool = false,
 
     pub fn deinit(t: *Trace) void {
         t.plain_bytes.deinit(t.gpa);
@@ -254,10 +295,14 @@ pub const Trace = struct {
     }
 
     pub fn plain(t: *Trace, b: []const u8) !void {
+        try std.testing.expect(b.len > 0);
+        if (t.last_was_plain) t.adjacent_plain += 1;
+        t.last_was_plain = true;
         try t.plain_bytes.appendSlice(t.gpa, b);
     }
 
     pub fn message(t: *Trace, m: Message) !void {
+        t.last_was_plain = false;
         t.messages += 1;
         try t.log.print(t.gpa, "@{d} ", .{t.plain_bytes.items.len});
         switch (m) {
@@ -406,6 +451,7 @@ fn checkAgainstReference(input: []const u8, every_split: bool, rnd: std.Random) 
     defer whole.deinit();
     try streamSplit(a, 7, input, &.{}, &whole);
     try want.expectSame(&whole);
+    try testing.expect(whole.adjacent_plain <= 1); // one call per run of output (see `feed`)
 
     var bytewise: Trace = .{ .gpa = a };
     defer bytewise.deinit();
@@ -497,4 +543,67 @@ test "a body of exactly max_body is a message; one byte more is program output" 
             try want.expectSame(&got);
         }
     }
+}
+
+/// Counts `plain` calls and keeps their bytes, for the tests of how output is grouped.
+const Calls = struct {
+    gpa: Allocator,
+    plain_calls: usize = 0,
+    bytes: std.ArrayList(u8) = .empty,
+    messages: usize = 0,
+
+    fn deinit(c: *Calls) void {
+        c.bytes.deinit(c.gpa);
+    }
+    pub fn plain(c: *Calls, b: []const u8) !void {
+        try testing.expect(b.len > 0);
+        c.plain_calls += 1;
+        try c.bytes.appendSlice(c.gpa, b);
+    }
+    pub fn message(c: *Calls, _: Message) !void {
+        c.messages += 1;
+    }
+};
+
+test "contiguous program output reaches the sink in one call, escape sequences and all" {
+    const a = testing.allocator;
+    const cases = [_]struct { input: []const u8, calls: usize, messages: usize }{
+        .{ .input = "\x1b[31mred\x1b[0m", .calls = 1, .messages = 0 },
+        .{ .input = "a\x1b[1;32mb\x1b[0m\x1b]0;title\x07\x1b_G\x1b\\c", .calls = 1, .messages = 0 },
+        // An ESC that ends the chunk may start a message: it waits for the next chunk (here the
+        // stream's end) and goes on its own.
+        .{ .input = "c\x1b[0m\x1b", .calls = 2, .messages = 0 },
+        // A look-alike with another nonce, and a body ESC that is not the terminator.
+        .{ .input = "x\x1b_rex1;8;{}\x1b\\y\x1b_rex1;7;ab\x1b[0mz", .calls = 1, .messages = 0 },
+        // Output, a message, output: one call on each side of it.
+        .{ .input = "\x1b[1mA\x1b_rex1;7;{\"type\":\"child_exited\",\"exit_code\":0}\x1b\\\x1b[0mB", .calls = 2, .messages = 1 },
+        // Output, then a candidate the chunk ends inside: one call now, the rest held.
+        .{ .input = "\x1b[2Jq\x1b_rex1;7;{\"ty", .calls = 2, .messages = 0 },
+    };
+    for (cases) |cs| {
+        var s = try Splitter.init(a, 7);
+        defer s.deinit();
+        var c: Calls = .{ .gpa = a };
+        defer c.deinit();
+        try s.feed(cs.input, &c);
+        try s.finish(&c);
+        try testing.expectEqual(cs.calls, c.plain_calls);
+        try testing.expectEqual(cs.messages, c.messages);
+        // And the bytes are exactly the reference's.
+        var want: Trace = .{ .gpa = a };
+        defer want.deinit();
+        try referenceSplit(a, 7, cs.input, &want);
+        try testing.expectEqualSlices(u8, want.plain_bytes.items, c.bytes.items);
+    }
+    // Typical colour output in one chunk, many escapes: still one call.
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(a);
+    for (0..2000) |i| try big.print(a, "\x1b[3{d}mword{d}\x1b[0m ", .{ i % 8, i });
+    var s = try Splitter.init(a, 7);
+    defer s.deinit();
+    var c: Calls = .{ .gpa = a };
+    defer c.deinit();
+    try s.feed(big.items, &c);
+    try testing.expectEqual(@as(usize, 1), c.plain_calls);
+    try testing.expectEqualSlices(u8, big.items, c.bytes.items);
 }

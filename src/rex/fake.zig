@@ -26,6 +26,9 @@ const Stream = struct {
     dead: bool = false,
     /// When set, the serving connection sends this close frame and the stream is gone.
     end: ?struct { code: u16, reason: []const u8 } = null,
+    /// Raw bytes the serving connection writes as they are, outside any frame (for tests of a
+    /// server that breaks the protocol). Owned.
+    inject: ?[]u8 = null,
 };
 
 const Block = struct {
@@ -138,6 +141,22 @@ pub const Fake = struct {
     hold_data_ms: u32 = 0,
     /// If set, `data.connect` answers with this JSON as its payload, for tests of bad replies.
     data_connect_payload: ?[]const u8 = null,
+    /// The only folder `download_begin` and `list_dir` serve from (its real path, owned): a
+    /// fresh private folder per fake, removed with it. Anything outside it, or anything at all
+    /// when null, is `not_found`. An empty `list_dir` path (the terminal's folder) lists it.
+    files_root: ?[:0]u8 = null,
+    /// The fake made `files_root` itself, so removes it; a folder a test hands over is never removed.
+    owns_files_root: bool = false,
+    /// Calls to this method are never answered, for tests of timeouts and cancellation.
+    silent_method: ?[]const u8 = null,
+    /// The resume window a data WELCOME announces.
+    resume_window_ms: u32 = 60_000,
+    /// Drop a resumed data connection right after its WELCOME, without a byte of the stream.
+    drop_resumes: bool = false,
+    /// Data connections that resumed a stream (WELCOME sent), for tests.
+    data_resumes: u32 = 0,
+    /// Close statuses data clients sent, newest last, for tests (at most 64 kept).
+    data_close_codes: std.ArrayList(u16) = .empty,
 
     /// Listen on a fresh socket under /tmp and start serving.
     pub fn start(gpa: Allocator, io: Io) !*Fake {
@@ -148,8 +167,63 @@ pub const Fake = struct {
         const f = try gpa.create(Fake);
         errdefer gpa.destroy(f);
         f.* = .{ .gpa = gpa, .io = io, .path = path };
+        try f.makeFilesRoot(rnd);
+        errdefer f.removeFilesRoot();
         try f.listen();
         return f;
+    }
+
+    fn makeFilesRoot(f: *Fake, rnd: [6]u8) !void {
+        var buf: [64]u8 = undefined;
+        const dir = try std.fmt.bufPrint(&buf, "/tmp/rweb-fake-files-{x}", .{rnd});
+        _ = try Io.Dir.cwd().createDirPathStatus(f.io, dir, @enumFromInt(0o700));
+        errdefer Io.Dir.cwd().deleteTree(f.io, dir) catch {};
+        // The real path (on macOS /tmp is a link to /private/tmp), so requests compare with it.
+        f.files_root = try Io.Dir.cwd().realPathFileAlloc(f.io, dir, f.gpa);
+        f.owns_files_root = true;
+    }
+
+    fn removeFilesRoot(f: *Fake) void {
+        const root = f.files_root orelse return;
+        if (f.owns_files_root) Io.Dir.cwd().deleteTree(f.io, root) catch {};
+        f.gpa.free(root);
+        f.files_root = null;
+        f.owns_files_root = false;
+    }
+
+    /// Serve files from `root` instead (a test's own folder; null serves none). The fake's own folder
+    /// is removed; `root` is the test's and is never removed by the fake. `root` must exist.
+    pub fn setFilesRoot(f: *Fake, root: ?[]const u8) !void {
+        const real = if (root) |r| try Io.Dir.cwd().realPathFileAlloc(f.io, r, f.gpa) else null;
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        f.removeFilesRoot();
+        f.files_root = real;
+    }
+
+    /// The close statuses data clients have sent so far.
+    pub fn dataCloseCodes(f: *Fake, out: []u16) []u16 {
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        const n = @min(out.len, f.data_close_codes.items.len);
+        @memcpy(out[0..n], f.data_close_codes.items[0..n]);
+        return out[0..n];
+    }
+
+    pub fn dataResumes(f: *Fake) u32 {
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        return f.data_resumes;
+    }
+
+    /// Write `bytes` raw on every connection serving `block_id`'s streams, outside any frame.
+    pub fn injectRaw(f: *Fake, block_id: []const u8, bytes: []const u8) !void {
+        f.mu.lockUncancelable(f.io);
+        defer f.mu.unlock(f.io);
+        for (f.streams.items) |st| if (std.mem.eql(u8, st.block_id, block_id)) {
+            if (st.inject) |old| f.gpa.free(old);
+            st.inject = try f.gpa.dupe(u8, bytes);
+        };
     }
 
     fn listen(f: *Fake) !void {
@@ -190,6 +264,8 @@ pub const Fake = struct {
         f.live_streams.deinit(f.gpa);
         f.streams.deinit(f.gpa);
         f.clients.deinit(f.gpa);
+        f.data_close_codes.deinit(f.gpa);
+        f.removeFilesRoot();
         f.gpa.free(f.path);
         f.gpa.destroy(f);
     }
@@ -208,6 +284,7 @@ pub const Fake = struct {
         for (f.streams.items) |st| {
             f.gpa.free(st.block_id);
             st.bytes.deinit(f.gpa);
+            if (st.inject) |x| f.gpa.free(x);
             f.gpa.destroy(st);
         }
         f.streams.clearRetainingCapacity();
@@ -540,6 +617,7 @@ pub const Fake = struct {
 
         // Never answered: for tests of a call still waiting when the client closes.
         if (std.mem.eql(u8, method, "rweb.test.no_answer")) return;
+        if (f.silent_method) |sm| if (std.mem.eql(u8, method, sm)) return;
         if (std.mem.eql(u8, method, "data.connect")) if (f.data_connect_payload) |raw| {
             const text = try std.fmt.allocPrint(arena, "{{\"type\":\"response\",\"id\":{f},\"seq\":0,\"payload\":{s}}}", .{ std.json.fmt(id, .{}), raw });
             return c.writeFrame(.text, text);
@@ -646,7 +724,8 @@ pub const Fake = struct {
             if (!isAttached(attached.items, sid)) return f.respondError(c, id, "conflict", 409, "not attached to the session");
             const args = if (p.get("args")) |a| (if (a == .object) a.object else no_object) else no_object;
             const path = strField(args, "path") orelse return f.respondError(c, id, "bad_request", 400, "args.path required");
-            const bytes = Io.Dir.cwd().readFileAlloc(f.io, path, f.gpa, .limited(64 * 1024 * 1024)) catch return f.respondError(c, id, "not_found", 404, "no such file");
+            const real = f.servedPath(arena, path) orelse return f.respondError(c, id, "not_found", 404, "no such file");
+            const bytes = Io.Dir.cwd().readFileAlloc(f.io, real, f.gpa, .limited(64 * 1024 * 1024)) catch return f.respondError(c, id, "not_found", 404, "no such file");
             var raw: [16]u8 = undefined;
             f.io.random(&raw);
             try f.tickets.append(f.gpa, .{ .bytes = raw, .block_id = try f.gpa.dupe(u8, bid), .file = bytes });
@@ -657,8 +736,9 @@ pub const Fake = struct {
         } else if (std.mem.eql(u8, method, "com.superlogical.terminal.list_dir")) {
             const args = if (p.get("args")) |a| (if (a == .object) a.object else no_object) else no_object;
             const path = strField(args, "path") orelse "";
-            var dir = Io.Dir.cwd().openDir(f.io, if (path.len == 0) "." else path, .{ .iterate = true }) catch
-                return f.respond(c, id, .{ .path = path, .home = "", .status = "missing", .entries = &[_]u8{}, .truncated = false });
+            const missing = .{ .path = path, .home = "", .status = "missing", .entries = &[_]u8{}, .truncated = false };
+            const real = (if (path.len == 0) f.files_root else f.servedPath(arena, path)) orelse return f.respond(c, id, missing);
+            var dir = Io.Dir.cwd().openDir(f.io, real, .{ .iterate = true }) catch return f.respond(c, id, missing);
             defer dir.close(f.io);
             const Entry = struct { name: []const u8, file: bool };
             var list: std.ArrayList(Entry) = .empty;
@@ -678,6 +758,15 @@ pub const Fake = struct {
             return f.respond(c, id, .{ .bytes_written = data.len });
         }
         return f.respondError(c, id, "method_not_found", 404, "method not found");
+    }
+
+    /// The real path of `path` if it is inside `files_root` (or is it), else null. Caller holds `mu`.
+    fn servedPath(f: *Fake, arena: Allocator, path: []const u8) ?[]const u8 {
+        const root = f.files_root orelse return null;
+        if (path.len == 0) return null;
+        const real = Io.Dir.cwd().realPathFileAlloc(f.io, path, arena) catch return null;
+        if (!insideRoot(root, real)) return null;
+        return real;
     }
 
     fn isAttached(list: []const []const u8, sid: []const u8) bool {
@@ -727,6 +816,7 @@ pub const Fake = struct {
 
         var stream: *Stream = undefined;
         var sent: usize = 0;
+        var resumed = false;
         {
             f.mu.lockUncancelable(f.io);
             defer f.mu.unlock(f.io);
@@ -742,6 +832,7 @@ pub const Fake = struct {
                 const s = f.findBlockSession(t.block_id) orelse return reject(c, 0x01);
                 stream = try f.newStream(s, t.block_id);
             } else if (hs.data[0] == 0x02 and hs.data.len >= 25) {
+                resumed = true;
                 var found: ?*Stream = null;
                 for (f.streams.items) |st| if (!st.dead or true) {
                     if (std.mem.eql(u8, &st.token, hs.data[1..17])) found = st;
@@ -758,9 +849,19 @@ pub const Fake = struct {
             var welcome: [32]u8 = @splat(0);
             welcome[0] = 0x81;
             @memcpy(welcome[1..17], &stream.token);
-            std.mem.writeInt(u32, welcome[20..24], 60000, .little);
+            std.mem.writeInt(u32, welcome[20..24], f.resume_window_ms, .little);
             std.mem.writeInt(u64, welcome[24..32], stream.nonce, .little);
             try c.writeFrame(.binary, &welcome);
+            if (resumed) f.data_resumes += 1;
+            if (resumed and f.drop_resumes) return; // dropped without a close frame
+        }
+
+        // What the client sends from here on: only a close (or pongs). A close ends the stream.
+        var client_closed: std.atomic.Value(bool) = .init(false);
+        var listener = try f.io.concurrent(dataClientReader, .{ f, c, &client_closed });
+        defer {
+            c.stream.shutdown(f.io, .both) catch {}; // the connection ends here: wake the listener
+            listener.cancel(f.io);
         }
 
         // A slow snapshot, if a test asked for one.
@@ -775,11 +876,16 @@ pub const Fake = struct {
             var n: usize = 0;
             var dead = false;
             var end: ?@TypeOf(stream.end) = null;
+            var inject: ?[]u8 = null;
+            defer if (inject) |x| f.gpa.free(x);
             {
                 f.mu.lockUncancelable(f.io);
                 defer f.mu.unlock(f.io);
+                if (client_closed.load(.acquire)) stream.dead = true; // ended by the client: gone
                 dead = stream.dead;
                 if (stream.end != null) end = stream.end;
+                inject = stream.inject;
+                stream.inject = null;
                 if (!dead and stream.bytes.items.len > sent) {
                     n = @min(chunk.len, stream.bytes.items.len - sent);
                     @memcpy(chunk[0..n], stream.bytes.items[sent .. sent + n]);
@@ -793,12 +899,33 @@ pub const Fake = struct {
                 return;
             };
             if (dead) return; // dropped without a close frame
+            if (inject) |x| {
+                c.write_mutex.lockUncancelable(f.io);
+                defer c.write_mutex.unlock(f.io);
+                c.w.writeAll(x) catch return;
+                c.w.flush() catch return;
+            }
             if (n == 0) {
                 try f.io.sleep(.fromMilliseconds(2), .awake);
                 continue;
             }
             try c.writeFrame(.binary, chunk[0..n]);
             sent += n;
+        }
+    }
+
+    /// Read what a data client sends; record a close and stop.
+    fn dataClientReader(f: *Fake, c: *ws.Conn, closed: *std.atomic.Value(bool)) void {
+        while (true) {
+            const m = c.readMessage(f.gpa) catch return;
+            defer f.gpa.free(m.data);
+            if (m.opcode != .close) continue;
+            const code: u16 = if (m.data.len >= 2) std.mem.readInt(u16, m.data[0..2], .big) else 1005;
+            f.mu.lockUncancelable(f.io);
+            if (f.data_close_codes.items.len < 64) f.data_close_codes.append(f.gpa, code) catch {};
+            f.mu.unlock(f.io);
+            closed.store(true, .release);
+            return;
         }
     }
 
@@ -832,6 +959,12 @@ pub const Fake = struct {
 };
 
 const no_object: std.json.ObjectMap = .empty;
+
+/// Whether the real path `real` is the real path `root` or inside it.
+fn insideRoot(root: []const u8, real: []const u8) bool {
+    if (!std.mem.startsWith(u8, real, root)) return false;
+    return real.len == root.len or real[root.len] == '/';
+}
 
 fn strField(o: std.json.ObjectMap, name: []const u8) ?[]const u8 {
     const v = o.get(name) orelse return null;

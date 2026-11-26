@@ -18,6 +18,11 @@ pub const Welcome = struct {
 
 /// The largest message this client lets a server announce: a server's own limit is clamped to it.
 pub const client_max_message: u64 = 16 * 1024 * 1024;
+/// The largest message read on a data stream (a terminal's output or a download) once its
+/// handshake is done. Rex's protocol sends a stream in binary messages of 1 to 65,536 bytes
+/// (`/llms.txt`, data connections; downloads measured the same): 16 times that leaves room for a
+/// change in Rex without letting one message hold more than a mebibyte.
+pub const data_max_message: u64 = 1024 * 1024;
 /// The longest reconnect token accepted. It goes back to the server in the next hello.
 pub const max_reconnect_token = 256;
 

@@ -72,6 +72,8 @@ dialog label { display: block; margin-bottom: 4px; }
 dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 9px 10px; }
 .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 #dlg-ok.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+#ml-ok.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+#ml-text { margin: 0 0 12px; max-height: 40vh; overflow: auto; white-space: pre; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 9px 10px; font: 12px/1.35 ui-monospace, Menlo, Consolas, monospace; }
 #copydlg { width: 100vw; height: 100%; max-width: none; max-height: none; margin: 0; border-radius: 0; padding: 8px; flex-direction: column; border: 0; }
 #copydlg[open] { display: flex; }
 .copy-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex: none; }

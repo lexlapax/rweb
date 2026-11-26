@@ -18,6 +18,7 @@ let dbgOn = false;
 const state = {
   ws: null, retry: 500, observe: false, locked: false, rexUp: true,
   tree: [], current: null,               // {session, block}
+  opened: false,                          // the bridge confirmed it shows `current` (see `ready`)
   cols: 80, rows: 24, historyRows: 0,
   soft: false,                            // a soft keyboard is in use
   latched: {ctrl: false, alt: false, shift: false},
@@ -53,6 +54,30 @@ if (kind === 'wterm') {
     const inp = term.wt && term.wt.input;
     if (!inp || typeof inp.sendPaste !== 'function') { try { term.wt.destroy(); } catch {} $('term').replaceChildren(); $('term').classList.remove('rweb-wterm'); throw new Error('wterm: cannot take over pastes on this build'); }
     inp.sendPaste = text => { try { if (inp.selectionActions) inp.selectionActions.clearSelection(); } catch {} wtermPaste(String(text)); };
+    // wterm types text a keyboard commits (its `input` and `compositionend` handlers) straight through
+    // onData, so a phone keyboard's clipboard chip or a long composition would be typed, line ends and
+    // all. While either handler runs, what it commits is typed only if it looks like typing (keys.js
+    // `commitIsPaste`); anything else, and any paste-type input, goes the paste way. Its handlers were
+    // bound when it started, so the listeners are swapped for the wrapped ones (and `destroy` still
+    // removes them). Without these hooks wterm is not used.
+    const ta = inp.textarea;
+    if (!ta || typeof inp.handleInput !== 'function' || typeof inp.handleCompositionEnd !== 'function' || typeof inp._onInput !== 'function' || typeof inp._onCompositionEnd !== 'function') {
+      try { term.wt.destroy(); } catch {} $('term').replaceChildren(); $('term').classList.remove('rweb-wterm'); throw new Error('wterm: cannot take over committed text on this build');
+    }
+    const committing = orig => function (ev) {
+      // A touch Backspace: wterm sends DEL (or the program's key encoding) through onData; not text.
+      if (ev && ev.inputType === 'deleteContentBackward' && this.touchPrimary) return orig.call(this, ev);
+      const typed = this.onData, asPaste = !!ev && K.isPasteInput(ev.inputType);
+      this.onData = (d, ...rest) => {
+        if (asPaste || K.commitIsPaste(d)) { try { if (this.selectionActions) this.selectionActions.clearSelection(); } catch {} wtermPaste(String(d)); }
+        else typed.call(this, d, ...rest);
+      };
+      try { return orig.call(this, ev); } finally { this.onData = typed; }
+    };
+    ta.removeEventListener('input', inp._onInput); ta.removeEventListener('compositionend', inp._onCompositionEnd);
+    inp.handleInput = committing(inp.handleInput); inp.handleCompositionEnd = committing(inp.handleCompositionEnd);
+    inp._onInput = inp.handleInput.bind(inp); inp._onCompositionEnd = inp.handleCompositionEnd.bind(inp);
+    ta.addEventListener('compositionend', inp._onCompositionEnd); ta.addEventListener('input', inp._onInput);
     fitAddon = {proposeDimensions: () => term.proposeDimensions($('stage').clientWidth, $('stage').clientHeight)};
     termKind = 'wterm';
     // The page behind the grid matches wterm's own background until Rex sends a theme.
@@ -77,7 +102,12 @@ if (!term) {
 }
 
 function send(obj) { if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(obj)); }
-function canType() { return !!state.current && !state.observe && state.rexUp && link.healthy; }
+// `opened`: the bridge has said it shows state.current (an `opened` for it arrived). Until then the
+// bridge may still be on the terminal shown before, so nothing is typed and its output is not drawn.
+function ready() { return !!state.current && state.opened; }
+function canType() { return ready() && !state.observe && state.rexUp && link.healthy; }
+// Why typing was refused, for the notice.
+function whyNot() { return !link.healthy ? 'Not connected: not sent' : !state.opened ? 'Opening…' : 'Typing is off'; }
 
 function clearLatched() {
   state.latched = {ctrl: false, alt: false, shift: false};
@@ -89,7 +119,7 @@ function clearLatched() {
 term.onData(d => {
   d = K.stripReplies(d);                    // never type a terminal's answer to a program's question
   if (!d) return;
-  if (!canType()) { if (state.current && !link.healthy) notice('Not connected: not sent'); return; }
+  if (!canType()) { if (state.current && (!link.healthy || !state.opened)) notice(whyNot()); return; }
   if (d === '\r') softReset();                       // a new line starts: forget what was typed
   const r = K.applyLatched(state.latched, d);
   if (r.used) clearLatched();
@@ -104,21 +134,55 @@ term.onBinary(d => { d = K.stripReplies(d); if (d && canType()) send({t: 'in', d
 // the terminal's container in the capture phase, so they see the events before anything inside it
 // and stop them there. wterm's other way in (a paste arriving as an input event) comes here through
 // the hook set up where wterm starts (`wtermPaste`).
+// A paste over the bridge's limit is refused here with a notice: sent, it would close the connection.
+// A paste with line ends into a program that has not turned on bracketed paste would run line by
+// line: the bridge refuses it (`confirm_multiline`) and the page asks first (`askMultiline`). The text
+// is kept for that question only until it is answered, the terminal changes, or a few seconds pass.
+const multi = {pending: null, timer: 0};
+function forgetPaste() { multi.pending = null; clearTimeout(multi.timer); }
 function sendPaste(text) {
   const d = K.cleanPaste(text || '');
   if (!d) return;
-  if (!canType()) { if (state.current) notice(link.healthy ? 'Typing is off' : 'Not connected: not sent'); return; }
+  if (!canType()) { if (state.current) notice(whyNot()); return; }
+  const tooLong = K.pasteRefusal(d);
+  if (tooLong) { notice(tooLong); return; }
   if (soft.on) softReset();
+  if (/[\r\n]/.test(d)) {
+    forgetPaste();
+    multi.pending = {d, session: state.current.session, block: state.current.block};
+    multi.timer = setTimeout(forgetPaste, 15000);
+  }
   send({t: 'paste', d});
 }
 wtermPaste = sendPaste;
+async function askMultiline(msg) {
+  const p = multi.pending, dlg = $('mldlg'); forgetPaste();
+  if (!p || !sameTerm(p, state.current)) { notice(msg || 'Paste not sent'); return; }
+  if (dlg.open) { notice('Paste not sent: answer the open question first'); return; }
+  const v = K.pastePreview(p.d);
+  const r = await dialogResult(dlg, done => {
+    $('ml-msg').textContent = `This text has ${v.lines} line${v.lines === 1 ? '' : 's'}. The program in this terminal has not turned on bracketed paste, so each line may run as soon as it arrives.`;
+    $('ml-text').textContent = v.shown;
+    $('ml-text').scrollTop = 0;
+    $('ml-note').textContent = v.cut ? `Showing the first ${K.PREVIEW_MAX_CHARS.toLocaleString('en')} of ${v.chars.toLocaleString('en')} characters.` : '';
+    $('ml-note').hidden = !v.cut;
+    $('ml-cancel').onclick = () => done(null);
+    dlg.querySelector('form').onsubmit = e => { e.preventDefault(); done('yes'); };
+    setTimeout(() => $('ml-cancel').focus(), 0);     // the safe choice has the focus
+  });
+  if (r !== 'yes') return;
+  if (!canType() || !sameTerm(p, state.current)) { notice(state.current ? whyNot() : 'Paste not sent: the terminal changed'); return; }
+  send({t: 'paste', d: p.d, force: true});
+}
 $('term').addEventListener('paste', e => {
   e.preventDefault(); e.stopPropagation();
   sendPaste(e.clipboardData ? e.clipboardData.getData('text/plain') : '');
 }, true);
 // A soft keyboard's paste (and a drop) can come as an input event with no paste event before it.
+// A replacement (a spelling suggestion) is left to the input event that follows: it replaces text
+// already in the box, which only the soft-keyboard mirror and wterm's handler (both hooked) can see.
 $('term').addEventListener('beforeinput', e => {
-  if (!K.isPasteInput(e.inputType)) return;
+  if (!K.isPasteInput(e.inputType) || e.inputType === 'insertReplacementText') return;
   const text = e.data || (e.dataTransfer && e.dataTransfer.getData('text/plain')) || '';
   if (!text) return;            // nothing to take here: the input event that follows is a paste too
   e.preventDefault(); e.stopPropagation();
@@ -138,8 +202,10 @@ function softSync(pasted) {
   const e = K.editsBetween(soft.prev, now);
   soft.prev = now;
   if (!e.deletes && !e.inserts) return;
-  if (!canType()) { if (state.current) notice(link.healthy ? 'Typing is off' : 'Not connected: not sent'); return; }
-  if (pasted) {                                       // a paste the beforeinput listener could not take
+  if (!canType()) { if (state.current) notice(whyNot()); return; }
+  // A paste the beforeinput listener could not take, or text the keyboard committed that does not
+  // look like typing (keys.js `commitIsPaste`: lines, ESC or C1, or long): it goes the paste way.
+  if (pasted || K.commitIsPaste(e.inserts)) {
     if (e.deletes) send({t: 'in', d: '\x7f'.repeat(e.deletes)});
     return sendPaste(e.inserts);
   }
@@ -178,7 +244,7 @@ term.attachCustomKeyEventHandler(e => {
   if (state.soft && (e.key === 'Enter' || e.key === 'Backspace')) return true;
   if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'v') return true;      // paste
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection()) return true; // copy
-  if (!canType()) return false;
+  if (!canType()) { if (e.type === 'keydown' && state.current && (!link.healthy || !state.opened)) notice(whyNot()); return false; }
   const mods = {shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, super: e.metaKey};
   const text = (e.key.length === 1 && !e.ctrlKey && !e.metaKey) ? e.key : '';
   send({t: 'key', key: K.keyObject(K.snake(e.code), mods, e.type === 'keyup' ? 'release' : (e.repeat ? 'repeat' : 'press'), text)});
@@ -196,7 +262,7 @@ let fitTimer = 0, lastFit = '';
 function scheduleFit() {
   clearTimeout(fitTimer);
   fitTimer = setTimeout(() => {
-    if (!autoFitOn() || !state.current || state.observe || !state.rexUp || document.visibilityState !== 'visible') return;
+    if (!autoFitOn() || !ready() || state.observe || !state.rexUp || document.visibilityState !== 'visible') return;
     const stage = $('stage'); if (stage.hidden) return;
     const d = term.proposeDimensions(stage.clientWidth - 2, stage.clientHeight);
     if (!d || (d.cols === state.cols && d.rows === state.rows)) return;
@@ -278,6 +344,7 @@ function renderStatus() {
 function connect() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}ws${location.search}`);
   state.ws = ws; ws.binaryType = 'arraybuffer';
+  state.opened = false; forgetPaste();         // a new connection shows nothing until it says `opened`
   const mine = () => state.ws === ws;          // a socket we abandoned must not act
   link.lastRx = performance.now(); link.healthy = false; renderStatus();
   ws.onopen = () => {
@@ -295,7 +362,8 @@ function connect() {
     if (!mine()) return;
     link.lastRx = performance.now();
     if (!link.healthy) { link.healthy = true; renderStatus(); }
-    if (typeof ev.data !== 'string') { term.write(new Uint8Array(ev.data)); return; }
+    // Output is drawn only once the bridge has said it shows this page's terminal (see `ready`).
+    if (typeof ev.data !== 'string') { if (ready()) term.write(new Uint8Array(ev.data)); return; }
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     try { handleMessage(m); } catch (e) { if (dbgOn) dbgSend({ev: 'handler-threw', mt: m.t, msg: String(e && e.stack || e).slice(0, 300)}); }
   };
@@ -323,34 +391,76 @@ function handleMessage(m) {
       break;
     }
     case 'opened':
+      // Another terminal's (the bridge had not switched yet, or has left this one): not drawn here, and
+      // nothing is typed until this terminal's own `opened` arrives.
+      if (!sameTerm(m, state.current)) { state.opened = false; break; }
+      state.opened = true;
       state.info = null; renderInfo(); pollInfo();
       state.cols = m.cols; state.rows = m.rows; state.historyRows = m.history_rows;
       state.exited = (m.exited !== undefined && m.exited !== null) ? m.exited : null;
       $('empty').hidden = true; $('stage').hidden = false; $('keys').hidden = false;
       term.resize(m.cols, m.rows); layout(); updateControls(); renderStatus();
       if (!NARROW.matches) term.focus();
+      pumpUploads();
       break;
-    case 'theme': applyTheme(m); break;
-    case 'info': state.info = m; renderInfo(); break;
-    case 'exited': state.exited = m.code; renderStatus(); break;
+    case 'theme': if (ready()) applyTheme(m); break;
+    case 'info': if (ready()) { state.info = m; renderInfo(); } break;
+    case 'exited': if (ready()) { state.exited = m.code; renderStatus(); } break;
     case 'closed': showEmpty('That terminal was closed.'); break;
     case 'notice': notice(m.msg); break;
-    case 'error':
-      if (m.for === 'ls') { xfNote(`Cannot list that folder: ${m.msg}`); break; }
-      if (m.for === 'dl') { xfNote(`Cannot download: ${m.msg}`); notice(`Cannot download: ${m.msg}`); break; }
-      if (m.for === 'ul') { notice(`Cannot upload: ${m.msg}`); xf.current = null; pumpUploads(); break; }
-      notice(m.for === 'manage' || m.for === 'input' ? m.msg : `${m.for}: ${m.msg}`); break;
+    case 'error': onError(m); break;
     case 'text': openCopy(m.text, m.truncated); break;
-    case 'clip': if (m.text) openCopy(m.text, false); else notice('Nothing has been copied by a program in this terminal yet.'); break;
+    case 'clip': {
+      // A program chose this text: shown and copied without control characters, and labelled as its.
+      const t = typeof m.text === 'string' ? K.cleanClip(m.text) : '';
+      if (t) openCopy(t, false, true); else notice('Nothing has been copied by a program in this terminal yet.');
+      break;
+    }
     case 'ls': renderDir(m); break;
     case 'xfer': onXfer(m); break;
     case 'pong': break;
   }
 }
 
-function showEmpty(text) {
-  state.info = null; renderInfo();
-  state.current = null; state.exited = null; LS.set('last', null);
+// A refusal names the message it refuses (`for`); a rate refusal also says `rate: true`. An older
+// bridge said `for: 'rate'` without naming the message. Whatever was waiting on the refused message is
+// let go here, so nothing waits for an answer that will not come.
+function onError(m) {
+  const f = m.for, msg = String(m.msg || 'refused');
+  // The bridge left the terminal it was on, so the page shows none. An old bridge's unnamed rate
+  // refusal while a terminal is opening is taken as that open's: it is the only message sent then.
+  if (f === 'open' || (f === 'rate' && state.current && !state.opened)) { openRefused(msg); return; }
+  if (f === 'paste' && m.code === 'confirm_multiline') { askMultiline(msg); return; }
+  // The bridge closes the connection after this one; the page reconnects as usual.
+  if (f === 'message') { notice(`Not sent: the message was ${msg}`); return; }
+  switch (f) {
+    case 'rate':                                     // an older bridge: it could be any of these
+      ulRefused(msg, true); state.pendingNew = null; lastFit = ''; $('xf-list').setAttribute('aria-busy', 'false');
+      notice(`Refused: ${msg}`); return;
+    case 'ls': $('xf-list').setAttribute('aria-busy', 'false'); xfNote(`Cannot list that folder: ${msg}`); return;
+    case 'dl': xfNote(`Cannot download: ${msg}`); notice(`Cannot download: ${msg}`); return;
+    case 'ul': ulRefused(msg, m.rate === true); return;
+    case 'new_terminal': state.pendingNew = null; break;
+    case 'fit': lastFit = ''; break;                 // the next layout may ask again
+    case 'info': return;                             // a background poll: the next one tries again
+    case 'paste': forgetPaste(); break;
+    case 'manage': case 'input': notice(msg); return;
+  }
+  notice(`${f}: ${msg}`);
+}
+function openRefused(msg) {
+  forgetLast(state.current);
+  clearView('Pick a terminal from the list.');
+  notice(`Cannot open that terminal: ${msg}`);
+}
+function sameTerm(a, b) { return !!a && !!b && String(a.session) === String(b.session) && String(a.block) === String(b.block); }
+// The terminal this device reopens on load is forgotten when it is `t`.
+function forgetLast(t) { if (t && sameTerm(LS.get('last', null), t)) LS.set('last', null); }
+
+function showEmpty(text) { forgetLast(state.current); clearView(text); }
+function clearView(text) {
+  state.info = null; renderInfo(); forgetPaste();
+  state.current = null; state.opened = false; state.exited = null;
   $('stage').hidden = true; $('keys').hidden = true; $('empty').hidden = false; $('empty').textContent = text;
   renderAll(); updateControls(); renderStatus();
 }
@@ -393,7 +503,7 @@ function renderInfo() {
 let infoTimer = 0;
 function pollInfo() {
   clearTimeout(infoTimer);
-  if (state.current && link.healthy && document.visibilityState === 'visible') send({t: 'info'});
+  if (ready() && link.healthy && document.visibilityState === 'visible') send({t: 'info'});
   infoTimer = setTimeout(pollInfo, 4000);
 }
 function renderCrumb() {
@@ -464,14 +574,15 @@ function renderTree() {
 function updateControls() {
   $('new-session').disabled = state.observe;
   $('menu').setAttribute('aria-expanded', String($('list').classList.contains('open')));
-  const fit = $('pop-fit'); if (fit) fit.disabled = !state.current || state.observe;
+  const fit = $('pop-fit'); if (fit) fit.disabled = !ready() || state.observe;
   const ro = $('pop-ro'); if (ro) { ro.setAttribute('aria-pressed', String(state.observe)); ro.disabled = state.locked; ro.textContent = state.locked ? 'View only (locked by the server)' : 'View only'; }
-  const hi = $('pop-hist'); if (hi) hi.disabled = !state.current || state.historyRows === 0;
+  const hi = $('pop-hist'); if (hi) hi.disabled = !ready() || state.historyRows === 0;
 }
 
 function openBlock(session, block) {
   lastFit = '';
-  state.current = {session, block}; state.exited = null; LS.set('last', state.current);
+  state.current = {session, block}; state.opened = false; state.exited = null; LS.set('last', state.current);
+  forgetPaste();
   term.reset(); clearLatched(); softReset();
   send({t: 'open', session, block});
   closeListIfNarrow(); closePop();
@@ -527,15 +638,15 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && popFor) { 
 function item(pop, text, on, id) { const b = el('button', '', text); b.setAttribute('role', 'menuitem'); if (id) b.id = id; b.onclick = () => { on(b); }; pop.append(b); return b; }
 
 $('more').onclick = () => openPop($('more'), pop => {
-  item(pop, 'Copy text…', () => { closePop(); requestCopy(); }, 'pop-copy').disabled = !state.current;
+  item(pop, 'Copy text…', () => { closePop(); requestCopy(); }, 'pop-copy').disabled = !ready();
   const clip = item(pop, 'Text copied in the terminal…', () => { closePop(); try { term.blur(); } catch {} send({t: 'clip'}); }, 'pop-clip');
-  clip.disabled = !state.current; clip.title = 'Shows the last text a program such as vim or tmux copied inside the terminal, so you can copy it to your phone';
+  clip.disabled = !ready(); clip.title = 'Shows the last text a program such as vim or tmux copied inside the terminal, so you can copy it to your phone';
   clip.append(el('small', 'hint', 'What vim, tmux or similar last copied'));
-  item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !state.current || state.observe;
-  if (state.canDownload) item(pop, 'Download a file…', () => { closePop(); openFiles(); }, 'pop-dl').disabled = !state.current || state.observe;
-  if (state.canUpload) item(pop, 'Upload files…', () => { closePop(); $('upfile').click(); }, 'pop-ul').disabled = !state.current || state.observe;
-  item(pop, 'Clear screen', () => { closePop(); send({t: 'term_action', action: 'clear'}); }).disabled = !state.current || state.observe;
-  item(pop, 'Reset terminal…', async () => { closePop(); if (await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'})) send({t: 'term_action', action: 'reset'}); }).disabled = !state.current || state.observe;
+  item(pop, 'Paste…', () => { closePop(); doPaste(); }, 'pop-paste').disabled = !ready() || state.observe;
+  if (state.canDownload) item(pop, 'Download a file…', () => { closePop(); openFiles(); }, 'pop-dl').disabled = !ready() || state.observe;
+  if (state.canUpload) item(pop, 'Upload files…', () => { closePop(); $('upfile').click(); }, 'pop-ul').disabled = !ready() || state.observe;
+  item(pop, 'Clear screen', () => { closePop(); send({t: 'term_action', action: 'clear'}); }).disabled = !ready() || state.observe;
+  item(pop, 'Reset terminal…', async () => { closePop(); if (await confirmAction({title: 'Reset the terminal?', message: 'It returns to its starting state and the screen and scrollback are cleared. Programs keep running.', ok: 'Reset'}) && ready()) send({t: 'term_action', action: 'reset'}); }).disabled = !ready() || state.observe;
   const sz = el('div', 'sizer'); sz.append(el('span', '', 'Text size'));
   const minus = el('button', '', '−'); minus.setAttribute('aria-label', 'Smaller text'); minus.onclick = () => setFontSize(state.fontSize - 1);
   const now = el('span', 'dim', state.fontSize + ' px'); now.id = 'font-now'; now.style.flex = '0 0 auto'; now.style.minWidth = '48px'; now.style.textAlign = 'center';
@@ -548,7 +659,7 @@ $('more').onclick = () => openPop($('more'), pop => {
   item(pop, 'Fit terminal to this window…', async () => {
     closePop();
     const d = fitAddon.proposeDimensions();
-    if (d && await confirmAction({title: 'Resize the terminal?', message: `Resize it to ${d.cols} × ${d.rows}. It changes for everyone viewing it, including the desktop.`, ok: 'Resize'})) send({t: 'fit', cols: d.cols, rows: d.rows});
+    if (d && await confirmAction({title: 'Resize the terminal?', message: `Resize it to ${d.cols} × ${d.rows}. It changes for everyone viewing it, including the desktop.`, ok: 'Resize'})) { if (canType()) send({t: 'fit', cols: d.cols, rows: d.rows}); else notice(whyNot()); }
   }, 'pop-fit');
   item(pop, 'Load all scrollback', () => { closePop(); send({t: 'more_history'}); }, 'pop-hist');
   { const dg = LS.get('diag', false); const it = item(pop, dg ? 'Touch diagnostics: on' : 'Touch diagnostics: off', () => { LS.set('diag', !dg); location.reload(); }); it.setAttribute('role', 'menuitemcheckbox'); it.setAttribute('aria-pressed', String(dg)); }
@@ -632,8 +743,11 @@ function renderCopySelection() {
   $('copy-help').textContent = !copySel ? 'Tap a line to start a selection, then tap another line to select down (or up) to it.'
     : copySel.open ? 'Now tap the last line to select down (or up) to it.' : 'Tap Copy, or tap a line to start again.';
 }
-function openCopy(text, truncated) {
+// `fromProgram`: the text a program put on the terminal's clipboard (already cleaned, keys.js
+// `cleanClip`), labelled as such so it is not mistaken for the terminal's own text.
+function openCopy(text, truncated, fromProgram) {
   const dlg = $('copydlg'), box = $('copytext');
+  $('copy-title').textContent = fromProgram ? 'Text copied in the terminal' : 'Copy text';
   const view = K.copyView(text, truncated);           // a node per line: only the last COPY_MAX_LINES
   copyFull = text; copyLines = view.lines; copySel = null;
   const build = () => {
@@ -661,7 +775,7 @@ function openCopy(text, truncated) {
   $('copy-native').onclick = () => setNative(!copyNative);
   setNative(false);
   box.onclick = e => { if (copyNative) return; const row = e.target.closest('.ln'); if (!row) return; copySel = K.tapLine(copySel, Number(row.dataset.i)); renderCopySelection(); };
-  $('copy-note').textContent = view.note;
+  $('copy-note').textContent = fromProgram ? 'Set by a program in this terminal' + (view.note ? '. ' + view.note : '') : view.note;
   const done = what => () => notice(what), fail = () => notice('Could not copy: your browser refused');
   $('copy-all').onclick = () => copyToClipboard(copyFull).then(done('Copied everything'), fail);
   $('copy-last').onclick = () => copyToClipboard(K.lastLines(copyFull, 100)).then(done('Copied the last 100 lines'), fail);
@@ -733,7 +847,7 @@ function pressKey(btn) {
     btn.setAttribute('aria-pressed', String(state.latched[k.latch]));
     return;
   }
-  if (!canType()) { notice(link.healthy ? 'Typing is off' : 'Not connected: not sent'); return; }
+  if (!canType()) { notice(whyNot()); return; }
   const mods = Object.assign({}, k.mods || {});
   const used = Object.keys(state.latched).some(m => state.latched[m]);
   for (const m of Object.keys(state.latched)) if (state.latched[m]) mods[m] = true;
@@ -741,7 +855,7 @@ function pressKey(btn) {
   send({t: 'key', key: K.keyObject(k.key, mods, 'press', text)});
   if (used) clearLatched();
   if (k.repeat) {
-    hold = {btn, mods, text, timer: setTimeout(() => { hold.iv = setInterval(() => send({t: 'key', key: K.keyObject(k.key, mods, 'repeat', text)}), 70); }, 420)};
+    hold = {btn, mods, text, timer: setTimeout(() => { hold.iv = setInterval(() => { if (canType()) send({t: 'key', key: K.keyObject(k.key, mods, 'repeat', text)}); }, 70); }, 420)};
   } else hold = {btn, mods, text};
 }
 function releaseKey() {
@@ -865,6 +979,19 @@ function pumpUploads() {
   xf.current = xf.queue.shift();
   send({t: 'ul', name: xf.current.name, size: xf.current.size});
 }
+// The bridge refused the upload waiting for its token. Refused for the rate, the file goes back to the
+// front of the queue and is asked for again a second later (three times at most); otherwise it is
+// dropped. Either way the queue moves on.
+function ulRefused(msg, rate) {
+  const f = xf.current; xf.current = null;
+  if (!f) return;
+  const tries = (ulRefused.tries.get(f) || 0) + 1;
+  if (rate && tries <= 3) { ulRefused.tries.set(f, tries); xf.queue.unshift(f); setTimeout(pumpUploads, 1100); return; }
+  ulRefused.tries.delete(f);
+  notice(`Cannot upload ${f.name}: ${msg}`);
+  pumpUploads();
+}
+ulRefused.tries = new WeakMap();
 function putFile(file, token) {
   const req = new XMLHttpRequest();
   req.open('PUT', 'xfer/' + token);

@@ -255,7 +255,8 @@ Before either: the owner's open feedback items ([feedback.md](feedback.md)) and 
 4. **Publish** (not yet: on the owner's word the release binaries run on the machines first; see
    phase5-result.md. Before it, two independent reviews (release readiness, security) and their fixes:
    [release-review-2026-11-25.md](release-review-2026-11-25.md); then a rescan and an internal adversarial
-   review, fixed by mechanism: [security-review-2026-11-25-round2.md](security-review-2026-11-25-round2.md)). A GitHub Release on the private repository (the owner approves each release);
+   review, fixed by mechanism: [security-review-2026-11-25-round2.md](security-review-2026-11-25-round2.md),
+   then a third round: [security-review-2026-11-25-round3.md](security-review-2026-11-25-round3.md)). A GitHub Release on the private repository (the owner approves each release);
    hosts fetch with `gh release download`.
 5. **setup-repo** (done 2026-11-25: installs the pinned archive, build fallback kept; live on laptop-mac,
    desktop-mac and linux-box). The pin becomes version plus SHA-256 per platform; the hook downloads,

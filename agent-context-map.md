@@ -1,11 +1,33 @@
 # Agent context map
 
-Last updated: 2026-11-25 (laptop-mac: second security review and its fixes). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
+Last updated: 2026-11-25 (laptop-mac: third review round and its fixes). **Phases 0 to 4 done and deployed on linux-box and desktop-mac**; the owner is using it (Phase 3's week of daily use is theirs). linux-box now runs on a unix socket (applied and verified); one reboot check on that setup is left. Read first; load linked contents only as needed.
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
+
+## 2026-11-25: third review round of `4c383fb` and its fixes
+
+An independent readiness review on linux-box (Linux, live Rex: ready for the 0.1.1 release commit; three
+observations), an external static rescan (one High, two Medium) and a four-part internal adversarial
+review (31 more) were each checked against the code. Tally, plan, fixes, tests, checks and what is left:
+[docs/security-review-2026-11-25-round3.md](docs/security-review-2026-11-25-round3.md). The worst: an
+open refused by the rate limit (a round-2 regression) left the bridge on the old terminal while the page
+showed the new one, so typing could go elsewhere; and test bridges used a fixed token, including the live
+test against the real Rex. Fixed by mechanism: one terminal on both sides; budgets for every queue and
+for shared work (live output coalesced, single theme, paced redraws, cell caps, viewer cap, ping rate,
+busy-is-alive); terminal close order; peer and descriptor trust (socket folder chain, Rex peer uid,
+`tailscale` from fixed places, upload real path); paste integrity (multi-line confirmation, server-side
+ESC/C1 strip, keyboard commits as pastes); Rex connection robustness; random test tokens and a confined
+fake; build-time commit stamp. Owner's decisions: private groups pass; multi-line pastes ask; reviewers
+named generically. Added: macOS `admin` counts as root's. Checked on laptop-mac: unit 243/252 (9 live
+skipped), live 251/252, fuzz corpus, web 26/26, release-base, ReleaseSafe in Chrome (multi-line paste
+question into `sh`) and the iOS Simulator, and `--owner-from-tailscale` finding Tailscale. Not run: Linux,
+Serve from another device, Android. Note: round 2 ran a coverage-guided fuzz session whose web page
+listened on loopback without a token (coverage only); none since. **Next:** the owner has both reviews look
+at the fix commit; then the 0.1.1 release commit (date the changelog), archives with `tools/release.sh` on
+an Apple-silicon Mac, tag and private release, all on the owner's word.
 
 ## 2026-11-25: second security review of `ded0668` and its fixes
 
-Daybreak rescanned `ded0668` (11 findings); an internal adversarial review in four parts (front end,
+An external static scan rescanned `ded0668` (11 findings); an internal adversarial review in four parts (front end,
 Rex library, hub concurrency, page and release) added 42 more, among them a deadlock and use-after-free
 crashes in the hub. Every finding was checked against the code; D4 was partly refuted (bounded recursion)
 but hid a real byte-reordering bug. Verdicts, the plan by mechanism, each fix and its tests, checks and
@@ -16,7 +38,7 @@ bounded; the Rex library has message, token, depth and handshake limits and owne
 splitter is a state machine checked against a reference model and fuzzed; secret files and the upload
 folder are trusted only through checked descriptors with safe parent folders; upload tokens are checked
 against their viewer at use; pastes lose ESC and C1 and go as pastes; `--owner` needs `--allow-host`.
-Owner's decision on Daybreak #3 (macOS Serve target holds the backend secret): document only.
+Owner's decision on the scan's #3 (macOS Serve target holds the backend secret): document only.
 Checked on laptop-mac: unit 253/263 (10 live skipped), live 208/209 against local Rex, fuzz corpus, web
 22/22, release-base, ReleaseSafe bridge in Chrome (typing, hostile paste in both engines) and the iOS
 Simulator. Not checked: Linux runs, a Serve deployment of this build, a phone keyboard's paste.
@@ -26,8 +48,8 @@ look at the fix commit; no version, GitHub Release or deployment until the owner
 
 ## 2026-11-25: release reviews of `7a53f54` and their fixes
 
-Two independent reviews ran on `7a53f54` (release readiness by agy on linux-box; a security scan by
-OpenAI Daybreak). Every finding was checked against the code and accepted; fixes, verdicts and tests are
+Two independent reviews ran on `7a53f54` (an independent release-readiness review on linux-box; an external
+static security scan). Every finding was checked against the code and accepted; fixes, verdicts and tests are
 in [docs/release-review-2026-11-25.md](docs/release-review-2026-11-25.md): private release folder
 (`tools/release-base.test.sh`), SSH-tunnel cookie scoped to `/s/<id>/` with a redirect (the page uses
 relative addresses), `--own-address` validated and fail-closed, snapshot framed and decoded once plus

@@ -102,6 +102,19 @@
   </form>
 </dialog>
 
+<dialog id="mldlg" aria-labelledby="ml-title">
+  <form method="dialog">
+    <h2 id="ml-title">Paste several lines?</h2>
+    <p id="ml-msg" class="dim"></p>
+    <pre id="ml-text" tabindex="0" aria-label="The text to paste"></pre>
+    <p id="ml-note" class="dim" hidden></p>
+    <div class="buttons">
+      <button type="button" id="ml-cancel">Cancel</button>
+      <button type="submit" id="ml-ok" class="danger" value="ok">Paste</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="vendor/xterm.js"></script>
 <script src="vendor/addon-fit.js"></script>
 <script src="keys.js"></script>

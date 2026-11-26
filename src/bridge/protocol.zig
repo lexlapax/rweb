@@ -7,7 +7,9 @@
 //!   close_view                    stop viewing
 //!   in {d}                        typed or composed text (xterm.js onData)
 //!   key {key}                     a physical key, as Rex's `client.key` takes it
-//!   paste {d}   a `block.event`
+//!   paste {d, force?}             a `block.event`; a multi-line paste into a program without
+//!                                 bracketed paste is refused (`code: confirm_multiline`) unless
+//!                                 `force` says the user confirmed it
 //!   fit {cols, rows}              take ownership and resize (only when the user asks)
 //!   redraw / more_history         a fresh redraw, the latter with all the scrollback
 //!   text                          the screen and scrollback as plain text (reply: `text`)
@@ -41,7 +43,7 @@ pub const Msg = union(enum) {
     in: []const u8,
     /// The `key` object as JSON text, forwarded to `client.key`.
     key: []const u8,
-    paste: []const u8,
+    paste: struct { text: []const u8, force: bool = false },
     fit: struct { cols: u16, rows: u16 },
     redraw,
     more_history,
@@ -112,7 +114,10 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Msg {
     if (eql(u8, t, "dbg")) return .dbg;
     if (eql(u8, t, "open")) return .{ .open = .{ .session = try str(o, "session", max_id_bytes), .block = try str(o, "block", max_id_bytes) } };
     if (eql(u8, t, "in")) return .{ .in = try str(o, "d", max_input_bytes) };
-    if (eql(u8, t, "paste")) return .{ .paste = try str(o, "d", max_input_bytes) };
+    if (eql(u8, t, "paste")) {
+        const force = if (o.get("force")) |f| (if (f == .bool) f.bool else return error.BadField) else false;
+        return .{ .paste = .{ .text = try str(o, "d", max_input_bytes), .force = force } };
+    }
     if (eql(u8, t, "key")) return .{ .key = try keyJson(arena, o) };
     if (eql(u8, t, "fit")) {
         const cols = try dim(o, "cols");
@@ -186,8 +191,13 @@ fn keyJson(arena: Allocator, o: std.json.ObjectMap) ParseError![]const u8 {
         composing = c.bool;
     }
     return std.json.Stringify.valueAlloc(arena, .{
-        .key = key, .mods = mods, .consumed_mods = consumed, .text = text,
-        .unshifted_codepoint = cp, .composing = composing, .action = action,
+        .key = key,
+        .mods = mods,
+        .consumed_mods = consumed,
+        .text = text,
+        .unshifted_codepoint = cp,
+        .composing = composing,
+        .action = action,
     }, .{}) catch return error.OutOfMemory;
 }
 

@@ -43,8 +43,7 @@ pub const Stream = struct {
     }
 
     pub fn openTimeout(gpa: Allocator, io: Io, socket_path: []const u8, ticket: [16]u8, timeout_ms: u32) !Stream {
-        const addr = try Io.net.UnixAddress.init(socket_path);
-        const stream = try addr.connect(io);
+        const stream = try ws.connectUnix(io, socket_path);
         // The watchdog is stopped before the stream can be closed (defers run in reverse order).
         errdefer stream.close(io);
         var dog = try ws.Watchdog.start(io, stream, timeout_ms);
@@ -52,6 +51,7 @@ pub const Stream = struct {
         const c = try ws.Conn.upgrade(gpa, io, stream, "/api/data", subprotocol, "");
         c.owns_stream = false; // until the handshake is done; the errdefer above closes it
         errdefer c.deinit(gpa);
+        c.max_message = ws.handshake_max_message; // the WELCOME; the stream's limit is set below
         var hello: [17]u8 = undefined;
         hello[0] = 0x01;
         @memcpy(hello[1..], &ticket);
@@ -64,7 +64,10 @@ pub const Stream = struct {
             .welcome => {},
             .reject => return error.Rejected,
         }
+        // A watchdog that fired has shut the socket, even if the WELCOME got in first.
+        try dog.finish(io);
         c.owns_stream = true;
+        c.max_message = wire.data_max_message;
         return .{ .gpa = gpa, .io = io, .conn = c };
     }
 

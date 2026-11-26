@@ -1,11 +1,11 @@
 # Security review, round 2 (2026-11-25)
 
-Inputs: OpenAI Daybreak's rescan of `ded0668` (11 findings, numbered D1-D11 here) and an internal adversarial
+Inputs: an external static scan's rescan of `ded0668` (11 findings, numbered D1-D11 here) and an internal adversarial
 review in four parts, each by a reviewer reading the code without the others' conclusions: the request
 front end and transfers (H), the Rex client library (R), hub concurrency and read-only enforcement (C), and
 the page and release tooling (W). Every finding below was checked against the code before it was accepted.
 
-## Verdicts on Daybreak's findings
+## Verdicts on the scan's findings
 
 | # | Finding | Verdict |
 |---|---------|---------|
@@ -192,3 +192,6 @@ per-process accounting for a local connection flood (H6, denial of service by a 
 - Deployment note: rweb now refuses to start when a secret file, token file or upload folder sits under a
   folder another user can change. The layout setup-repo uses on laptop-mac passes; check each host when
   deploying.
+
+The next round (a readiness review, a rescan and another internal review of the fixed commit) is in
+[security-review-2026-11-25-round3.md](security-review-2026-11-25-round3.md).

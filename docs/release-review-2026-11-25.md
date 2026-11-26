@@ -2,9 +2,9 @@
 
 Two independent reviews of commit `7a53f54` (`main`), before any version or GitHub release:
 
-- **Release readiness** (agy, on linux-box, Linux x86-64): builds, the full test suite with live Rex,
+- **Release readiness** (an independent review, on a Linux x86-64 host): builds, the full test suite with live Rex,
   archive contents and determinism, licences and notices, docs against the CLI, hygiene.
-- **Security** (OpenAI Daybreak, full-repository static scan): five findings, four Medium and one Low.
+- **Security** (an external full-repository static scan): five findings, four Medium and one Low.
 
 Each finding was checked against the code before anything was changed. All were accepted; none was
 refuted. The fixes are in one commit after `7a53f54`, for both reviews to look at again. The second

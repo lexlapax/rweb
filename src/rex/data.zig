@@ -69,6 +69,12 @@ pub const Data = struct {
     reader: ?Io.Future(void) = null,
     /// The last close status seen, for tests and logs.
     last_close: u16 = 0,
+    /// Resumes since `received` last moved: the count `received` had when the streak began, when
+    /// it began, and how long to wait before the next try. A stream that keeps dropping without
+    /// delivering a byte runs out of its resume window instead of resuming forever.
+    streak_received: u64 = std.math.maxInt(u64),
+    streak_start_ms: i64 = 0,
+    resume_backoff_ms: u64 = 0,
 
     pub const OpenError = error{ Rejected, BadHandshake } || Allocator.Error;
 
@@ -127,20 +133,30 @@ pub const Data = struct {
         return openWith(gpa, io, control.opts.socket_path, ticket, sink, .{ .handshake_timeout_ms = control.opts.handshake_timeout_ms });
     }
 
+    /// How long `close` waits for its close frame to be written before it cuts the socket.
+    pub const close_write_ms: u32 = 1000;
+
     pub fn close(d: *Data) void {
         d.closing.store(true, .release);
-        // Shut the socket first: cancelling a task blocked in a read is not reliable, but a read
-        // on a shut socket returns at once, and the reader sees `closing` and exits.
         d.conn_mu.lockUncancelable(d.io);
-        if (d.conn) |c| c.stream.shutdown(d.io, .both) catch {};
+        if (d.conn) |c| {
+            // A 1000 close ends the stream on Rex's side (otherwise it stays resumable until its
+            // window passes). The frame goes first, while the socket still works; a watchdog
+            // cuts the socket if Rex does not take it in time. Holding `conn_mu` keeps the
+            // reader from replacing the connection meanwhile.
+            if (ws.Watchdog.start(d.io, c.stream, close_write_ms)) |dog_| {
+                var dog = dog_;
+                c.writeFrame(.close, &.{ 0x03, 0xe8 }) catch {};
+                dog.stop(d.io);
+            } else |_| {}
+            // Then shut it: cancelling a task blocked in a read is not reliable, but a read on a
+            // shut socket returns at once, and the reader sees `closing` and exits.
+            c.stream.shutdown(d.io, .both) catch {};
+        }
         if (d.connecting) |st| st.shutdown(d.io, .both) catch {};
         d.conn_mu.unlock(d.io);
         if (d.reader) |*r| r.cancel(d.io);
-        // A 1000 close ends the stream on the server.
-        if (d.conn) |c| {
-            c.writeFrame(.close, &.{ 0x03, 0xe8 }) catch {};
-            c.deinit(d.gpa);
-        }
+        if (d.conn) |c| c.deinit(d.gpa);
         d.gpa.free(d.socket_path);
         d.gpa.destroy(d);
     }
@@ -149,8 +165,7 @@ pub const Data = struct {
     /// `nonce` and `resume_window_ms` from the WELCOME.
     fn handshake(d: *Data, first: []const u8) !void {
         const io = d.io;
-        const addr = try Io.net.UnixAddress.init(d.socket_path);
-        const stream = try addr.connect(io);
+        const stream = try ws.connectUnix(io, d.socket_path);
         // While the handshake runs, `close` can shut the socket. On failure it is unpublished
         // (and the watchdog stopped) before it is closed: defers run in reverse order.
         errdefer stream.close(io);
@@ -161,11 +176,14 @@ pub const Data = struct {
         const c = try ws.Conn.upgrade(d.gpa, io, stream, "/api/data", subprotocol, "");
         c.owns_stream = false; // until published; the errdefer above closes it
         errdefer c.deinit(d.gpa);
+        c.max_message = ws.handshake_max_message; // the WELCOME; the stream's limit is set below
         try c.writeFrame(.binary, first);
         const m = try c.readMessage(d.gpa);
         defer d.gpa.free(m.data);
         if (m.opcode != .binary) return error.BadHandshake;
         const w = parseHandshake(m.data) catch |e| return e;
+        // A watchdog that fired has shut the socket, even if the WELCOME got in first.
+        try dog.finish(io);
         switch (w) {
             .reject => return error.Rejected,
             .welcome => |wl| {
@@ -180,6 +198,7 @@ pub const Data = struct {
         defer d.conn_mu.unlock(d.io);
         if (d.closing.load(.acquire)) return error.Canceled; // closed while connecting
         c.owns_stream = true;
+        c.max_message = wire.data_max_message;
         d.conn = c;
     }
 
@@ -214,7 +233,17 @@ pub const Data = struct {
     fn serve(d: *Data) Served {
         const c = d.conn.?;
         while (true) {
-            const m = c.readMessage(d.gpa) catch return .reconnect;
+            const m = c.readMessage(d.gpa) catch |e| switch (e) {
+                // The server sent what this protocol does not allow (a frame over the limit, a
+                // reserved bit, a ping flood): resuming would get the same again. End the stream.
+                error.TooLarge, error.Protocol, error.BadControl => {
+                    log.warn("data stream ended: {t}", .{e});
+                    return .{ .done = .failed };
+                },
+                error.OutOfMemory => return .{ .done = .failed },
+                // The connection dropped: resume.
+                else => return .reconnect,
+            };
             defer d.gpa.free(m.data);
             switch (m.opcode) {
                 .binary => {
@@ -240,18 +269,28 @@ pub const Data = struct {
         }
     }
 
-    /// Resume with the latest token and the exact count, retrying until the window passes.
+    /// Resume with the latest token and the exact count, retrying until the window passes. The
+    /// window counts from the first resume since `received` last moved, so a server that takes
+    /// every resume and drops it again without sending a byte cannot keep the stream resuming
+    /// forever; and resumes that bring nothing back off as failed tries do.
     fn tryResume(d: *Data) bool {
         d.conn_mu.lockUncancelable(d.io);
         const old = d.conn;
         d.conn = null;
         d.conn_mu.unlock(d.io);
         if (old) |c| c.deinit(d.gpa);
-        const window: u64 = if (d.resume_window_ms == 0) 60_000 else d.resume_window_ms;
-        var waited: u64 = 0;
-        var backoff: u64 = 50;
-        while (waited < window) {
+        const window: i64 = if (d.resume_window_ms == 0) 60_000 else d.resume_window_ms;
+        if (d.received != d.streak_received) {
+            d.streak_received = d.received;
+            d.streak_start_ms = Io.Clock.awake.now(d.io).toMilliseconds();
+            d.resume_backoff_ms = 0;
+        }
+        while (true) {
             if (d.closing.load(.acquire)) return false;
+            if (d.resume_backoff_ms > 0) d.io.sleep(.fromMilliseconds(@intCast(d.resume_backoff_ms)), .awake) catch return false;
+            if (d.closing.load(.acquire)) return false;
+            if (Io.Clock.awake.now(d.io).toMilliseconds() - d.streak_start_ms >= window) return false;
+            d.resume_backoff_ms = @min(@max(d.resume_backoff_ms * 2, 50), 1000);
             var r: [25]u8 = undefined;
             r[0] = 0x02;
             @memcpy(r[1..17], &d.token);
@@ -262,11 +301,7 @@ pub const Data = struct {
                 error.Canceled => return false,
                 else => {},
             }
-            d.io.sleep(.fromMilliseconds(@intCast(backoff)), .awake) catch return false;
-            waited += backoff;
-            backoff = @min(backoff * 2, 1000);
         }
-        return false;
     }
 };
 
@@ -581,4 +616,65 @@ test "data: close shuts a resume still in its handshake, and that is not an end"
     d.close();
     try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 5000);
     try testing.expectEqual(@as(?End, null), cap.ended());
+}
+
+test "data: a protocol or size error from the server ends the stream instead of resuming" {
+    const a = testing.allocator;
+    // A frame with a reserved bit set, and a frame header announcing more than the stream's limit.
+    var too_large: [10]u8 = .{ 0x82, 127, 0, 0, 0, 0, 0, 0, 0, 0 };
+    std.mem.writeInt(u64, too_large[2..10], wire.data_max_message + 1, .big);
+    for ([_][]const u8{ &.{ 0xc2, 0x00 }, &too_large }) |raw| {
+        const s = try Setup.init();
+        defer s.deinit();
+        var cap: Capture = .{ .gpa = a, .io = testing.io };
+        defer cap.deinit();
+        const d = try Data.openTerminal(a, testing.io, s.ctl, s.session_id, s.block_id, cap.sink());
+        defer d.close();
+        try cap.waitFor("\"type\":\"resize\"");
+        // Every connection has the stream's limit once its handshake is done.
+        try testing.expectEqual(wire.data_max_message, d.conn.?.max_message);
+        try s.f.injectRaw(s.block_id, raw);
+        try testing.expectEqual(End.failed, try cap.waitEnd());
+        try testing.expectEqual(@as(u32, 0), s.f.dataResumes());
+    }
+}
+
+test "data: a server that takes every resume and drops it again runs out of the resume window" {
+    const a = testing.allocator;
+    const s = try Setup.init();
+    defer s.deinit();
+    s.f.resume_window_ms = 400;
+    var cap: Capture = .{ .gpa = a, .io = testing.io };
+    defer cap.deinit();
+    const d = try Data.openTerminal(a, testing.io, s.ctl, s.session_id, s.block_id, cap.sink());
+    defer d.close();
+    try cap.waitFor("\"type\":\"resize\"");
+    {
+        s.f.mu.lockUncancelable(testing.io);
+        defer s.f.mu.unlock(testing.io);
+        s.f.drop_resumes = true;
+    }
+    s.f.dropDataConnections();
+    const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
+    try testing.expectEqual(End.restart_needed, try cap.waitEnd());
+    try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 2500);
+    // Each resume that brought nothing back waited longer than the one before.
+    const resumes = s.f.dataResumes();
+    try testing.expect(resumes >= 1 and resumes <= 8);
+}
+
+test "data: close sends a 1000 close frame that reaches the server" {
+    const a = testing.allocator;
+    const s = try Setup.init();
+    defer s.deinit();
+    var cap: Capture = .{ .gpa = a, .io = testing.io };
+    defer cap.deinit();
+    const d = try Data.openTerminal(a, testing.io, s.ctl, s.session_id, s.block_id, cap.sink());
+    try cap.waitFor("\"type\":\"resize\"");
+    d.close();
+    var codes: [8]u16 = undefined;
+    var tries: u32 = 0;
+    while (s.f.dataCloseCodes(&codes).len == 0 and tries < 400) : (tries += 1) try testing.io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expectEqualSlices(u16, &.{1000}, s.f.dataCloseCodes(&codes));
+    try testing.expectEqual(@as(?End, null), cap.ended()); // closing it ourselves is not an end
 }

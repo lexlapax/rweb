@@ -282,6 +282,15 @@ pub const Mirror = struct {
         return .{ .cols = m.term.cols, .rows = m.term.rows };
     }
 
+    /// Whether the program has bracketed paste on (DEC mode 2004), so a paste reaches it marked
+    /// as one rather than as typed lines. False before the snapshot.
+    pub fn bracketedPaste(m: *Mirror) bool {
+        m.mu.lockUncancelable(m.io);
+        defer m.mu.unlock(m.io);
+        if (!m.term_made) return false;
+        return m.term.modes.get(.bracketed_paste);
+    }
+
     pub fn getStatus(m: *Mirror) Status {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
@@ -294,6 +303,9 @@ pub const Mirror = struct {
     pub const RedrawOptions = struct {
         /// Include at most this many rows of scrollback above the visible screen; null for all.
         history_lines: ?u32 = null,
+        /// And at most this many cells of scrollback (rows times the columns at the time of the
+        /// redraw, read under the mirror's lock); null for no cap in cells.
+        history_cells: ?u64 = null,
     };
 
     /// A VT byte stream that recreates the mirror's state on a fresh terminal. Caller frees.
@@ -340,24 +352,32 @@ pub const Mirror = struct {
             if (m.term.screens.get(.primary)) |primary| {
                 var pf: ghostty_vt.formatter.ScreenFormatter = .init(primary, redraw_opts);
                 pf.extra = .all;
-                pf.content = .{ .selection = capSelection(primary, opts) };
+                pf.content = .{ .selection = capSelection(primary, opts, m.term.cols) };
                 try pf.format(w);
             }
         }
         var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, redraw_opts);
         f.extra = .all;
-        if (m.term.screens.active_key == .primary) f.content = .{ .selection = capSelection(m.term.screens.active, opts) };
+        if (m.term.screens.active_key == .primary) f.content = .{ .selection = capSelection(m.term.screens.active, opts, m.term.cols) };
         try f.format(w);
         try deliver(ctx, out.written());
     }
 
-    /// The part of `screen` to draw: the visible rows plus at most `history_lines` above them.
-    fn capSelection(screen: *ghostty_vt.Screen, opts: RedrawOptions) ?ghostty_vt.Selection {
-        const n = opts.history_lines orelse return null;
+    /// The part of `screen` to draw: the visible rows plus at most `history_lines` above them, and
+    /// at most `history_cells` cells of them at `cols` columns.
+    fn capSelection(screen: *ghostty_vt.Screen, opts: RedrawOptions, cols: u16) ?ghostty_vt.Selection {
+        const n = historyCap(opts, cols) orelse return null;
         const top = screen.pages.getTopLeft(.active);
         const start = top.up(n) orelse return null; // less history than the cap: everything
         const end = screen.pages.getBottomRight(.screen) orelse return null;
         return ghostty_vt.Selection.init(start, end, false);
+    }
+
+    /// The history rows `opts` allows at `cols` columns; null for no cap.
+    fn historyCap(opts: RedrawOptions, cols: u16) ?u32 {
+        const by_cells: ?u32 = if (opts.history_cells) |cells| @intCast(@min(cells / @max(cols, 1), std.math.maxInt(u32))) else null;
+        if (opts.history_lines) |lines| return if (by_cells) |c| @min(lines, c) else lines;
+        return by_cells;
     }
 
     /// Rows of scrollback above the visible screen on the primary screen.
@@ -377,9 +397,17 @@ pub const Mirror = struct {
     /// within them), and of that text at most `max_bytes` are kept (the end, cut at a line start).
     /// `truncated` says either cut something. Caller frees `text`.
     pub fn plainTextAll(m: *Mirror, gpa: Allocator, max_bytes: usize, max_rows: u32) !PlainAll {
+        return m.plainTextAllCells(gpa, max_bytes, max_rows, null);
+    }
+
+    /// As `plainTextAll`, also formatting at most `max_cells` cells: rows times the columns at
+    /// the time of the call, read under the mirror's lock (so a resize between asking for the
+    /// size and this call cannot make the cap wrong). Null for no cap in cells.
+    pub fn plainTextAllCells(m: *Mirror, gpa: Allocator, max_bytes: usize, max_rows_in: u32, max_cells: ?u64) !PlainAll {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return error.NotLive;
+        const max_rows: u32 = if (max_cells) |cells| @intCast(@min(max_rows_in, cells / @max(m.term.cols, 1))) else max_rows_in;
         const screen = m.term.screens.active;
         const rows_cut = screen.pages.total_rows > max_rows;
         if (max_rows == 0) return .{ .text = try gpa.alloc(u8, 0), .truncated = rows_cut };
@@ -1058,4 +1086,74 @@ fn waitText(m: *Mirror, needle: []const u8, want: bool) !void {
         if ((std.mem.indexOf(u8, text, needle) != null) == want) return;
     }
     return error.TimedOut;
+}
+
+test "mirror: bracketedPaste follows the program's mode 2004" {
+    const a = testing.allocator;
+    const m = try Mirror.init(a, testing.io, 1);
+    defer m.deinit();
+    try testing.expect(!m.bracketedPaste()); // no snapshot yet
+    const stream = try makeStream(a, 1, 20, 4, "");
+    defer a.free(stream);
+    try m.feed(stream);
+    try testing.expect(!m.bracketedPaste());
+    try m.feed("\x1b[?2004h");
+    try testing.expect(m.bracketedPaste());
+    try m.feed("prompt$ \x1b[?2004l");
+    try testing.expect(!m.bracketedPaste());
+    // A snapshot taken while it was on carries it.
+    const on = try makeStream(a, 2, 20, 4, "\x1b[?2004h$ ");
+    defer a.free(on);
+    const m2 = try Mirror.init(a, testing.io, 2);
+    defer m2.deinit();
+    try m2.feed(on);
+    try testing.expect(m2.bracketedPaste());
+}
+
+test "mirror: Copy text and redraw history can be capped in cells" {
+    const a = testing.allocator;
+    const stream = try makeStream(a, 1, 40, 5, "");
+    defer a.free(stream);
+    const m = try Mirror.init(a, testing.io, 1);
+    defer m.deinit();
+    try m.feed(stream);
+    var i: u32 = 0;
+    while (i < 300) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        try m.feed(try std.fmt.bufPrint(&buf, "line-{d:0>3}\r\n", .{i}));
+    }
+    // 400 cells at 40 columns: the last 10 rows, whatever the row cap.
+    const capped = try m.plainTextAllCells(a, 1 << 20, 100_000, 400);
+    defer a.free(capped.text);
+    try testing.expect(capped.truncated);
+    try testing.expect(std.mem.indexOf(u8, capped.text, "line-299") != null);
+    try testing.expect(std.mem.indexOf(u8, capped.text, "line-290") == null);
+    try testing.expect(std.mem.count(u8, capped.text, "\n") <= 10);
+    // The smaller of the two caps wins.
+    const by_rows = try m.plainTextAllCells(a, 1 << 20, 3, 400);
+    defer a.free(by_rows.text);
+    try testing.expect(std.mem.count(u8, by_rows.text, "line-") <= 3);
+    // No cap in cells: as plainTextAll.
+    const plain = try m.plainTextAll(a, 1 << 20, 100_000);
+    defer a.free(plain.text);
+    const same = try m.plainTextAllCells(a, 1 << 20, 100_000, null);
+    defer a.free(same.text);
+    try testing.expectEqualStrings(plain.text, same.text);
+    // Zero cells: nothing.
+    const none = try m.plainTextAllCells(a, 1 << 20, 100_000, 0);
+    defer a.free(none.text);
+    try testing.expectEqual(@as(usize, 0), none.text.len);
+
+    // A redraw's history: 20 rows' worth of cells at 40 columns, and the row cap when smaller.
+    var alt = false;
+    const r = try m.redrawWith(a, .{ .history_cells = 20 * 40 });
+    defer a.free(r);
+    const text = try replay(a, r, 40, 5, &alt);
+    defer a.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "line-299") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "line-280") != null); // within 20 + 5 rows
+    try testing.expect(std.mem.indexOf(u8, text, "line-200") == null);
+    try testing.expectEqual(@as(?u32, 5), Mirror.historyCap(.{ .history_lines = 5, .history_cells = 20 * 40 }, 40));
+    try testing.expectEqual(@as(?u32, 20), Mirror.historyCap(.{ .history_lines = 50, .history_cells = 20 * 40 }, 40));
+    try testing.expectEqual(@as(?u32, null), Mirror.historyCap(.{}, 40));
 }

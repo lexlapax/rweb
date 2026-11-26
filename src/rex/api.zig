@@ -62,11 +62,17 @@ pub const shell_flavor = "com.superlogical.terminal.shell";
 
 pub const OwnMode = enum { take, request };
 
+/// How long the calls a browser waits on interactively (directory listings, the start of a
+/// download, terminal info) wait for Rex, instead of the connection's 30 seconds.
+pub const quick_call_timeout_ms: u32 = 5_000;
+
 pub const Api = struct {
     gpa: Allocator,
     ctl: *Control,
     /// Code and message of the last `RexError`, for logs and the browser. Owned by `gpa`.
     last_error: ?[]u8 = null,
+    /// The timeout of `listDir`, `downloadBegin` and `termInfo` (each call `termInfo` makes).
+    quick_timeout_ms: u32 = quick_call_timeout_ms,
 
     pub fn init(gpa: Allocator, ctl: *Control) Api {
         return .{ .gpa = gpa, .ctl = ctl };
@@ -84,7 +90,12 @@ pub const Api = struct {
 
     /// Call and, on success, copy the payload into an arena so the response can be freed.
     fn run(a: *Api, method: []const u8, body: ?[]const u8) Error!Owned(std.json.Value) {
-        var r = a.ctl.call(method, body) catch |e| switch (e) {
+        return a.runTimeout(method, body, a.ctl.opts.call_timeout_ms);
+    }
+
+    /// As `run`, waiting at most `timeout_ms` for the answer.
+    fn runTimeout(a: *Api, method: []const u8, body: ?[]const u8, timeout_ms: u32) Error!Owned(std.json.Value) {
+        var r = a.ctl.callTimeout(method, body, timeout_ms) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => {
@@ -332,7 +343,7 @@ pub const Api = struct {
         defer a.gpa.free(rest);
         const body = try a.blockBody(sid, bid, rest);
         defer a.gpa.free(body);
-        var res = try a.run("com.superlogical.terminal.download_begin", body);
+        var res = try a.runTimeout("com.superlogical.terminal.download_begin", body, a.quick_timeout_ms);
         defer res.deinit();
         var arena = std.heap.ArenaAllocator.init(a.gpa);
         errdefer arena.deinit();
@@ -369,7 +380,7 @@ pub const Api = struct {
         defer a.gpa.free(rest);
         const body = try a.blockBody(sid, bid, rest);
         defer a.gpa.free(body);
-        var res = try a.run("com.superlogical.terminal.list_dir", body);
+        var res = try a.runTimeout("com.superlogical.terminal.list_dir", body, a.quick_timeout_ms);
         defer res.deinit();
         var arena = std.heap.ArenaAllocator.init(a.gpa);
         errdefer arena.deinit();
@@ -421,6 +432,8 @@ pub const Api = struct {
     /// listening ports. Each piece is optional; a piece Rex can't give is left out.
     pub const TermInfo = struct { state: ?[]const u8 = null, status_msg: ?[]const u8 = null, progress: ?i64 = null, title: ?[]const u8 = null, pwd: ?[]const u8 = null, program: ?[]const u8 = null, exit_code: ?i64 = null, ports: []const u16 = &.{} };
 
+    /// Every piece is a separate call, each with the quick timeout; a piece Rex refuses or does
+    /// not answer in time is left out. Cancellation and running out of memory end it.
     pub fn termInfo(a: *Api, sid: []const u8, bid: []const u8) Error!Owned(TermInfo) {
         var arena = std.heap.ArenaAllocator.init(a.gpa);
         errdefer arena.deinit();
@@ -428,17 +441,17 @@ pub const Api = struct {
         var info: TermInfo = .{};
         const body = try a.blockBody(sid, bid, ",\"args\":{}");
         defer a.gpa.free(body);
-        if (a.run("com.superlogical.terminal.title", body)) |r| {
+        if (a.runTimeout("com.superlogical.terminal.title", body, a.quick_timeout_ms)) |r| {
             var res = r;
             defer res.deinit();
             info.title = try dupeOpt(al, optStr(res.value, "title"));
-        } else |e| if (e == error.OutOfMemory) return e;
-        if (a.run("com.superlogical.terminal.pwd", body)) |r| {
+        } else |e| try passThrough(e);
+        if (a.runTimeout("com.superlogical.terminal.pwd", body, a.quick_timeout_ms)) |r| {
             var res = r;
             defer res.deinit();
             info.pwd = try dupeOpt(al, optStr(res.value, "pwd"));
-        } else |e| if (e == error.OutOfMemory) return e;
-        if (a.run("com.superlogical.terminal.process", body)) |r| {
+        } else |e| try passThrough(e);
+        if (a.runTimeout("com.superlogical.terminal.process", body, a.quick_timeout_ms)) |r| {
             var res = r;
             defer res.deinit();
             const v = res.value;
@@ -452,8 +465,8 @@ pub const Api = struct {
                     if (info.pwd == null) info.pwd = try dupeOpt(al, optStr(fg, "cwd"));
                 };
             }
-        } else |e| if (e == error.OutOfMemory) return e;
-        if (a.run("com.superlogical.terminal.program_status", body)) |r| {
+        } else |e| try passThrough(e);
+        if (a.runTimeout("com.superlogical.terminal.program_status", body, a.quick_timeout_ms)) |r| {
             var res = r;
             defer res.deinit();
             // The most urgent record wins: error, then blocked, then working, then done.
@@ -468,8 +481,8 @@ pub const Api = struct {
                     info.progress = if (rec.object.get("progress")) |pg| (if (pg == .integer) pg.integer else null) else null;
                 }
             };
-        } else |e| if (e == error.OutOfMemory) return e;
-        if (a.run("com.superlogical.terminal.ports", body)) |r| {
+        } else |e| try passThrough(e);
+        if (a.runTimeout("com.superlogical.terminal.ports", body, a.quick_timeout_ms)) |r| {
             var res = r;
             defer res.deinit();
             if (res.value == .object) if (res.value.object.get("ports")) |ps| if (ps == .array) {
@@ -484,7 +497,7 @@ pub const Api = struct {
                 }
                 info.ports = try list.toOwnedSlice(al);
             };
-        } else |e| if (e == error.OutOfMemory) return e;
+        } else |e| try passThrough(e);
         return .{ .arena = arena, .value = info };
     }
 
@@ -524,6 +537,14 @@ pub const Api = struct {
         return .{ .arena = arena, .value = value };
     }
 };
+
+/// For a call whose failure is not fatal: return the errors that must end the caller anyway.
+fn passThrough(e: Error) Error!void {
+    switch (e) {
+        error.OutOfMemory, error.Canceled => return e,
+        error.RexError, error.BadShape => {},
+    }
+}
 
 // ---- JSON helpers: strict about shape, so a Rex change fails loudly here ----
 
@@ -585,6 +606,7 @@ fn cloneValue(al: Allocator, v: std.json.Value, depth: u32) Error!std.json.Value
 
 const testing = std.testing;
 const fake = @import("fake.zig");
+const Io = std.Io;
 
 test "api: sessions, create, rename, attach and destroy against the fake" {
     const a = testing.allocator;
@@ -754,4 +776,152 @@ test "api: a call that gets no answer says why, and does not keep an older messa
     try testing.expect(std.mem.indexOf(u8, api.last_error.?, "session_not_found") != null);
     try testing.expectError(error.RexError, api.run("rweb.test.no_answer", null));
     try testing.expectEqualStrings("Timeout", api.last_error.?);
+}
+
+/// A fake with one attached session, and an Api on a control connection to it.
+const ApiRig = struct {
+    f: *fake.Fake,
+    ctl: *Control,
+    api: Api,
+    sid: []const u8,
+    bid: []const u8,
+
+    fn init(a: Allocator) !*ApiRig {
+        const r = try a.create(ApiRig);
+        errdefer a.destroy(r);
+        const f = try fake.Fake.start(a, testing.io);
+        errdefer f.deinit();
+        const ctl = try Control.open(a, testing.io, .{ .socket_path = f.path });
+        errdefer ctl.close();
+        const made = try f.createSession("rweb-test-api-rig");
+        r.* = .{ .f = f, .ctl = ctl, .api = Api.init(a, ctl), .sid = made.session_id, .bid = made.block_id };
+        try r.api.attach(r.sid);
+        return r;
+    }
+
+    fn deinit(r: *ApiRig, a: Allocator) void {
+        r.api.deinit();
+        r.ctl.close();
+        r.f.deinit();
+        a.destroy(r);
+    }
+
+    fn waitPending(r: *ApiRig) !void {
+        var tries: u32 = 0;
+        while (tries < 400) : (tries += 1) {
+            r.ctl.mu.lockUncancelable(testing.io);
+            const waiting = r.ctl.pending.count() == 1;
+            r.ctl.mu.unlock(testing.io);
+            if (waiting) return;
+            try testing.io.sleep(.fromMilliseconds(5), .awake);
+        }
+        return error.TimedOut;
+    }
+};
+
+test "api: cancellation passes through termInfo instead of being taken for a missing piece" {
+    const a = testing.allocator;
+    const r = try ApiRig.init(a);
+    defer r.deinit(a);
+    r.f.silent_method = "com.superlogical.terminal.title";
+    r.api.quick_timeout_ms = 60_000;
+    const T = struct {
+        fn run(rr: *ApiRig) Error!void {
+            var info = try rr.api.termInfo(rr.sid, rr.bid);
+            info.deinit();
+        }
+    };
+    var fut = try testing.io.concurrent(T.run, .{r});
+    try r.waitPending();
+    try testing.expectError(error.Canceled, fut.cancel(testing.io));
+}
+
+test "api: listings, downloads and terminal info wait for Rex only as long as the quick timeout" {
+    const a = testing.allocator;
+    const r = try ApiRig.init(a);
+    defer r.deinit(a);
+    try testing.expectEqual(@as(u32, 5_000), r.api.quick_timeout_ms);
+    try testing.expectEqual(@as(u32, 30_000), r.ctl.opts.call_timeout_ms);
+    r.api.quick_timeout_ms = 200;
+    for ([_][]const u8{ "com.superlogical.terminal.list_dir", "com.superlogical.terminal.download_begin", "com.superlogical.terminal.pwd" }) |method| {
+        r.f.silent_method = method;
+        const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
+        if (std.mem.endsWith(u8, method, "list_dir")) {
+            try testing.expectError(error.RexError, r.api.listDir(r.sid, r.bid, ""));
+            try testing.expectEqualStrings("Timeout", r.api.last_error.?);
+        } else if (std.mem.endsWith(u8, method, "download_begin")) {
+            try testing.expectError(error.RexError, r.api.downloadBegin(r.sid, r.bid, "download:x", "/nope"));
+            try testing.expectEqualStrings("Timeout", r.api.last_error.?);
+        } else {
+            var info = try r.api.termInfo(r.sid, r.bid); // a piece that timed out is left out
+            defer info.deinit();
+            try testing.expect(info.value.pwd == null);
+        }
+        try testing.expect(Io.Clock.awake.now(testing.io).toMilliseconds() - t0 < 3000);
+    }
+}
+
+test "fake: downloads and listings are served only from the fake's own folder" {
+    const a = testing.allocator;
+    const io = testing.io;
+    const r = try ApiRig.init(a);
+    defer r.deinit(a);
+    const root = r.f.files_root.?;
+    // A file inside, a folder inside, and a file outside.
+    const inside = try std.fmt.allocPrint(a, "{s}/in.txt", .{root});
+    defer a.free(inside);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = inside, .data = "inside" });
+    const sub = try std.fmt.allocPrint(a, "{s}/sub", .{root});
+    defer a.free(sub);
+    try Io.Dir.cwd().createDirPath(io, sub);
+    var rnd: [4]u8 = undefined;
+    io.random(&rnd);
+    var ob: [64]u8 = undefined;
+    const outside_dir = try std.fmt.bufPrint(&ob, "/tmp/rweb-test-outside-{x}", .{rnd});
+    try Io.Dir.cwd().createDirPath(io, outside_dir);
+    defer Io.Dir.cwd().deleteTree(io, outside_dir) catch {};
+    const outside = try std.fmt.allocPrint(a, "{s}/out.txt", .{outside_dir});
+    defer a.free(outside);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = outside, .data = "outside" });
+    // A link inside that points outside, and a path that climbs out.
+    const link = try std.fmt.allocPrint(a, "{s}/link.txt", .{root});
+    defer a.free(link);
+    try Io.Dir.cwd().symLink(io, outside, link, .{});
+    const climb = try std.fmt.allocPrint(a, "{s}/sub/../../{s}/out.txt", .{ root, std.fs.path.basename(outside_dir) });
+    defer a.free(climb);
+
+    {
+        var t = try r.api.downloadBegin(r.sid, r.bid, "download:1", inside);
+        defer t.deinit();
+        try testing.expectEqual(@as(u64, 6), t.value.size);
+        var st = try @import("transfer.zig").Stream.open(a, io, r.f.path, t.value.ticket);
+        defer st.deinit();
+        try testing.expectEqual(wire.data_max_message, st.conn.max_message); // the stream's limit, after its handshake
+        const chunk = (try st.next()).?;
+        defer a.free(chunk);
+        try testing.expectEqualStrings("inside", chunk);
+    }
+    for ([_][]const u8{ outside, link, climb, "/etc/hosts", "", root }) |p| {
+        try testing.expectError(error.RexError, r.api.downloadBegin(r.sid, r.bid, "download:2", p));
+    }
+    {
+        var d = try r.api.listDir(r.sid, r.bid, ""); // the terminal's folder: the root
+        defer d.deinit();
+        try testing.expectEqualStrings("ok", d.value.status);
+        try testing.expectEqual(@as(usize, 3), d.value.entries.len);
+        var s2 = try r.api.listDir(r.sid, r.bid, sub);
+        defer s2.deinit();
+        try testing.expectEqualStrings("ok", s2.value.status);
+    }
+    for ([_][]const u8{ outside_dir, "/", "/tmp", climb }) |p| {
+        var d = try r.api.listDir(r.sid, r.bid, p);
+        defer d.deinit();
+        try testing.expectEqualStrings("missing", d.value.status);
+    }
+    // No folder at all: nothing is served.
+    try r.f.setFilesRoot(null);
+    try testing.expectError(error.RexError, r.api.downloadBegin(r.sid, r.bid, "download:3", inside));
+    var none = try r.api.listDir(r.sid, r.bid, "");
+    defer none.deinit();
+    try testing.expectEqualStrings("missing", none.value.status);
 }

@@ -166,9 +166,62 @@
   function cleanPaste(text) {
     return String(text).replace(/[\x1b\x80-\x9f]/g, '');
   }
-  // `beforeinput` and `input` types that put text in from outside: a paste or a drop.
-  const PASTE_INPUTS = ['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop'];
+  // `beforeinput` and `input` types that put text in from outside: a paste, a drop, a yank (Ctrl+Y
+  // in a macOS text field) or a replacement the browser or keyboard chose (spelling suggestions).
+  const PASTE_INPUTS = ['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop', 'insertFromYank', 'insertReplacementText'];
   function isPasteInput(inputType) { return PASTE_INPUTS.includes(inputType); }
+
+  // Text a keyboard commits in one go (a composition, a word, a phone keyboard's clipboard chip) is
+  // typed only when it looks like typing: a short word with no line end, ESC or C1 control. Anything
+  // else goes the paste way (cleaned, bracketed when the program asked, confirmed when it has lines),
+  // so a clipboard chip cannot type commands. A lone ESC or C1 cannot come from a keyboard: it goes the
+  // paste way too, where it is dropped. A lone line end is Enter and stays typed.
+  const COMMIT_TYPE_MAX = 16;
+  function commitIsPaste(text) {
+    const s = String(text), n = Array.from(s).length;
+    if (n === 0) return false;
+    if (n > COMMIT_TYPE_MAX) return true;
+    if (/[\x1b\x80-\x9f]/.test(s)) return true;
+    return n > 1 && /[\r\n]/.test(s);
+  }
+
+  // Bytes of `text` in UTF-8 (a lone surrogate counts as U+FFFD, as a browser sends it).
+  function utf8Length(text) {
+    let n = 0;
+    for (const ch of String(text)) {
+      const c = ch.codePointAt(0);
+      n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    }
+    return n;
+  }
+  // The bridge takes at most PASTE_MAX_BYTES of text in one paste, in a message of at most
+  // MESSAGE_MAX_BYTES; a larger message would close the connection. Returns the notice to show
+  // instead of sending, or null when the paste fits.
+  const PASTE_MAX_BYTES = 32 * 1024, MESSAGE_MAX_BYTES = 64 * 1024;
+  function pasteRefusal(d) {
+    const bytes = utf8Length(d);
+    if (bytes > PASTE_MAX_BYTES) return `Too long to paste: ${Math.ceil(bytes / 1024)} KB; the limit is ${PASTE_MAX_BYTES / 1024} KB`;
+    if (utf8Length(JSON.stringify({t: 'paste', d: String(d), force: true})) > MESSAGE_MAX_BYTES)
+      return `Too long to paste: its control characters make it more than ${MESSAGE_MAX_BYTES / 1024} KB to send`;
+    return null;
+  }
+
+  // What the "paste several lines?" question shows: the first `max` characters, how many lines the
+  // whole text has, and whether it was cut.
+  const PREVIEW_MAX_CHARS = 2000;
+  function pastePreview(text, max) {
+    const s = String(text), chars = Array.from(s), limit = max === undefined ? PREVIEW_MAX_CHARS : max;
+    const cut = chars.length > limit;
+    const parts = s.split(/\r\n|\r|\n/);                  // a line end at the very end starts no new line
+    return {shown: cut ? chars.slice(0, limit).join('') : s, lines: parts.length - (parts.length > 1 && parts[parts.length - 1] === '' ? 1 : 0), chars: chars.length, cut};
+  }
+
+  // Text a program put on the terminal's clipboard, made safe to show and copy: no C0 controls but
+  // tab and line feed, no DEL, ESC or C1 controls. A program chose this text; it must not carry
+  // anything that would act when pasted somewhere else.
+  function cleanClip(text) {
+    return String(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+  }
 
   // The Copy view shows at most COPY_MAX_LINES rows (one element each), the last ones. Returns the
   // lines to show, how many there were, and the note to show above them ('' when nothing is left
@@ -211,7 +264,7 @@
     return Math.max(floor === undefined ? 0.35 : floor, Math.min(1, stageWidth / screenWidth));
   }
 
-  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

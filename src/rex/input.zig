@@ -254,12 +254,14 @@ pub const Input = struct {
     }
 
     /// Take the next item to send. Caller holds `mu`; the queue is not empty. Text longer than
-    /// one write may carry is cut at a character boundary, and the rest stays at the head.
+    /// one write may carry is cut at a character boundary, before an escape sequence the write
+    /// would end inside (so a program never sees half a key or mouse report on its own), and the
+    /// rest stays at the head.
     fn takeHead(q: *Input) Item {
         const head = &q.queue.items[0];
         if (head.* == .text) {
             const t = &head.text;
-            const n = utf8Cut(t.items, q.maxWriteBytes());
+            const n = escCut(t.items, utf8Cut(t.items, q.maxWriteBytes()));
             if (n < t.items.len) cut: {
                 var part: std.ArrayList(u8) = .empty;
                 // Out of memory: send it whole; Rex refuses it if it is too large.
@@ -313,6 +315,64 @@ pub const Input = struct {
         return true;
     }
 };
+
+const EscState = enum { ground, esc, csi, string, string_esc };
+
+/// The state after `ESC b`.
+fn afterEsc(b: u8) EscState {
+    return switch (b) {
+        '[' => .csi,
+        ']', 'P', '_', '^', 'X' => .string, // OSC, DCS, APC, PM, SOS
+        0x20...0x2f => .esc, // intermediates, as in ESC ( B
+        else => if (b >= 0x30 and b <= 0x7e) .ground else .esc, // a C0 control inside is acted on, not an end
+    };
+}
+
+/// Where to end a write of `text[0..n]` so it does not stop inside an escape sequence: before
+/// the sequence that `text[0..n]` ends inside, if any, as long as something is left (a sequence
+/// longer than the whole write is sent as it is). An ESC is ASCII, so the cut stays on a
+/// character boundary.
+fn escCut(text: []const u8, n: usize) usize {
+    if (n >= text.len) return n; // all of it: nothing follows to complete a sequence
+    var state: EscState = .ground;
+    var start: usize = 0; // where the sequence being read began
+    for (text[0..n], 0..) |b, i| {
+        // CAN and SUB cancel any sequence; ESC starts a new one (in a string, maybe its end).
+        if (b == 0x18 or b == 0x1a) {
+            state = .ground;
+            continue;
+        }
+        switch (state) {
+            .ground, .esc, .csi => if (b == 0x1b) {
+                state = .esc;
+                start = i;
+                continue;
+            },
+            .string => if (b == 0x1b) {
+                state = .string_esc;
+                continue;
+            },
+            .string_esc => {},
+        }
+        state = switch (state) {
+            .ground => .ground,
+            .esc => afterEsc(b),
+            .csi => if (b >= 0x40 and b <= 0x7e) .ground else .csi,
+            .string => if (b == 0x07) .ground else .string, // BEL ends an OSC
+            .string_esc => if (b == '\\') .ground else blk: {
+                // The string ended at that ESC, which starts a new sequence with `b`.
+                start = i - 1;
+                if (b == 0x1b) {
+                    start = i;
+                    break :blk .esc;
+                }
+                break :blk afterEsc(b);
+            },
+        };
+    }
+    if (state == .ground or start == 0) return n;
+    return start;
+}
 
 /// The longest prefix of UTF-8 `text` of at most `max` bytes that ends at a character boundary,
 /// but at least one whole character.
@@ -602,6 +662,65 @@ test "input: a coalesced write is cut so each request fits the message limit" {
         const p = try std.json.parseFromSlice(std.json.Value, a, body, .{});
         defer p.deinit();
         try joined.appendSlice(a, p.value.object.get("args").?.object.get("data").?.string);
+    }
+    try testing.expectEqualStrings(text.items, joined.items);
+}
+
+test "input: escCut ends a write before an escape sequence it would split" {
+    const t = testing;
+    const more = "...."; // something follows each window, so the cut matters
+    const Case = struct { text: []const u8, n: usize, want: usize };
+    for ([_]Case{
+        .{ .text = "abc\x1b[12;3" ++ more, .n = 7, .want = 3 }, // inside a CSI
+        .{ .text = "\x1b[1mab" ++ more, .n = 4, .want = 4 }, // a whole CSI
+        .{ .text = "ab\x1b" ++ more, .n = 3, .want = 2 }, // a lone ESC at the end
+        .{ .text = "ab\x1b]0;title\x07cd" ++ more, .n = 8, .want = 2 }, // inside an OSC
+        .{ .text = "ab\x1b]0;title\x07cd" ++ more, .n = 12, .want = 12 }, // after its BEL
+        .{ .text = "ab\x1b]0;t\x1b\\cd" ++ more, .n = 8, .want = 2 }, // between an OSC and its ST's backslash
+        .{ .text = "ab\x1b]0;t\x1b\\cd" ++ more, .n = 9, .want = 9 }, // after ST
+        .{ .text = "a\x1b(B" ++ more, .n = 3, .want = 1 }, // ESC ( B, cut after the intermediate
+        .{ .text = "a\x1b(B" ++ more, .n = 4, .want = 4 },
+        .{ .text = "a\x1b[1\x18b" ++ more, .n = 5, .want = 5 }, // CAN cancels the sequence
+        .{ .text = "\x1b[1;2;3;4;5" ++ more, .n = 6, .want = 6 }, // a sequence longer than the write
+        .{ .text = "x\x1b[<0;12;34M\x1b[<0;12" ++ more, .n = 18, .want = 12 }, // mouse reports
+        .{ .text = "abc", .n = 3, .want = 3 },
+    }) |cs| try t.expectEqual(cs.want, escCut(cs.text, cs.n));
+}
+
+test "input: a cut coalesced write never splits an escape sequence" {
+    const a = testing.allocator;
+    var b: Bodies = .{ .gpa = a, .limit = 2048 };
+    defer b.deinit();
+    const q = try Input.open(a, testing.io, b.sender(), "session:1", "block:1");
+    defer q.close();
+    // Mouse reports, colour sequences, titles and text, with every token boundary recorded.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    var boundaries: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    defer boundaries.deinit(a);
+    var prng = std.Random.DefaultPrng.init(11);
+    const rnd = prng.random();
+    try boundaries.put(a, 0, {});
+    while (text.items.len < 20_000) {
+        switch (rnd.uintLessThan(u8, 5)) {
+            0 => try text.print(a, "\x1b[<{d};{d};{d}M", .{ rnd.uintLessThan(u8, 64), rnd.uintLessThan(u16, 500), rnd.uintLessThan(u16, 200) }),
+            1 => try text.print(a, "\x1b[{d};{d}m", .{ rnd.uintLessThan(u8, 108), rnd.uintLessThan(u8, 50) }),
+            2 => try text.print(a, "\x1b]2;title {d}\x1b\\", .{rnd.int(u16)}),
+            3 => try text.appendSlice(a, "\xc3\xa9"),
+            else => try text.append(a, 'a' + rnd.uintLessThan(u8, 26)),
+        }
+        try boundaries.put(a, text.items.len, {});
+    }
+    try q.writeText(text.items);
+    try q.flush(5000);
+    try testing.expect(b.bodies.items.len > 1);
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(a);
+    for (b.bodies.items) |body| {
+        const p = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+        defer p.deinit();
+        try joined.appendSlice(a, p.value.object.get("args").?.object.get("data").?.string);
+        try testing.expect(boundaries.contains(joined.items.len)); // every write ends between tokens
     }
     try testing.expectEqualStrings(text.items, joined.items);
 }

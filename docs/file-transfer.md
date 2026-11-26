@@ -10,8 +10,9 @@ Status: built and tested on desktop-mac, 2026-11-23. **Off unless the owner star
   `/path` or `~/path` plus Enter) starting at the terminal's own folder. Tapping a file starts an ordinary
   browser download.
 - **Upload.** ⋯ menu, "Upload files…": the phone's file chooser (several files, one after another, with
-  progress). Each file is saved in one folder the owner named, and its quoted path is pasted into the
-  terminal (no Enter), with a trailing space so several uploads paste as separate words.
+  progress). Each file is saved in one folder the owner named, and its quoted real path (links resolved
+  when rweb started) is pasted into the terminal (no Enter), with a trailing space so several uploads paste
+  as separate words.
 - **Limits.** One transfer carries at most `--max-transfer-mb` (default 256) either way; at most 4 run at
   once and 16 wait.
 
@@ -50,7 +51,8 @@ into requesting**:
 | Filling the disk or memory | Size announced up front and checked against the limit and against `Content-Length`; a download aborts past the limit; uploads stream in 64 KiB pieces; an incomplete or mismatching upload is deleted. 4 running, 16 waiting; a transfer takes a running slot before its token is used, so a busy bridge does not waste a token. |
 | A transfer that stalls | No bytes for 30 seconds, either way, and the connection is cut (a partial upload is deleted), so a stuck phone cannot hold a running slot. |
 | A read-only viewer | Refused at the first step. |
-| Many tokens held open | Capped at 16; expired ones are swept. |
+| Many tokens held open | Capped at 16, and at 4 per browser so one page cannot block the others; expired ones are swept. A download Rex has begun but nobody fetched ends when Rex's own ticket expires (Rex has no call to cancel it). |
+| Who sees what moved | The bridge logs each transfer with its file name and size: that is the owner's record. On Linux the user journal can be read by the `adm`, `systemd-journal` and `wheel` groups. |
 
 ## What was measured about Rex (preview.21, API revision 18)
 

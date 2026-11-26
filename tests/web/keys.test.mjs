@@ -197,7 +197,7 @@ test('a paste loses ESC and the C1 controls, so it cannot end itself early (W1)'
 });
 
 test('paste and drop input types are pastes; typing is not', () => {
-  for (const t of ['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop']) assert.ok(K.isPasteInput(t), t);
+  for (const t of ['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop', 'insertFromYank', 'insertReplacementText']) assert.ok(K.isPasteInput(t), t);
   for (const t of ['insertText', 'insertCompositionText', 'deleteContentBackward', 'insertLineBreak', undefined, '']) assert.ok(!K.isPasteInput(t), String(t));
 });
 
@@ -232,4 +232,52 @@ test('?dbg=1 does nothing unless the bridge allows input diagnostics (W2)', () =
   assert.equal(K.debugOn(true, {t: 'mode', debug: false}), false);
   assert.equal(K.debugOn(false, {t: 'mode', debug: true}), false);
   assert.equal(K.debugOn(true, null), false);
+});
+
+test('committed text is typed only when it looks like typing (P2)', () => {
+  // Single characters and short words stay typed, including a lone Enter.
+  for (const t of ['a', 'é', '\u{1f600}', 'hello ', 'git', '\r', '\n', '1234567890123456', '\u{1f600}'.repeat(16)]) assert.equal(K.commitIsPaste(t), false, JSON.stringify(t));
+  assert.equal(K.commitIsPaste(''), false);
+  // A line end with anything else, ESC or C1 anywhere, or longer than 16 characters goes the paste way.
+  for (const t of ['ls\r', 'a\nb', '\r\n', 'curl x|sh\n', '\x1b', '\x1b[A', 'x\x9b', '\x9b', '\x85', '12345678901234567', '\u{1f600}'.repeat(17)])
+    assert.equal(K.commitIsPaste(t), true, JSON.stringify(t));
+  assert.equal(K.COMMIT_TYPE_MAX, 16);
+});
+
+test('a paste over 32 KB is refused before it is sent (P8)', () => {
+  assert.equal(K.utf8Length('abc'), 3);
+  assert.equal(K.utf8Length('é'), 2);
+  assert.equal(K.utf8Length('✓'), 3);
+  assert.equal(K.utf8Length('\u{1f600}'), 4);
+  assert.equal(K.utf8Length('\ud800'), 3);                      // a lone surrogate is sent as U+FFFD
+  assert.equal(K.pasteRefusal('x'.repeat(32 * 1024)), null);
+  assert.equal(K.pasteRefusal('x'.repeat(32 * 1024 + 1)), 'Too long to paste: 33 KB; the limit is 32 KB');
+  assert.equal(K.pasteRefusal('é'.repeat(20000)), 'Too long to paste: 40 KB; the limit is 32 KB');
+  assert.equal(K.pasteRefusal('ls -la\nexit\n'), null);
+  // Within 32 KB of text but over the 64 KB message once its control characters are escaped.
+  assert.match(K.pasteRefusal('\x01'.repeat(30000)), /^Too long to paste: its control characters/);
+});
+
+test('the multi-line paste question shows the first 2,000 characters and the line count (P5)', () => {
+  const short = K.pastePreview('echo a\necho b\n');
+  assert.deepEqual(short, {shown: 'echo a\necho b\n', lines: 2, chars: 14, cut: false});
+  assert.equal(K.pastePreview('a\r\nb\rc').lines, 3);
+  assert.equal(K.pastePreview('one').lines, 1);
+  assert.equal(K.pastePreview('\n').lines, 1);
+  const long = Array.from({length: 1000}, (_, i) => 'line ' + i).join('\n');
+  const v = K.pastePreview(long);
+  assert.equal(K.PREVIEW_MAX_CHARS, 2000);
+  assert.equal(v.cut, true); assert.equal(Array.from(v.shown).length, 2000); assert.ok(long.startsWith(v.shown));
+  assert.equal(v.lines, 1000); assert.equal(v.chars, long.length);
+  // Code points, not UTF-16 units: an emoji is not cut in half.
+  assert.equal(K.pastePreview('\u{1f600}'.repeat(3), 2).shown, '\u{1f600}\u{1f600}');
+});
+
+test('program-set clipboard text loses control characters but keeps tabs and lines (P7)', () => {
+  assert.equal(K.cleanClip('a\tb\nc'), 'a\tb\nc');
+  assert.equal(K.cleanClip('line\r\nnext'), 'line\nnext');
+  assert.equal(K.cleanClip('x\x1b[201~rm -rf ~\x07'), 'x[201~rm -rf ~');
+  assert.equal(K.cleanClip('\x00\x01\x08\x0b\x0c\x1f\x7f\x80\x9b\x9fok'), 'ok');
+  // Letters just past C1 stay.
+  assert.equal(K.cleanClip('é\u00a0ü ✓ \u{1f600}'), 'é\u00a0ü ✓ \u{1f600}');
 });

@@ -68,8 +68,13 @@ Do this once per tailnet, then once per machine.
    valid certificate.
 3. **Linux only:** Tailscale 1.94 or newer, which can forward to a unix socket (setting that up needs
    root). Check with `tailscale version`.
-4. **macOS only:** make sure the `tailscale` command works in a terminal (the app's command-line tool).
-   rweb runs it to learn your login and the machine's own addresses.
+4. **Where rweb finds `tailscale`.** rweb runs it to learn your login and the machine's own addresses,
+   from fixed places only, never through `PATH`: on macOS the app's own program
+   (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`), then `/usr/local/bin/tailscale` and
+   `/opt/homebrew/bin/tailscale`; on Linux `/usr/bin/tailscale`, `/usr/local/bin/tailscale` and
+   `/usr/sbin/tailscale`. Elsewhere, pass `--tailscale /absolute/path`. The program and every folder above
+   it must be root's or yours, so another account cannot swap it (see "Files and folders rweb checks" in
+   section 12).
 5. **Check:** `tailscale status` on the Rex machine lists your phone or laptop, and both show the same
    user.
 
@@ -150,9 +155,6 @@ As a LaunchAgent, `~/Library/LaunchAgents/local.rweb.plist` (replace `YOU` with 
 <plist version="1.0">
 <dict>
   <key>Label</key><string>local.rweb</string>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-  </dict>
   <key>ProgramArguments</key><array>
     <string>/Users/YOU/.local/bin/rweb</string>
     <string>--listen-tcp</string><string>7695</string>
@@ -174,8 +176,8 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.rweb.plist
 tailscale serve --bg --https=12443 "http://127.0.0.1:7695/$(cat ~/.config/rweb/backend-secret)"
 ```
 
-`PATH` must reach the `tailscale` command. A LaunchAgent starts when you log in, which is when Rex.app
-runs; with FileVault on, nothing of yours runs until you have unlocked the disk after a restart.
+rweb does not need `PATH` (it finds `tailscale` in fixed places, section 4). A LaunchAgent starts when
+you log in, which is when Rex.app runs; with FileVault on, nothing of yours runs until you have unlocked the disk after a restart.
 
 Then open `https://<machine>.<tailnet>.ts.net:12443/` on your phone or laptop. Open it from **another
 device**: a request from the Rex machine itself is refused, because any program there could make it.
@@ -260,6 +262,12 @@ machine are not visible through another machine's rweb.
   Text copied in the terminal (what a program put on the clipboard); Paste; Clear screen; Reset terminal;
   Download a file and Upload files (when enabled); the terminal engine (wterm, or the older xterm.js);
   Touch diagnostics; Reconnect.
+- **Pasting.** A paste reaches the program as a paste, without escape characters, so pasted text cannot
+  pretend the paste ended and type the rest as commands. Text a phone keyboard inserts in one go (its
+  clipboard suggestion, say) is treated as a paste too. If the text has several lines and the program has
+  not turned on bracketed paste (plain `sh`, an old shell, some REPLs), each line would run as it arrives,
+  so the page shows the text and asks first. A paste is at most 32 KB. "Text copied in the terminal" shows
+  what a program put on the clipboard, without control characters; any program can set it.
 - **Reconnecting** is automatic: after sleep or a network change the page reconnects and redraws.
 
 ## 10. File transfer (off by default)
@@ -282,7 +290,9 @@ Upgrading to 0.1.1: rweb now checks more at startup and stops with a message nam
 section 12). It refuses `--owner` without `--allow-host`, a `--token` shorter than 16 characters or with
 other characters than letters, digits, `-` and `_`, and a secret file, token file or upload folder that is a
 link or sits under a folder another user can change. If you made those files as this guide says, nothing
-changes. Address the SSH tunnel through the `/s/<id>/` address it redirects to (section 7).
+changes. Address the SSH tunnel through the `/s/<id>/` address it redirects to (section 7). A
+`--listen-unix` path must be absolute and pass through no links, and `tailscale` must be in one of the
+places section 4 lists, or named with `--tailscale`.
 
 ## 12. Troubleshooting
 
@@ -292,11 +302,15 @@ Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.lo
 | --- | --- |
 | `cannot find Rex's socket` | Rex is not running, or its socket is elsewhere: start Rex, or pass `--rex-socket`. |
 | `this node is a tagged Tailscale device` | Use `--owner` and `--allow-host` instead of `--owner-from-tailscale` (section 4, tagged machines). |
-| `cannot tell this node's Tailscale addresses` | The `tailscale` command is missing from `PATH` or Tailscale is down. |
+| `cannot find tailscale in …` | Tailscale is not where rweb looks (section 4): pass `--tailscale /absolute/path`. |
+| `will not run tailscale at …` | That program, or a folder above it, can be changed by another account (see below); install Tailscale in the usual place or pass another `--tailscale`. |
+| `cannot tell this node's Tailscale addresses` | Tailscale is down, or not signed in. |
+| `cannot reach Rex at …: WrongPeer` | The socket rweb found is served by another user, not your Rex: rweb refuses it. Check `--rex-socket` and `XDG_RUNTIME_DIR`. |
 | `--owner needs --allow-host NAME` | Add `--allow-host <machine>.<tailnet>.ts.net` (section 4, tagged machines). |
 | `--token must be at least 16 characters` | Use a token file made with the command in section 7 instead. |
-| `cannot use secret file …` or `cannot use upload folder …` | The message names the file or folder and the folder where the check failed. `SymLink`: point the option at the real file. `TooOpen` or `NotOwned`: `chmod 600` the file (`700` a folder) and make sure it is yours. `FolderWritableByOthers` or `FolderNotOurs`: a folder above it can be changed by another user; move the file somewhere under your home folder. |
-| `SocketDirNotOurs` or `SocketDirNotPrivate` | The unix socket's folder must be yours and `0700`; use the runtime folder from section 5. |
+| `cannot use secret file …` or `cannot use upload folder …` | The message names the file or folder and the folder where the check failed. `SymLink`: point the option at the real file. `TooOpen` or `NotOwned`: `chmod 600` the file (`700` a folder) and make sure it is yours. `FolderWritableByOthers`, `FolderWritableByGroup` or `FolderNotOurs`: a folder above it can be changed by another user (see below); move the file somewhere under your home folder. |
+| `--listen-unix … need an absolute path`, `SymLink`, `SocketDirNotOurs` or `SocketDirNotPrivate` | The unix socket's path must be absolute with no links on it (on macOS `/tmp` is a link), in a `0700` folder of yours, under folders only you or root can change; use the runtime folder from section 5. |
+| The page keeps reconnecting while others work | rweb takes at most 32 browser connections at once and answers more with 503 "too many viewers"; close other tabs. |
 | 403 "request from this node's own address" | You opened the page on the Rex machine itself. Use another device. |
 | 403 from your phone through Tailscale | The phone is signed in to a different Tailscale account, or is a tagged or shared device. |
 | 403 through an SSH tunnel | No token or the wrong one: open `http://127.0.0.1:<port>/?token=<token>` once. |
@@ -306,3 +320,12 @@ Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.lo
 | Typing does nothing | View only is on (⋯ menu), or rweb runs with `--observe-only`. |
 
 `rweb --help` lists every option.
+
+**Files and folders rweb checks.** The secret file, the token file, the upload folder, the unix socket's
+folder and the `tailscale` program must be such that no other account could change them: each is opened
+without following links and checked on what was opened, and every folder above it must belong to you or
+root and not be writable by others (a sticky folder such as `/tmp` is fine). A folder its group can write
+to is fine when that group holds nobody but you (Linux's usual group of one per user), and on macOS when
+it is the `admin` group, whose members can become root anyway. On macOS, access control lists are not
+looked at: do not add ones that let other accounts write to these folders. rweb also checks that the Rex
+socket it connects to is served by your own user.
