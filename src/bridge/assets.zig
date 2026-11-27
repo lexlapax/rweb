@@ -3,77 +3,43 @@
 
 const std = @import("std");
 const Io = std.Io;
-const Allocator = std.mem.Allocator;
 
-pub const Asset = struct {
-    path: []const u8,
-    content_type: []const u8,
-    body: []const u8,
-};
+const table = @import("asset_table.zig");
+/// Each asset's ETag and gzip body, in `all`'s order: made at build time (`tools/assetgen.zig`).
+const made = @import("asset_gen");
 
-pub const all = [_]Asset{
-    .{ .path = "/", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/index.html") },
-    .{ .path = "/lab", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/lab.html") },
-    .{ .path = "/lab.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/lab.js") },
-    .{ .path = "/labsel", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/labsel.html") },
-    .{ .path = "/labsel.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/labsel.js") },
-    .{ .path = "/app.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/app.js") },
-    .{ .path = "/keys.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/keys.js") },
-    .{ .path = "/diag.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/diag.js") },
-    .{ .path = "/app.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/app.css") },
-    // The token form (token mode only; see `server.loginAsset`).
-    .{ .path = "/login.html", .content_type = "text/html; charset=utf-8", .body = @embedFile("web/login.html") },
-    .{ .path = "/login.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/login.js") },
-    .{ .path = "/login.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/login.css") },
-    .{ .path = "/manifest.webmanifest", .content_type = "application/manifest+json", .body = @embedFile("web/manifest.webmanifest") },
-    .{ .path = "/icons/favicon.svg", .content_type = "image/svg+xml", .body = @embedFile("web/icons/favicon.svg") },
-    .{ .path = "/icons/favicon.ico", .content_type = "image/x-icon", .body = @embedFile("web/icons/favicon.ico") },
-    .{ .path = "/icons/apple-touch-icon.png", .content_type = "image/png", .body = @embedFile("web/icons/apple-touch-icon.png") },
-    .{ .path = "/icons/icon-192.png", .content_type = "image/png", .body = @embedFile("web/icons/icon-192.png") },
-    .{ .path = "/icons/icon-512.png", .content_type = "image/png", .body = @embedFile("web/icons/icon-512.png") },
-    .{ .path = "/icons/icon-maskable-512.png", .content_type = "image/png", .body = @embedFile("web/icons/icon-maskable-512.png") },
-    .{ .path = "/vendor/xterm.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/xterm.js") },
-    .{ .path = "/vendor/xterm.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/vendor/xterm.css") },
-    .{ .path = "/vendor/addon-fit.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/addon-fit.js") },
-    .{ .path = "/wterm-shim.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/wterm-shim.js") },
-    .{ .path = "/vendor/wterm.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("web/vendor/wterm.js") },
-    .{ .path = "/vendor/wterm.css", .content_type = "text/css; charset=utf-8", .body = @embedFile("web/vendor/wterm.css") },
-    .{ .path = "/vendor/ghostty-vt.wasm", .content_type = "application/wasm", .body = @embedFile("web/vendor/ghostty-vt.wasm") },
-    .{ .path = "/vendor/LICENSE-wterm.txt", .content_type = "text/plain; charset=utf-8", .body = @embedFile("web/vendor/LICENSE-wterm.txt") },
-    .{ .path = "/vendor/LICENSE-xterm.txt", .content_type = "text/plain; charset=utf-8", .body = @embedFile("web/vendor/LICENSE-xterm.txt") },
-};
+pub const Asset = table.Asset;
+pub const all = table.all;
+pub const etag = table.etag;
+pub const gzip = table.gzip;
+
+comptime {
+    std.debug.assert(made.etags.len == all.len and made.gz.len == all.len);
+}
+
+/// Path to index in `all`, built at compile time.
+const by_path: std.StaticStringMap(usize) = .initComptime(blk: {
+    var kvs: [all.len]struct { []const u8, usize } = undefined;
+    for (all, 0..) |a, i| kvs[i] = .{ a.path, i };
+    break :blk kvs;
+});
 
 pub fn find(path: []const u8) ?Asset {
-    for (all) |a| if (std.mem.eql(u8, a.path, path)) return a;
-    return null;
+    return all[by_path.get(path) orelse return null];
 }
 
 pub fn indexOf(path: []const u8) ?usize {
-    for (all, 0..) |a, i| if (std.mem.eql(u8, a.path, path)) return i;
-    return null;
+    return by_path.get(path);
 }
 
-/// The strong validator for an asset: a quoted hex prefix of its SHA-256. Computed once.
-pub fn etag(buf: *[2 + 32]u8, body: []const u8) []const u8 {
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
-    buf[0] = '"';
-    const hex = std.fmt.bytesToHex(digest[0..16].*, .lower);
-    @memcpy(buf[1..33], &hex);
-    buf[33] = '"';
-    return buf[0..34];
+/// The asset's strong validator (a quoted hex prefix of its SHA-256).
+pub fn etagOf(idx: usize) []const u8 {
+    return made.etags[idx];
 }
 
-/// Compress `body` as gzip. Caller frees.
-pub fn gzip(gpa: Allocator, body: []const u8) ![]u8 {
-    var out: Io.Writer.Allocating = try .initCapacity(gpa, body.len / 3 + 64);
-    errdefer out.deinit();
-    const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
-    defer gpa.free(window);
-    var c = try std.compress.flate.Compress.init(&out.writer, window, .gzip, .default);
-    try c.writer.writeAll(body);
-    try c.finish();
-    return out.toOwnedSlice();
+/// The asset's gzip body, when gzip makes it smaller; null when it does not.
+pub fn gzipOf(idx: usize) ?[]const u8 {
+    return made.gz[idx];
 }
 
 /// Whether an `Accept-Encoding` header value allows gzip.
@@ -295,4 +261,25 @@ test "the page's one link out goes to rweb's own page, in a new tab, with no ref
     try std.testing.expectEqual(@as(usize, 1), links);
     const script: []const u8 = @embedFile("web/app.js");
     try std.testing.expect(std.mem.indexOf(u8, script, "'_blank', 'noopener,noreferrer'") != null);
+}
+
+test "the ETags and gzip bodies made at build time are the assets' own" {
+    const gpa = std.testing.allocator;
+    for (all, 0..) |a, i| {
+        var b: [34]u8 = undefined;
+        try std.testing.expectEqualStrings(etag(&b, a.body), etagOf(i));
+        if (gzipOf(i)) |z| {
+            try std.testing.expect(z.len < a.body.len);
+            var in: Io.Reader = .fixed(z);
+            var window: [std.compress.flate.max_window_len]u8 = undefined;
+            var d = std.compress.flate.Decompress.init(&in, .gzip, &window);
+            var back: Io.Writer.Allocating = .init(gpa);
+            defer back.deinit();
+            _ = try d.reader.streamRemaining(&back.writer);
+            try std.testing.expectEqualSlices(u8, a.body, back.written());
+        }
+    }
+    // The large text files compress.
+    try std.testing.expect(gzipOf(indexOf("/vendor/xterm.js").?) != null);
+    try std.testing.expect(indexOf("/no-such-file") == null);
 }

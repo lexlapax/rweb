@@ -21,7 +21,7 @@ const log = std.log.scoped(.rex_input);
 pub const Sender = struct {
     ctx: *anyopaque,
     /// Make the call and return when it has been answered. An error means it failed.
-    call: *const fn (ctx: *anyopaque, method: []const u8, payload_json: []const u8) anyerror!void,
+    call: *const fn (ctx: *anyopaque, method: []const u8, payload_json: []const u8) CallError!void,
     /// The largest request the connection takes now (Rex's `max_message_bytes`); null for
     /// `default_max_message`.
     max_message: ?*const fn (ctx: *anyopaque) u64 = null,
@@ -35,11 +35,23 @@ pub const Sender = struct {
         return ctl.maxMessage();
     }
 
-    fn controlCall(ctx: *anyopaque, method: []const u8, payload_json: []const u8) anyerror!void {
+    /// The queue only needs to know that a call failed; why (Rex refused, no connection, a timeout)
+    /// goes to the log here.
+    pub const CallError = error{ CallFailed, Canceled, OutOfMemory };
+
+    fn controlCall(ctx: *anyopaque, method: []const u8, payload_json: []const u8) CallError!void {
         const ctl: *Control = @ptrCast(@alignCast(ctx));
-        var r = try ctl.call(method, payload_json);
+        var r = ctl.call(method, payload_json) catch |e| {
+            if (e == error.OutOfMemory) return error.OutOfMemory;
+            if (e == error.Canceled) return error.Canceled;
+            log.debug("{s}: no answer: {t}", .{ method, e });
+            return error.CallFailed;
+        };
         defer r.deinit();
-        _ = try r.ok();
+        _ = r.ok() catch {
+            log.debug("{s}: Rex refused it", .{method});
+            return error.CallFailed;
+        };
     }
 };
 
@@ -384,7 +396,7 @@ const Recorder = struct {
         r.log.deinit(r.gpa);
     }
 
-    fn call(ctx: *anyopaque, method: []const u8, payload: []const u8) anyerror!void {
+    fn call(ctx: *anyopaque, method: []const u8, payload: []const u8) Sender.CallError!void {
         const r: *Recorder = @ptrCast(@alignCast(ctx));
         r.mu.lockUncancelable(r.io);
         r.active += 1;
@@ -399,7 +411,7 @@ const Recorder = struct {
         // Record the method and the payload's essence.
         const short = if (std.mem.eql(u8, method, "com.superlogical.terminal.write")) "write" else method;
         r.log.print(r.gpa, "{s}:{s}\n", .{ short, essence(payload) }) catch {};
-        if (fail) return error.Failed;
+        if (fail) return error.CallFailed;
     }
 
     fn essence(payload: []const u8) []const u8 {
@@ -606,7 +618,7 @@ const Bodies = struct {
         for (b.bodies.items) |x| b.gpa.free(x);
         b.bodies.deinit(b.gpa);
     }
-    fn call(ctx: *anyopaque, _: []const u8, payload: []const u8) anyerror!void {
+    fn call(ctx: *anyopaque, _: []const u8, payload: []const u8) Sender.CallError!void {
         const b: *Bodies = @ptrCast(@alignCast(ctx));
         try b.bodies.append(b.gpa, try b.gpa.dupe(u8, payload));
     }

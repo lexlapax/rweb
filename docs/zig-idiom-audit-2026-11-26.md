@@ -70,15 +70,15 @@ mechanical changes above), **part fixed**, or **open**.
 | F11 | performance | should-fix | every frame written to Rex starts and cancels a watchdog task | **fixed in Phase B step 5** (2026-11-26): one watcher per connection | `src/rex/ws.zig:476-481` |
 | F12 | design | should-fix | one mutex serialises every Rex call of every viewer, only to guard `Api.last_error` | **fixed in Phase B step 5**: an `Api` per task, `api_mu` gone | `src/bridge/hub.zig:489`; `src/rex/api.zig:73` |
 | F13 | concurrency | should-fix | `supervisor_wake` is set and never waited on (the supervisor polls every 200 ms); `openStream` polls the mirror every 5 ms | **fixed in Phase B step 5**: the supervisor and `openStream` wait on events | set at `src/bridge/hub.zig:404`, `:1343`, `:1540`; polls at `:1450`, `:1167-1169` |
-| F14 | one way | nice-to-have | three hand-written constant-time compares; own addresses parsed from text on every request | open | `src/bridge/access.zig:363`, `:221-229`; `src/bridge/server.zig:1336`; `src/bridge/xfer.zig:129` |
+| F14 | one way | nice-to-have | three hand-written constant-time compares; own addresses parsed from text on every request | **fixed 2026-11-27**: one `access.constantTimeEql` for the token, transfer tokens and backend secret; own addresses held parsed (`access.Ip`), parsed once where they enter | `src/bridge/access.zig:363`, `:221-229`; `src/bridge/server.zig:1336`; `src/bridge/xfer.zig:129` |
 | F15 | allocators | nice-to-have | `checkFdExtras` used the page allocator from inside | **fixed in round five**: it takes an allocator | `src/bridge/xfer.zig:1053` |
 | F16 | memory | nice-to-have | a browser connection carries 128 KiB of buffers it never uses | **fixed in Phase B** (2026-11-26): socket buffers only for a connection that owns its socket | `src/rex/ws.zig:301-302`, `:440` |
-| F17 | safety style | nice-to-have | `term` and `vt` are `undefined` behind a `term_made` flag; `r` and `w` default to `undefined` | open | `src/rex/mirror.zig:111-115`; `src/rex/ws.zig:277-278` |
-| F18 | errors | nice-to-have | `anyerror` where an inferred or named set would do (25 functions); Zig error names reach the browser | open | `src/rex/rex1.zig:60`, `:144`, `:155`; `src/bridge/hub.zig:764`, `:820`, `:902`, `:988`; `src/bridge/server.zig:1234` |
-| F19 | build | nice-to-have | ETags and gzip bodies are made at run time on first use; lookup is a scan of 28 entries | open | `src/bridge/server.zig:908-926`; `src/bridge/assets.zig:46-54` |
+| F17 | safety style | nice-to-have | `term` and `vt` are `undefined` behind a `term_made` flag; `r` and `w` default to `undefined` | **fixed 2026-11-27**: the mirror holds its terminal and stream in one optional `emu`; `ws.Conn` reads and writes through its own socket unless `http` names an HTTP server's ends | `src/rex/mirror.zig:111-115`; `src/rex/ws.zig:277-278` |
+| F18 | errors | nice-to-have | `anyerror` where an inferred or named set would do (25 functions); Zig error names reach the browser | **fixed 2026-11-27** (see below): named sets where the page is answered, a word table instead of error names, inferred sets in the splitter, a named set for the input sender and the redraw callback | `src/rex/rex1.zig:60`, `:144`, `:155`; `src/bridge/hub.zig:764`, `:820`, `:902`, `:988`; `src/bridge/server.zig:1234` |
+| F19 | build | nice-to-have | ETags and gzip bodies are made at run time on first use; lookup is a scan of 28 entries | **fixed 2026-11-27**: ETags and gzip bodies made at build time (`tools/assetgen.zig`), lookup a compile-time `StaticStringMap` | `src/bridge/server.zig:908-926`; `src/bridge/assets.zig:46-54` |
 | F20 | build | should-fix | libc not asked for; the Linux release not position independent | **fixed in round five**: `link_libc = true`, `pie` on Linux. The archive itself: see checklist item 34 | `build.zig:27`, `:34`, `:69` |
 | F21 | build | nice-to-have | the bridge's module graph is built twice; `optimize: anytype`; a plain `zig build` is Debug | **fixed in Phase B step 7** (2026-11-26): one `bridgeModules`, `std.lang.Optimize`, the help says what a plain build is | `build.zig:21-36` against `:65-80`; `build.zig:21`; `build.zig:48` |
-| F22 | style | nice-to-have | `@hasField` on the project's own struct; a function-static buffer; tests before `main`; a long `main`; help and version returned as errors | **part fixed in round five**: the `@hasField` is gone and `rexProblem` takes a buffer (`src/bridge/main.zig:614`). **Open**: tests at `src/bridge/main.zig:26-74` before `main` at `:154`; `main` is 269 lines; `src/bridge/cli.zig:146-150` | as named |
+| F22 | style | nice-to-have | `@hasField` on the project's own struct; a function-static buffer; tests before `main`; a long `main`; help and version returned as errors | **fixed 2026-11-27**: tests after `main`; `main` 106 lines in named phases; help and version are a `cli.Action`, not errors | as named |
 | F23 | performance | nice-to-have | four or five small allocations per keystroke; byte-wise masking; a ping payload copied to the heap; hand-made deques | **mostly fixed in Phase B step 3**: requests written in one pass, ping on the stack; deques left | `src/rex/input.zig:285-305`, `:273`; `src/rex/ws.zig:504`, `:553`, `:560`; `src/bridge/hub.zig:88`, `:171` |
 | F24 | tests | nice-to-have | waits are polls with wall-clock limits; `checkAllAllocationFailures` is not used | done for allocation failures (step 4); test sleeps did not fall in step 5 (see there) | 0 uses; 56 `sleep` calls, about 40 of them in tests |
 
@@ -559,5 +559,32 @@ Rex, in ReleaseSafe.
      owner's decision above), so such a trace would show addresses only. **Not enabled**; the measurement
      is here for whoever revisits it, and the choice is the owner's for the next release.
 
-   Left in step 7: the rest of F14, F17, F18, F19 and F22, as their files are next touched (the plan's
-   own wording).
+   **The five leftovers, fixed 2026-11-27** (after 0.2.0, at the owner's request):
+   - **F14.** `access.constantTimeEql` is the one comparison of secrets (the token, the transfer tokens,
+     the backend secret); std's `crypto.timing_safe.eql` takes arrays of a fixed length, not slices.
+     This node's own addresses are `access.Ip` values parsed once where they enter (the options,
+     Tailscale's answer, each refresh), so a request compares bytes; the `bad_own_address` refusal and
+     `sameAddressList` went with the text, since an unparsable address can no longer reach the rule.
+   - **F17.** The mirror's terminal and its VT stream live in one optional field (`emu`), so every use
+     is a checked unwrap, not a read of `undefined` behind a flag. `ws.Conn` has no `undefined` reader and
+     writer: frames go through its own socket's unless `http` holds an HTTP server's (`in`, `out`).
+   - **F18.** What the page is told is words from one table (`hub.errorText`, a `switch` with no `else`
+     over `BrowserError`), never a Zig error name; the name goes to the log. Opening a terminal has a named
+     set; the forty ways opening its stream can fail become `StreamFailed` there, with the cause logged.
+     The Rex client's failed call says why in words (`Api.last_error`), each case named. The splitter's
+     sets are inferred; the input queue's sender and the mirror's redraw callback have named sets
+     (`Sender.CallError`, `Mirror.DeliverError`); `refreshOwnAddresses` takes null for a failed read.
+     Left as `anyerror`, on purpose: the startup message functions (`xfer.explain`, `main.refuseFile`,
+     `listenFailed`, `rexProblem`), whose job is to explain any error from any startup step, and
+     `Mirror.fail`, which only logs.
+   - **F19.** `tools/assetgen.zig` runs at build time over `src/bridge/asset_table.zig` and writes every
+     asset's ETag and gzip body; `assets.zig` embeds them, so a request computes nothing and the server
+     has no cache or lock for them. Asset lookup is a compile-time `StaticStringMap`. A test checks the
+     build-time results against the assets.
+   - **F22.** The tests that stood before `main` are after it; `main` went from 297 to 106 lines, in
+     named phases (`commandLine`, `readSecrets`, `fileTransfer`, `announce`, `accessRule`,
+     `keepOwnAddresses`); help and version are `cli.Action.help`, not errors.
+
+   Checks: macOS ReleaseSafe with the live Rex (revision 24) 370 passed, 5 skipped; Debug 362 passed,
+   13 skipped; linux-box ReleaseSafe with its live Rex 453 passed, 6 skipped; web tests 45/45; `zig build
+   dist` builds both archives; `zig fmt --check` clean. Phase B is done.

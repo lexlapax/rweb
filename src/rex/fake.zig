@@ -951,8 +951,8 @@ pub const Fake = struct {
             if (inject) |x| {
                 c.write_mutex.lockUncancelable(f.io);
                 defer c.write_mutex.unlock(f.io);
-                c.w.writeAll(x) catch return;
-                c.w.flush() catch return;
+                c.out().writeAll(x) catch return;
+                c.out().flush() catch return;
             }
             if (n == 0) {
                 try f.io.sleep(.fromMilliseconds(2), .awake);

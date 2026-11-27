@@ -277,14 +277,9 @@ fn isSilent(now: i64, last_rx: i64, busy_since: i64, limit_ms: u32) bool {
 /// stream cannot be resynchronized, so it is closed either way).
 const too_large_text = "{\"t\":\"error\",\"for\":\"message\",\"msg\":\"too large\"}";
 
-fn freeList(gpa: Allocator, list: [][]u8) void {
-    for (list) |a| gpa.free(a);
-    gpa.free(list);
-}
-
-/// Whether `list` holds the address `a` (compared as addresses, see `access.sameAddressList`).
-fn containsAddress(list: []const []const u8, a: []const u8) bool {
-    for (list) |x| if (access.sameAddressList(&.{x}, &.{a})) return true;
+/// Whether `list` holds the address `a`.
+fn containsAddress(list: []const access.Ip, a: access.Ip) bool {
+    for (list) |x| if (access.sameAddress(x, a)) return true;
     return false;
 }
 
@@ -368,7 +363,7 @@ pub const Server = struct {
     /// Guards `opts.access.own_addresses`, which `setOwnAddresses` replaces while requests are judged.
     access_mu: Io.Mutex = .init,
     /// The own-address list `setOwnAddresses` made (ours to free), if any.
-    own_owned: ?[][]u8 = null,
+    own_owned: ?[]access.Ip = null,
     /// When the own addresses were last confirmed: at start, and at each refresh that Tailscale
     /// answered with a usable list (see `Options.own_address_max_age_ms`).
     own_checked_ms: std.atomic.Value(i64) = .init(0),
@@ -380,10 +375,6 @@ pub const Server = struct {
     waiting: std.ArrayList(Io.net.Stream) = .empty,
     /// Connections evicted from `waiting`, for tests and logs.
     evicted: std.atomic.Value(u32) = .init(0),
-    /// Per-asset validators and gzip bodies, made on first use.
-    cache_mu: Io.Mutex = .init,
-    etags: [assets.all.len]?[34]u8 = @splat(null),
-    gz: [assets.all.len]?[]u8 = @splat(null),
     /// Requests refused by `access`, and the last reason, for tests and logs.
     refusals: std.atomic.Value(u32) = .init(0),
     last_refusal: std.atomic.Value(u8) = .init(255),
@@ -436,32 +427,21 @@ pub const Server = struct {
 
     /// Replace this node's own addresses (refreshed from Tailscale while running). Copied; the old
     /// list is freed once no request is being judged against it.
-    pub fn setOwnAddresses(s: *Server, list: []const []const u8) Allocator.Error!void {
-        const copy = try s.gpa.alloc([]u8, list.len);
-        var made: usize = 0;
-        errdefer {
-            for (copy[0..made]) |a| s.gpa.free(a);
-            s.gpa.free(copy);
-        }
-        for (list, 0..) |a, i| {
-            copy[i] = try s.gpa.dupe(u8, a);
-            made += 1;
-        }
+    pub fn setOwnAddresses(s: *Server, list: []const access.Ip) Allocator.Error!void {
+        const copy = try s.gpa.dupe(access.Ip, list);
         s.access_mu.lockUncancelable(s.io);
         const old = s.own_owned;
         s.own_owned = copy;
-        s.opts.access.own_addresses = @ptrCast(copy);
+        s.opts.access.own_addresses = copy;
         s.access_mu.unlock(s.io);
-        if (old) |o| freeList(s.gpa, o);
+        if (old) |o| s.gpa.free(o);
     }
 
     /// This node's own addresses now (a copy in `arena`).
-    pub fn ownAddresses(s: *Server, arena: Allocator) Allocator.Error![]const []const u8 {
+    pub fn ownAddresses(s: *Server, arena: Allocator) Allocator.Error![]const access.Ip {
         s.access_mu.lockUncancelable(s.io);
         defer s.access_mu.unlock(s.io);
-        const out = try arena.alloc([]const u8, s.opts.access.own_addresses.len);
-        for (s.opts.access.own_addresses, 0..) |a, i| out[i] = try arena.dupe(u8, a);
-        return out;
+        return arena.dupe(access.Ip, s.opts.access.own_addresses);
     }
 
     pub const Refresh = enum { unchanged, added, failed, invalid };
@@ -471,18 +451,18 @@ pub const Server = struct {
     /// this node had a minute ago is still refused. A failed fetch, an empty list or one with
     /// something that is not an address changes nothing, and does not count as confirming the list:
     /// only a usable answer that is on the list afterwards does (`own_checked_ms`).
-    pub fn refreshOwnAddresses(s: *Server, fetched: anyerror![]const []const u8) Refresh {
-        const list = fetched catch return .failed;
+    pub fn refreshOwnAddresses(s: *Server, fetched: ?[]const []const u8) Refresh {
+        const list = fetched orelse return .failed;
         if (list.len == 0) return .invalid;
-        for (list) |a| if (!access.isAddress(a)) return .invalid;
 
         var arena_state = std.heap.ArenaAllocator.init(s.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         const now = s.ownAddresses(arena) catch return .failed;
-        var all: std.ArrayList([]const u8) = .empty;
+        var all: std.ArrayList(access.Ip) = .empty;
         all.appendSlice(arena, now) catch return .failed;
-        for (list) |a| {
+        for (list) |text| {
+            const a = access.parseAddress(text) orelse return .invalid;
             if (containsAddress(all.items, a)) continue;
             all.append(arena, a) catch return .failed;
         }
@@ -492,7 +472,7 @@ pub const Server = struct {
         }
         s.setOwnAddresses(all.items) catch return .failed;
         s.own_checked_ms.store(bootNowMs(s.io), .release);
-        for (all.items[now.len..]) |a| log.info("a new address of this node, {s}: requests from it are refused from now on (the earlier ones still are)", .{a});
+        for (all.items[now.len..]) |a| log.info("a new address of this node, {f}: requests from it are refused from now on (the earlier ones still are)", .{a});
         return .added;
     }
 
@@ -529,8 +509,7 @@ pub const Server = struct {
         s.group.cancel(s.io);
         s.conns.deinit(s.gpa);
         s.waiting.deinit(s.gpa);
-        for (s.gz) |z| if (z) |bytes| s.gpa.free(bytes);
-        if (s.own_owned) |o| freeList(s.gpa, o);
+        if (s.own_owned) |o| s.gpa.free(o);
         s.listener.deinit(s.io);
         if (s.listener6) |*l| l.deinit(s.io);
         if (s.sock_dir) |fd| {
@@ -935,27 +914,6 @@ pub const Server = struct {
         try req.respond("", .{ .status = if (set_cookie) .see_other else .found, .keep_alive = false, .extra_headers = withSecurity(&hb, extra[0..n]) });
     }
 
-    fn etagFor(s: *Server, idx: usize) []const u8 {
-        s.cache_mu.lockUncancelable(s.io);
-        defer s.cache_mu.unlock(s.io);
-        if (s.etags[idx] == null) {
-            var b: [34]u8 = undefined;
-            _ = assets.etag(&b, assets.all[idx].body);
-            s.etags[idx] = b;
-        }
-        return &s.etags[idx].?;
-    }
-
-    /// The gzip body of an asset, if gzip makes it smaller. Made once.
-    fn gzipFor(s: *Server, idx: usize) ?[]const u8 {
-        s.cache_mu.lockUncancelable(s.io);
-        defer s.cache_mu.unlock(s.io);
-        if (s.gz[idx]) |z| return if (z.len < assets.all[idx].body.len) z else null;
-        const z = assets.gzip(s.gpa, assets.all[idx].body) catch return null;
-        s.gz[idx] = z;
-        return if (z.len < assets.all[idx].body.len) z else null;
-    }
-
     /// A page asset: validated with an ETag, compressed when the browser accepts it, and kept
     /// by the browser (private, never by a shared cache) but revalidated on every use, the
     /// vendored files too, so a new binary's files are used at once. A response that sets the
@@ -971,7 +929,7 @@ pub const Server = struct {
         else
             null;
 
-        const tag = s.etagFor(idx);
+        const tag = assets.etagOf(idx);
         var if_none_match: ?[]const u8 = null;
         var accept_encoding: ?[]const u8 = null;
         for (headers) |h| {
@@ -1001,7 +959,7 @@ pub const Server = struct {
         };
 
         var body: []const u8 = a.body;
-        if (accept_encoding) |ae| if (assets.acceptsGzip(ae)) if (s.gzipFor(idx)) |z| {
+        if (accept_encoding) |ae| if (assets.acceptsGzip(ae)) if (assets.gzipOf(idx)) |z| {
             body = z;
             extra[n] = .{ .name = "content-encoding", .value = "gzip" };
             n += 1;
@@ -1382,9 +1340,7 @@ fn writeQueryPart(w: *Io.Writer, sep: []const u8, part: []const u8) Io.Writer.Er
 /// wherever the first difference is.
 pub fn stripSecret(target: []const u8, secret: []const u8) ?[]const u8 {
     if (secret.len == 0 or target.len < 1 + secret.len or target[0] != '/') return null;
-    var diff: u8 = 0;
-    for (target[1 .. 1 + secret.len], secret) |a, b| diff |= a ^ b;
-    if (diff != 0) return null;
+    if (!access.constantTimeEql(target[1 .. 1 + secret.len], secret)) return null;
     const rest = target[1 + secret.len ..];
     if (rest.len != 0 and rest[0] != '/' and rest[0] != '?') return null; // a longer first segment
     return rest;
@@ -1829,7 +1785,7 @@ test "server: refuses a request with no token or the wrong one" {
     try testing.expect(std.mem.indexOf(u8, t.body, rig.session_id) == null);
 }
 
-const owner_cfg: access.Config = .{ .owner = "owner@example.com", .own_addresses = &.{"100.64.0.5"} };
+const owner_cfg: access.Config = .{ .owner = "owner@example.com", .own_addresses = &access.ips(&.{"100.64.0.5"}) };
 
 fn expectRefusedWith(rig: Rig, headers: []const u8, why: access.Refusal) !void {
     const h = try get(rig, "/", headers);
@@ -3430,7 +3386,7 @@ test "server: a refresh only ever adds own addresses, and keeps them when it fai
     freeHttp(fine);
     try testing.expectEqual(@as(u16, 200), fine.status);
     // Failures and nonsense keep the list.
-    try testing.expectEqual(Server.Refresh.failed, rig.srv.refreshOwnAddresses(error.TailscaleFailed));
+    try testing.expectEqual(Server.Refresh.failed, rig.srv.refreshOwnAddresses(null));
     try testing.expectEqual(Server.Refresh.invalid, rig.srv.refreshOwnAddresses(&.{}));
     try testing.expectEqual(Server.Refresh.invalid, rig.srv.refreshOwnAddresses(&.{ "100.64.0.77", "not-an-ip" }));
     try testing.expectEqual(Server.Refresh.unchanged, rig.srv.refreshOwnAddresses(&.{"::ffff:100.64.0.5"}));
@@ -3443,7 +3399,9 @@ test "server: a refresh only ever adds own addresses, and keeps them when it fai
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const now = try rig.srv.ownAddresses(arena_state.allocator());
-    try testing.expect(access.sameAddressList(now, &.{ "100.64.0.5", "100.64.0.77", "fd7a:115c:a1e0::77" }));
+    const want = access.ips(&.{ "100.64.0.5", "100.64.0.77", "fd7a:115c:a1e0::77" });
+    try testing.expectEqual(want.len, now.len);
+    for (want) |w| try testing.expect(containsAddress(now, w));
 }
 
 test "server: own addresses Tailscale has not confirmed for too long refuse requests until it answers" {
@@ -3461,7 +3419,7 @@ test "server: own addresses Tailscale has not confirmed for too long refuse requ
     rig.srv.own_checked_ms.store(bootNowMs(testing.io) - 60_001, .release);
     try expectRefusedWith(rig, elsewhere, .own_addresses_stale);
     // A failed or unusable answer confirms nothing.
-    try testing.expectEqual(Server.Refresh.failed, rig.srv.refreshOwnAddresses(error.TailscaleFailed));
+    try testing.expectEqual(Server.Refresh.failed, rig.srv.refreshOwnAddresses(null));
     try testing.expectEqual(Server.Refresh.invalid, rig.srv.refreshOwnAddresses(&.{}));
     try expectRefusedWith(rig, elsewhere, .own_addresses_stale);
     // Tailscale answers: judged as usual again, the new address included.

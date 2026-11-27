@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-27 (0.2.0 released and running on all four machines; Phase B done but F14, F17, F18, F19, F22).
+Last updated: 2026-11-27 (0.2.0 released and running on all four machines; Phase B done, its last five findings fixed after the release).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -77,9 +77,10 @@ a 4-second `echo` loop, upright again after it.
   **Released 2026-11-27:** the owner's phone check passed; tag `v0.2.0` at `010e057`, GitHub Release
   "rweb 0.2.0" (Latest) with both archives and `SHA256SUMS` (downloaded back and verified; archives carry
   no private names); setup-repo pin pushed and applied: all four machines run `rweb-0.2.0-010e057157c5`
-  behind unchanged Serve entries, 0.1.1 kept for rollback. **Next:** Phase B's leftovers F14, F17, F18,
-  F19, F22 as their files are next touched; Phase 6's open steps (no channel, `doctor` or signed
-  checksums yet, docs/PLAN.md).
+  behind unchanged Serve entries, 0.1.1 kept for rollback. **Phase B done (2026-11-27):** F14, F17, F18, F19,
+  F22 fixed (the audit's "five leftovers" note; checks macOS live 370/5 skip, Debug 362/13, linux-box live
+  453/6, web 45/45); in CHANGELOG "Unreleased". **Next:** Phase 6's open steps (review round 7 on the 0.2.0
+  changes recommended first, then `doctor`, channels, signed checksums; docs/PLAN.md).
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

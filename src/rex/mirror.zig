@@ -98,6 +98,9 @@ pub const Observer = struct {
     ended: ?*const fn (ctx: *anyopaque, why: data.End) void = null,
 };
 
+/// A mirror's libghostty terminal and the VT stream that feeds it (`Mirror.emu`).
+const Emulator = struct { term: ghostty_vt.Terminal, vt: ghostty_vt.TerminalStream };
+
 pub const Mirror = struct {
     gpa: Allocator,
     io: Io,
@@ -108,11 +111,10 @@ pub const Mirror = struct {
     snap: std.ArrayList(u8) = .empty,
     /// Where the next snapshot record header starts in `snap` (0: the envelope is not checked yet).
     snap_scan: usize = 0,
-    term: ghostty_vt.Terminal = undefined,
-    vt: ghostty_vt.TerminalStream = undefined,
-    /// `term` and `vt` exist (from the snapshot on), whatever `status` says since; `deinit`
-    /// frees them. The VT stream holds OSC, APC and DCS buffers a program can fill.
-    term_made: bool = false,
+    /// The terminal and its VT stream, from the snapshot on (whatever `status` says since); `deinit`
+    /// frees them. The stream points into the terminal, so the two live here together and never
+    /// move. The VT stream holds OSC, APC and DCS buffers a program can fill.
+    emu: ?Emulator = null,
     /// A resize outside the limits was logged (once per mirror).
     logged_bad_resize: bool = false,
     /// Set once the channel nonce is known.
@@ -156,9 +158,9 @@ pub const Mirror = struct {
     }
 
     pub fn deinit(m: *Mirror) void {
-        if (m.term_made) {
-            m.vt.deinit();
-            m.term.deinit(m.gpa);
+        if (m.emu) |*e| {
+            e.vt.deinit();
+            e.term.deinit(m.gpa);
         }
         m.snap.deinit(m.gpa);
         if (m.splitter) |*s| s.deinit();
@@ -267,14 +269,14 @@ pub const Mirror = struct {
         // The decoder's own word on the size, whatever the first record looked like.
         const dt = &decoded.terminal.?;
         if (!resizeAllowed(dt.cols, dt.rows)) return error.BadSnapshot;
-        m.term = decoded.toOwned();
-        capScrollback(&m.term);
-        m.vt = m.term.vtStream();
-        limitStream(&m.vt);
-        m.term_made = true;
+        m.emu = .{ .term = decoded.toOwned(), .vt = undefined }; // the stream is made in place, next
+        const e = &m.emu.?;
+        capScrollback(&e.term);
+        e.vt = e.term.vtStream();
+        limitStream(&e.vt);
         switch (decoded.continuation) {
             .ground => {},
-            .bytes => |b| m.vt.nextSlice(b),
+            .bytes => |b| e.vt.nextSlice(b),
         }
         m.status = .live;
         m.settled.set(m.io);
@@ -313,7 +315,7 @@ pub const Mirror = struct {
 
     pub fn plain(m: *Mirror, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        m.vt.nextSlice(bytes);
+        m.emu.?.vt.nextSlice(bytes);
         m.version += 1;
         if (m.observer) |o| if (o.output) |f| f(o.ctx, bytes);
     }
@@ -329,7 +331,7 @@ pub const Mirror = struct {
                 // Everything that can fail first, then the swap: a failure leaves the old owner.
                 const new_owner = if (r.owner) |ow| try m.gpa.dupe(u8, ow) else null;
                 errdefer if (new_owner) |o| m.gpa.free(o);
-                try m.term.resize(m.gpa, .{ .cols = r.cols, .rows = r.rows });
+                try m.emu.?.term.resize(m.gpa, .{ .cols = r.cols, .rows = r.rows });
                 if (m.owner) |old| m.gpa.free(old);
                 m.owner = new_owner;
                 m.version += 1;
@@ -375,7 +377,7 @@ pub const Mirror = struct {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return null;
-        return .{ .cols = m.term.cols, .rows = m.term.rows };
+        return .{ .cols = m.emu.?.term.cols, .rows = m.emu.?.term.rows };
     }
 
     /// Whether the program has bracketed paste on (DEC mode 2004), so a paste reaches it marked
@@ -383,8 +385,8 @@ pub const Mirror = struct {
     pub fn bracketedPaste(m: *Mirror) bool {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
-        if (!m.term_made) return false;
-        return m.term.modes.get(.bracketed_paste);
+        const e = if (m.emu) |*e| e else return false;
+        return e.term.modes.get(.bracketed_paste);
     }
 
     pub fn getStatus(m: *Mirror) Status {
@@ -424,6 +426,9 @@ pub const Mirror = struct {
         return out.?;
     }
 
+    /// What a redraw's `deliver` may fail with: it only queues the bytes it is given.
+    pub const DeliverError = Allocator.Error;
+
     /// What a redraw carried.
     pub const Redrawn = struct {
         /// Rows of scrollback above the visible primary screen it carries.
@@ -442,7 +447,7 @@ pub const Mirror = struct {
         gpa: Allocator,
         opts: RedrawOptions,
         ctx: *anyopaque,
-        deliver: *const fn (ctx: *anyopaque, bytes: []u8) anyerror!void,
+        deliver: *const fn (ctx: *anyopaque, bytes: []u8) DeliverError!void,
     ) !void {
         _ = try m.redrawLockedInfo(gpa, opts, ctx, deliver);
     }
@@ -456,13 +461,13 @@ pub const Mirror = struct {
         gpa: Allocator,
         opts: RedrawOptions,
         ctx: *anyopaque,
-        deliver: *const fn (ctx: *anyopaque, bytes: []u8) anyerror!void,
+        deliver: *const fn (ctx: *anyopaque, bytes: []u8) DeliverError!void,
     ) !Redrawn {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return error.NotLive;
         const have = m.historyRowsLocked();
-        const wanted: u32 = if (historyCap(opts, m.term.cols)) |c| @min(c, have) else have;
+        const wanted: u32 = if (historyCap(opts, m.emu.?.term.cols)) |c| @min(c, have) else have;
         var rows = wanted;
         while (true) {
             var out: Budget = .init(gpa, m.redraw_budget);
@@ -487,17 +492,17 @@ pub const Mirror = struct {
         // The formatter draws only the active screen. While a full-screen program has the
         // alternate screen, draw the primary screen first; the modes that follow switch the
         // viewer to the alternate screen (saving this cursor).
-        if (m.term.screens.active_key == .alternate) {
-            if (m.term.screens.get(.primary)) |primary| {
+        if (m.emu.?.term.screens.active_key == .alternate) {
+            if (m.emu.?.term.screens.get(.primary)) |primary| {
                 var pf: ghostty_vt.formatter.ScreenFormatter = .init(primary, redraw_opts);
                 pf.extra = .all;
                 pf.content = .{ .selection = historySelection(primary, rows) };
                 try pf.format(w);
             }
         }
-        var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, redraw_opts);
+        var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.emu.?.term, redraw_opts);
         f.extra = .all;
-        if (m.term.screens.active_key == .primary) f.content = .{ .selection = historySelection(m.term.screens.active, rows) };
+        if (m.emu.?.term.screens.active_key == .primary) f.content = .{ .selection = historySelection(m.emu.?.term.screens.active, rows) };
         try f.format(w);
         try w.flush();
     }
@@ -527,9 +532,9 @@ pub const Mirror = struct {
 
     fn historyRowsLocked(m: *Mirror) u32 {
         std.debug.assert(@import("sync.zig").held(&m.mu));
-        const primary = m.term.screens.get(.primary) orelse return 0;
+        const primary = m.emu.?.term.screens.get(.primary) orelse return 0;
         const total = primary.pages.total_rows;
-        return @intCast(@min(if (total > m.term.rows) total - m.term.rows else 0, std.math.maxInt(u32)));
+        return @intCast(@min(if (total > m.emu.?.term.rows) total - m.emu.?.term.rows else 0, std.math.maxInt(u32)));
     }
 
     pub const PlainAll = struct { text: []u8, truncated: bool };
@@ -551,8 +556,8 @@ pub const Mirror = struct {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         if (m.status != .live) return error.NotLive;
-        var max_rows: u32 = if (max_cells) |cells| @intCast(@min(max_rows_in, cells / @max(m.term.cols, 1))) else max_rows_in;
-        const screen = m.term.screens.active;
+        var max_rows: u32 = if (max_cells) |cells| @intCast(@min(max_rows_in, cells / @max(m.emu.?.term.cols, 1))) else max_rows_in;
+        const screen = m.emu.?.term.screens.active;
         var rows_cut = screen.pages.total_rows > max_rows;
         if (!rows_cut) max_rows = @intCast(screen.pages.total_rows); // so halving it cuts at once
         const budget = std.math.mul(usize, max_bytes, copy_format_factor) catch std.math.maxInt(usize);
@@ -560,7 +565,7 @@ pub const Mirror = struct {
             if (max_rows == 0) return .{ .text = try gpa.alloc(u8, 0), .truncated = rows_cut };
             var out: Budget = .init(gpa, budget);
             defer out.deinit();
-            var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, .{ .emit = .plain, .unwrap = true, .trim = true });
+            var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.emu.?.term, .{ .emit = .plain, .unwrap = true, .trim = true });
             if (rows_cut) f.content = .{ .selection = lastRows(screen, max_rows) };
             formatAll(&f, &out.writer) catch |e| {
                 if (out.oom) return error.OutOfMemory;
@@ -600,7 +605,7 @@ pub const Mirror = struct {
         if (m.status != .live) return error.NotLive;
         var out: Io.Writer.Allocating = .init(gpa);
         errdefer out.deinit();
-        var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.term, .plain);
+        var f: ghostty_vt.formatter.TerminalFormatter = .init(&m.emu.?.term, .plain);
         try f.format(&out.writer);
         return out.toOwnedSlice();
     }
@@ -1420,8 +1425,8 @@ test "mirror: a snapshot that carried kitty images decodes, without them" {
     try m.feed(stream);
     try testing.expectEqual(Status.live, m.getStatus());
     try expectText(m, "after");
-    try testing.expectEqual(@as(usize, 0), m.term.screens.active.kitty_images.images.count());
-    try testing.expectEqual(@as(usize, 0), m.term.screens.active.kitty_images.total_limit);
+    try testing.expectEqual(@as(usize, 0), m.emu.?.term.screens.active.kitty_images.images.count());
+    try testing.expectEqual(@as(usize, 0), m.emu.?.term.screens.active.kitty_images.total_limit);
 }
 
 test "mirror: kitty graphics and glyph commands in live output are dropped unbuffered and unapplied" {
@@ -1436,7 +1441,7 @@ test "mirror: kitty graphics and glyph commands in live output are dropped unbuf
 
     // A whole image command: nothing stored.
     try m.feed(kitty_image);
-    try testing.expectEqual(@as(usize, 0), m.term.screens.active.kitty_images.images.count());
+    try testing.expectEqual(@as(usize, 0), m.emu.?.term.screens.active.kitty_images.images.count());
     // A long unterminated transmission, in pieces: nothing buffered (Ghostty would hold up to
     // 65 MiB of it with the kitty handler on).
     try m.feed("\x1b_Ga=t,f=24,s=1024,v=1024,i=9;");
@@ -1449,7 +1454,7 @@ test "mirror: kitty graphics and glyph commands in live output are dropped unbuf
     // Many placements: nothing stored either.
     var buf: [64]u8 = undefined;
     for (0..10_000) |i| try m.feed(try std.fmt.bufPrint(&buf, "\x1b_Ga=p,i=7,p={d},q=2\x1b\\", .{i + 1}));
-    try testing.expectEqual(@as(usize, 0), m.term.screens.active.kitty_images.images.count());
+    try testing.expectEqual(@as(usize, 0), m.emu.?.term.screens.active.kitty_images.images.count());
     // A glyph protocol registration, unterminated and long: not buffered.
     try m.feed("\x1b_25a1;");
     try feedChunked(m, blob[0 .. 2 << 20], 64 * 1024);
@@ -1468,7 +1473,7 @@ test "mirror: scrollback is capped at 10,000 lines and 32 MiB, or Rex's smaller 
         const m = try Mirror.init(a, testing.io, 5);
         defer m.deinit();
         try m.feed(stream);
-        const limits = &m.term.screens.get(.primary).?.pages.limits;
+        const limits = &m.emu.?.term.screens.get(.primary).?.pages.limits;
         try testing.expectEqual(max_scrollback_lines, limits.lines.explicit);
         try testing.expectEqual(max_scrollback_bytes, limits.bytes.explicit);
         // 12,000 lines of output keep at most 10,000 of history.
@@ -1491,7 +1496,7 @@ test "mirror: scrollback is capped at 10,000 lines and 32 MiB, or Rex's smaller 
         const m = try Mirror.init(a, testing.io, 6);
         defer m.deinit();
         try m.feed(stream);
-        const limits = &m.term.screens.get(.primary).?.pages.limits;
+        const limits = &m.emu.?.term.screens.get(.primary).?.pages.limits;
         try testing.expectEqual(@as(usize, 500), limits.lines.explicit);
         try testing.expectEqual(@as(usize, 1 << 20), limits.bytes.explicit);
     }
@@ -1538,7 +1543,7 @@ test "mirror: OSC and DCS strings are bounded, split anywhere, and output after 
     // A short OSC still works: the title.
     try m.feed("\x1b]2;rweb title\x1b");
     try m.feed("\\");
-    try testing.expectEqualStrings("rweb title", m.term.getTitle().?);
+    try testing.expectEqualStrings("rweb title", m.emu.?.term.getTitle().?);
     try testing.expect(liveBytes(&fa) - base < slack);
 }
 

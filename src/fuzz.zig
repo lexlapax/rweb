@@ -215,8 +215,7 @@ test "fuzz ws readMessage: reassembly over a fixed reader" {
                 .stream = undefined,
                 .reader = undefined,
                 .writer = undefined,
-                .r = &r,
-                .w = &out.writer,
+                .http = .{ .r = &r, .w = &out.writer },
                 .owns_stream = false,
                 .is_client = is_client,
                 .max_message = max_message,
@@ -271,7 +270,7 @@ test "fuzz access decision" {
                 .{ .name = "X-Forwarded-For", .value = buf[third .. 2 * third] },
                 .{ .name = "Origin", .value = buf[2 * third .. n] },
             };
-            const cfg: access.Config = .{ .owner = "owner@example.com", .own_addresses = &.{"100.64.0.5"} };
+            const cfg: access.Config = .{ .owner = "owner@example.com", .own_addresses = &access.ips(&.{"100.64.0.5"}) };
             const d = access.decide(cfg, .{ .headers = &hs, .is_websocket_upgrade = true });
             if (d == .allow) try testing.expectEqualStrings("owner@example.com", buf[0..third]);
         }

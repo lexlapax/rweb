@@ -143,11 +143,6 @@ pub fn isSafeSecret(text: []const u8) bool {
 }
 
 pub const Error = error{
-    Usage,
-    /// No arguments at all: the short help.
-    ShortHelp,
-    /// `--version`: print the version and exit.
-    Version,
     NoListener,
     TwoListeners,
     NoAccessRule,
@@ -211,7 +206,6 @@ pub fn explain(e: Error) []const u8 {
         error.NoHome => "HOME is not set, so rweb cannot tell where to keep its files; set HOME or pass --config-dir PATH",
         error.PortNeedsMac => "rweb tailscale takes --port on macOS only. On Linux it listens on a unix socket: a port would need a backend secret in the Tailscale Serve target, which other accounts on this machine can read. To use a port anyway, give --listen-tcp PORT and --backend-secret-file PATH",
         error.SocketPathTooLong => "is too long for a unix socket path (at most 103 bytes on macOS, 107 on Linux)",
-        error.Usage, error.ShortHelp, error.Version => "",
         error.OutOfMemory => "out of memory",
     };
 }
@@ -234,8 +228,21 @@ pub fn maxUnixPath(os: std.Target.Os.Tag) usize {
     return if (os.isDarwin()) 104 else 108;
 }
 
+/// What the command line asks for: to run with these options, or to print a help text or the version
+/// and exit.
+pub const Action = union(enum) { run: Parsed, help: Help };
+
+pub const Help = enum {
+    /// No arguments at all: the short help.
+    short,
+    /// `rweb help`, `--help`, `-h`: the full help.
+    full,
+    /// `--version`.
+    version,
+};
+
 /// Parse `args` (without the program name) with the advanced options' defaults only (the tests).
-pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
+pub fn parse(arena: Allocator, args: []const []const u8) Error!Action {
     var d: Diag = .{};
     return parseEnv(arena, args, .{}, &d);
 }
@@ -243,9 +250,23 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Parsed {
 /// Parse `args` (without the program name). A layout command fills in, from `env`, whatever its
 /// options did not give. Slices in the result point into `args`, except the lists and the paths a
 /// layout makes, which are allocated from `arena`. On failure `diag.arg` names the argument.
-pub fn parseEnv(arena: Allocator, args: []const []const u8, env: layout.Env, diag: *Diag) Error!Parsed {
+pub fn parseEnv(arena: Allocator, args: []const []const u8, env: layout.Env, diag: *Diag) Error!Action {
+    const p = parseOptions(arena, args, env, diag) catch |e| {
+        if (e == error.ShortHelp) return .{ .help = .short };
+        if (e == error.FullHelp) return .{ .help = .full };
+        if (e == error.Version) return .{ .help = .version };
+        return @errorCast(e);
+    };
+    return .{ .run = p };
+}
+
+/// A help option, met where it stands among the others, ends the parse at once (an error is the
+/// quickest way out of the loop); `parseEnv` turns it into an `Action`.
+const Early = error{ ShortHelp, FullHelp, Version };
+
+fn parseOptions(arena: Allocator, args: []const []const u8, env: layout.Env, diag: *Diag) (Error || Early)!Parsed {
     if (args.len == 0) return error.ShortHelp;
-    if (std.mem.eql(u8, args[0], "help")) return error.Usage;
+    if (std.mem.eql(u8, args[0], "help")) return error.FullHelp;
     var listen: ?Listen = null;
     var p: Parsed = .{ .listen = undefined };
     var own: std.ArrayList([]const u8) = .empty;
@@ -264,7 +285,7 @@ pub fn parseEnv(arena: Allocator, args: []const []const u8, env: layout.Env, dia
         const a = args[i];
         diag.arg = a;
         const eql = std.mem.eql;
-        if (eql(u8, a, "--help") or eql(u8, a, "-h")) return error.Usage;
+        if (eql(u8, a, "--help") or eql(u8, a, "-h")) return error.FullHelp;
         if (eql(u8, a, "--version")) return error.Version;
         if (eql(u8, a, "--listen-unix")) {
             if (listen != null) return error.TwoListeners;
@@ -425,10 +446,23 @@ fn value(args: []const []const u8, i: *usize) Error![]const u8 {
 
 const testing = std.testing;
 
-fn parseT(args: []const []const u8) Error!Parsed {
+/// The help an `args` asks for, or null when it asks to run.
+fn helpOf(args: []const []const u8) Error!?Help {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const p = try parse(arena.allocator(), args);
+    return switch (try parse(arena.allocator(), args)) {
+        .run => null,
+        .help => |h| h,
+    };
+}
+
+fn parseT(args: []const []const u8) (Error || error{TestExpectedRun})!Parsed {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = switch (try parse(arena.allocator(), args)) {
+        .run => |r| r,
+        .help => return error.TestExpectedRun,
+    };
     // Lists live in the arena: copy what the tests look at out of it.
     return .{
         .listen = p.listen,
@@ -493,9 +527,9 @@ test "numbers and options are checked" {
     try testing.expectError(error.BadNumber, parseT(&.{ "--listen-tcp", "0", "--history-lines", "x" }));
     try testing.expectError(error.MissingValue, parseT(&.{ "--listen-tcp", "0", "--owner" }));
     try testing.expectError(error.UnknownOption, parseT(&.{ "--listen-tcp", "0", "--nope" }));
-    try testing.expectError(error.Usage, parseT(&.{"--help"}));
-    try testing.expectError(error.Version, parseT(&.{"--version"}));
-    try testing.expectError(error.Version, parseT(&.{ "--listen-tcp", "0", "--version" }));
+    try testing.expectEqual(Help.full, (try helpOf(&.{"--help"})).?);
+    try testing.expectEqual(Help.version, (try helpOf(&.{"--version"})).?);
+    try testing.expectEqual(Help.version, (try helpOf(&.{ "--listen-tcp", "0", "--version" })).?);
     const p = try parseT(&.{ "--listen-tcp", "0", "--observe-only", "--history-lines", "50" });
     try testing.expect(p.observe_only and p.history_lines == 50);
 }
@@ -523,7 +557,7 @@ test "token and token file are exclusive; hosts and lab are carried" {
     try testing.expectError(error.TwoTokens, parseT(&.{ "--listen-tcp", "0", "--token", "abcdefgh-0123456_abcdefgh-0123456", "--token-file", "/x" }));
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const p = try parse(arena.allocator(), &.{ "--listen-tcp", "0", "--allow-host", "a.example", "--allow-host", "b.example", "--enable-lab" });
+    const p = (try parse(arena.allocator(), &.{ "--listen-tcp", "0", "--allow-host", "a.example", "--allow-host", "b.example", "--enable-lab" })).run;
     try testing.expectEqual(@as(usize, 2), p.allowed_hosts.len);
     try testing.expect(p.lab);
 }
@@ -564,16 +598,19 @@ test "--token follows the token-file rules" {
     try testing.expect(isSafeSecret("a-Z_9") and !isSafeSecret("a b") and !isSafeSecret("a\n"));
 }
 
-fn parseL(arena: Allocator, args: []const []const u8, env: layout.Env) Error!Parsed {
+fn parseL(arena: Allocator, args: []const []const u8, env: layout.Env) (Error || error{TestExpectedRun})!Parsed {
     var d: Diag = .{};
-    return parseEnv(arena, args, env, &d);
+    return switch (try parseEnv(arena, args, env, &d)) {
+        .run => |r| r,
+        .help => error.TestExpectedRun,
+    };
 }
 
 const linux_env: layout.Env = .{ .os = .linux, .home = "/home/me", .xdg_runtime_dir = "/run/user/1000", .uid = 1000 };
 const mac_env: layout.Env = .{ .os = .macos, .home = "/Users/me", .uid = 501 };
 
 test "no arguments is the short help, which leads with the two commands" {
-    try testing.expectError(error.ShortHelp, parse(testing.allocator, &.{}));
+    try testing.expectEqual(Help.short, (try helpOf(&.{})).?);
     const t = std.mem.indexOf(u8, short_usage, "rweb tailscale").?;
     const s = std.mem.indexOf(u8, short_usage, "rweb ssh").?;
     try testing.expect(t < 120 and s < 200);
@@ -672,18 +709,13 @@ test "layout refusals: no home, layout-only options, and each has words" {
     inline for (@typeInfo(Error).error_set.error_names.?) |name| {
         const err: Error = @errorCast(@field(anyerror, name));
         const text = explain(err);
-        switch (err) {
-            error.Usage, error.ShortHelp, error.Version => try testing.expectEqual(@as(usize, 0), text.len),
-            else => {
-                try testing.expect(text.len > 10);
-                try testing.expect(std.mem.indexOf(u8, text, name) == null);
-            },
-        }
+        try testing.expect(text.len > 10);
+        try testing.expect(std.mem.indexOf(u8, text, name) == null);
     }
 }
 
 test "each refusal names its argument once, a number says what that option takes, and help is a command" {
-    try testing.expectError(error.Usage, parse(testing.allocator, &.{"help"}));
+    try testing.expectEqual(Help.full, (try helpOf(&.{"help"})).?);
     try testing.expect(std.mem.indexOf(u8, explain(error.BadAddress), "--own-address") == null);
     try testing.expect(std.mem.indexOf(u8, explain(error.UnknownOption), "--help") == null);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

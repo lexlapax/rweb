@@ -282,9 +282,10 @@ pub const Conn = struct {
     stream: Io.net.Stream,
     reader: Io.net.Stream.Reader,
     writer: Io.net.Stream.Writer,
-    /// What frames are read from and written to: the fields above, or an HTTP server's.
-    r: *Io.Reader = undefined,
-    w: *Io.Writer = undefined,
+    /// Set for a connection an HTTP server upgraded (`fromHttp`): frames are read and written through
+    /// the server's reader and writer. Null: through the fields above, this connection's own (`in`,
+    /// `out`).
+    http: ?Ends = null,
     /// False when the stream belongs to someone else (an HTTP server connection).
     owns_stream: bool = true,
     write_mutex: Io.Mutex = .init,
@@ -321,14 +322,25 @@ pub const Conn = struct {
 
     pub const buf_len = 64 * 1024;
 
+    pub const Ends = struct { r: *Io.Reader, w: *Io.Writer };
+
+    /// Where frames are read from.
+    fn in(c: *Conn) *Io.Reader {
+        return if (c.http) |h| h.r else &c.reader.interface;
+    }
+
+    /// Where frames are written to. Public for the fake Rex server, which writes raw bytes to test
+    /// what a client does with a broken frame; everything else writes frames.
+    pub fn out(c: *Conn) *Io.Writer {
+        return if (c.http) |h| h.w else &c.writer.interface;
+    }
+
     /// Give a connection that owns its socket its own buffers (freed by `deinit`).
     fn ownBuffers(c: *Conn, gpa: Allocator) Allocator.Error!void {
         const b = try gpa.create([2][buf_len]u8);
         c.bufs = b;
         c.reader = c.stream.reader(c.io, &b[0]);
         c.writer = c.stream.writer(c.io, &b[1]);
-        c.r = &c.reader.interface;
-        c.w = &c.writer.interface;
     }
 
     /// Server side: read the upgrade request from an accepted `stream`, check it and answer 101.
@@ -339,8 +351,8 @@ pub const Conn = struct {
         c.* = .{ .io = io, .stream = stream, .reader = undefined, .writer = undefined, .is_client = false };
         try c.ownBuffers(gpa);
         errdefer gpa.destroy(c.bufs.?);
-        const r = c.r;
-        const w = c.w;
+        const r = c.in();
+        const w = c.out();
 
         const req_line = try r.takeDelimiterInclusive('\n');
         if (!std.mem.startsWith(u8, req_line, "GET ")) return error.BadRequest;
@@ -432,7 +444,7 @@ pub const Conn = struct {
         var key: [24]u8 = undefined;
         _ = std.base64.standard.Encoder.encode(&key, &key_raw);
 
-        const w = c.w;
+        const w = c.out();
         try w.print(
             "GET {s} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n" ++
                 "Connection: Upgrade\r\nSec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n",
@@ -444,7 +456,7 @@ pub const Conn = struct {
         try w.flush();
 
         const expected = acceptKey(&key);
-        const r = c.r;
+        const r = c.in();
         const status = try r.takeDelimiterInclusive('\n');
         if (std.mem.indexOf(u8, status, " 101 ") == null) return error.UpgradeRefused;
         var accepted = false;
@@ -470,8 +482,7 @@ pub const Conn = struct {
             .stream = stream,
             .reader = undefined,
             .writer = undefined,
-            .r = r,
-            .w = w,
+            .http = .{ .r = r, .w = w },
             .owns_stream = false,
             .is_client = false,
             .max_message = max_message,
@@ -518,8 +529,9 @@ pub const Conn = struct {
     /// connection made by `fromHttp`, which reads and writes through the HTTP server's reader and
     /// writer (whose owner logs their cause).
     pub fn socketError(c: *const Conn) ?SocketError {
-        if (c.r == &c.reader.interface) if (c.reader.err) |e| return e;
-        if (c.w == &c.writer.interface) if (c.writer.err) |e| return e;
+        if (c.http != null) return null;
+        if (c.reader.err) |e| return e;
+        if (c.writer.err) |e| return e;
         return null;
     }
 
@@ -569,7 +581,7 @@ pub const Conn = struct {
 
     fn writeFrameLocked(c: *Conn, op: Opcode, data: []const u8) !void {
         std.debug.assert(@import("sync.zig").held(&c.write_mutex));
-        const w = c.w;
+        const w = c.out();
         var mask: [4]u8 = .{ 0, 0, 0, 0 };
         if (c.is_client) c.io.random(&mask);
         var hdr: [14]u8 = undefined;
@@ -635,7 +647,7 @@ pub const Conn = struct {
 
     /// Read one complete message into `buf` (which starts empty), answering pings; its opcode.
     fn readInto(c: *Conn, gpa: Allocator, buf: *std.ArrayList(u8)) !Opcode {
-        const r = c.r;
+        const r = c.in();
         var msg_op: ?Opcode = null;
         var frames: u32 = 0;
         while (true) {
@@ -754,7 +766,7 @@ test "acceptKey matches the RFC 6455 example" {
 /// A server-side connection over bytes in memory, for frame-level tests.
 fn memConn(bytes: []const u8, out: *std.Io.Writer, r: *std.Io.Reader, is_client: bool) Conn {
     r.* = std.Io.Reader.fixed(bytes);
-    return .{ .io = std.testing.io, .stream = undefined, .reader = undefined, .writer = undefined, .r = r, .w = out, .owns_stream = false, .is_client = is_client, .max_message = 1 << 16 };
+    return .{ .io = std.testing.io, .stream = undefined, .reader = undefined, .writer = undefined, .http = .{ .r = r, .w = out }, .owns_stream = false, .is_client = is_client, .max_message = 1 << 16 };
 }
 
 fn maskedFrame(al: std.mem.Allocator, op: u8, fin: bool, payload: []const u8) ![]u8 {
@@ -1027,14 +1039,10 @@ test "writeFrame: a task cancelled inside a frame still writes it whole" {
     var client: Conn = .{ .io = io, .stream = client_stream, .reader = undefined, .writer = undefined };
     client.reader = client_stream.reader(io, &cbuf[0]);
     client.writer = client_stream.writer(io, &cbuf[1]);
-    client.r = &client.reader.interface;
-    client.w = &client.writer.interface;
     defer client_stream.close(io);
     var server: Conn = .{ .io = io, .stream = server_stream, .reader = undefined, .writer = undefined, .is_client = false, .max_message = 8 << 20 };
     server.reader = server_stream.reader(io, &sbuf[0]);
     server.writer = server_stream.writer(io, &sbuf[1]);
-    server.r = &server.reader.interface;
-    server.w = &server.writer.interface;
     defer server_stream.close(io);
 
     // Far more than the socket buffers hold, so the write blocks until the other side reads.
@@ -1079,13 +1087,9 @@ const TestPair = struct {
         p.client = .{ .io = io, .stream = cs, .reader = undefined, .writer = undefined, .owns_stream = false };
         p.client.reader = cs.reader(io, &p.cbuf[0]);
         p.client.writer = cs.writer(io, &p.cbuf[1]);
-        p.client.r = &p.client.reader.interface;
-        p.client.w = &p.client.writer.interface;
         p.server = .{ .io = io, .stream = ss, .reader = undefined, .writer = undefined, .is_client = false, .owns_stream = false, .max_message = 8 << 20 };
         p.server.reader = ss.reader(io, &p.sbuf[0]);
         p.server.writer = ss.writer(io, &p.sbuf[1]);
-        p.server.r = &p.server.reader.interface;
-        p.server.w = &p.server.writer.interface;
     }
 
     fn deinit(p: *TestPair, io: Io) void {

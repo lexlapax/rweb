@@ -31,56 +31,6 @@ pub fn versionText() []const u8 {
     );
 }
 
-test "the owner comes from the node's user, and a tagged node has none" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const a = arena_state.allocator();
-    const user_node =
-        \\{"Self":{"UserID":42,"DNSName":"box.example.ts.net."},"User":{"42":{"LoginName":"you@example.com"}}}
-    ;
-    try std.testing.expectEqualStrings("you@example.com", try ownerFromStatus(a, user_node));
-    const tagged =
-        \\{"Self":{"UserID":7,"Tags":["tag:gateway"]},"User":{"7":{"LoginName":"box.example.ts.net"}}}
-    ;
-    try std.testing.expectError(error.TaggedNode, ownerFromStatus(a, tagged));
-    const empty_tags =
-        \\{"Self":{"UserID":42,"Tags":[]},"User":{"42":{"LoginName":"you@example.com"}}}
-    ;
-    try std.testing.expectEqualStrings("you@example.com", try ownerFromStatus(a, empty_tags));
-    try std.testing.expectError(error.NoSelf, ownerFromStatus(a, "{}"));
-    try std.testing.expectError(error.NoSelf, ownerFromStatus(a, "[]"));
-}
-
-test "malformed tailscale status is an error, never a crash" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const a = arena_state.allocator();
-    const bad = [_][]const u8{
-        \\{"Self":{"UserID":"7"},"User":{"7":{"LoginName":"x@y"}}}
-        ,
-        \\{"Self":{"UserID":7},"User":[]}
-        ,
-        \\{"Self":{"UserID":7},"User":{"7":"x@y"}}
-        ,
-        \\{"Self":{"UserID":7},"User":{"7":{"LoginName":7}}}
-        ,
-        \\{"Self":[],"User":{}}
-        ,
-    };
-    for (bad) |j| try std.testing.expectError(error.NoSelf, ownerFromStatus(a, j));
-    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "[]"));
-    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "{\"Self\":7}"));
-    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "{\"Self\":{\"DNSName\":\".\"}}"));
-    try std.testing.expectEqualStrings("box.example.ts.net", try dnsNameFromStatus(a, "{\"Self\":{\"DNSName\":\"box.example.ts.net.\"}}"));
-}
-
-test "version text names the version, commit and Rex revisions" {
-    const t = versionText();
-    try std.testing.expect(std.mem.startsWith(u8, t, "rweb " ++ build_options.version ++ "\n"));
-    try std.testing.expect(std.mem.indexOf(u8, t, "commit ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, t, "rex api revisions 18-24") != null);
-}
-
 const log = std.log.scoped(.rweb);
 
 /// The bridge's log. rweb's own scopes (and unscoped messages) log at the build's level. Ghostty's are a
@@ -105,17 +55,6 @@ fn logShown(comptime level: std.log.Level, comptime scope: @EnumLiteral()) bool 
     const output_prefix = [_][]const u8{ "osc_", "kitty_", "terminal_tmux", "mouse_", "key_" };
     for (output_prefix) |o| if (std.mem.startsWith(u8, name, o)) return false;
     return level == .err;
-}
-
-test "log: rweb's scopes as the build says, Ghostty's errors only, its output parsers not at all" {
-    try std.testing.expect(comptime logShown(.info, .rweb));
-    try std.testing.expect(comptime logShown(.debug, .rex_mirror));
-    try std.testing.expect(comptime logShown(.warn, .default));
-    try std.testing.expect(comptime !logShown(.err, .stream));
-    try std.testing.expect(comptime !logShown(.warn, .osc_color));
-    try std.testing.expect(comptime !logShown(.err, .kitty_gfx));
-    try std.testing.expect(comptime logShown(.err, .page_list));
-    try std.testing.expect(comptime !logShown(.warn, .page_list));
 }
 
 /// Print to standard error (the terminal, or the service's log).
@@ -208,36 +147,10 @@ pub fn main(init: std.process.Init) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var argv: std.ArrayList([]const u8) = .empty;
-    var it = init.minimal.args.iterate();
-    _ = it.next();
-    while (it.next()) |a| try argv.append(arena, a);
-    const env_map = init.environ_map;
-    const env: layout.Env = .{
-        .home = env_map.get("HOME"),
-        .xdg_config_home = env_map.get("XDG_CONFIG_HOME"),
-        .xdg_runtime_dir = env_map.get("XDG_RUNTIME_DIR"),
-        .uid = sys.uid(),
-    };
-    var diag: cli.Diag = .{};
-    const parsed = cli.parseEnv(arena, argv.items, env, &diag) catch |e| {
-        switch (e) {
-            error.Version => std.Io.File.stdout().writeStreamingAll(io, versionText()) catch {},
-            error.ShortHelp => std.Io.File.stdout().writeStreamingAll(io, cli.short_usage) catch {},
-            error.Usage => std.Io.File.stdout().writeStreamingAll(io, cli.usage) catch {},
-            error.SocketPathTooLong => {
-                say("rweb: the socket path {f} is {d} bytes, longer than a unix socket path can be here (at most {d}).\n", .{ xfer.Clean{ .s = diag.arg }, diag.arg.len, server.max_unix_path - 1 });
-                say("  Fix: {s}\n", .{socketPathFix(argv.items)});
-                std.process.exit(2);
-            },
-            else => {
-                if (diag.arg.len > 0) say("rweb: {s}: {s}\n", .{ diag.arg, cli.explainArg(e, diag.arg) }) else say("rweb: {s}\n", .{cli.explain(e)});
-                say("rweb: `rweb help` lists every option\n", .{});
-                std.process.exit(2);
-            },
-        }
-        std.process.exit(0);
-    };
+    const cmd = try commandLine(init, arena);
+    const argv = cmd.argv;
+    const env_map = cmd.env_map;
+    const parsed = cmd.parsed;
     if (parsed.token != null) say("rweb: WARNING: --token is visible to every user in the process list; use --token-file (or `rweb ssh`, which makes one)\n", .{});
 
     // ---- configuration: checked before the listener is taken, so a refusal never holds a port ----
@@ -255,12 +168,127 @@ pub fn main(init: std.process.Init) !void {
         .tcp => |port| .{ .tcp_loopback = port },
     };
     var listen_problem: xfer.Problem = .{};
-    var bound = server.bind(gpa, io, listen, &listen_problem) catch |e| listenFailed(listen, e, &listen_problem, parsed.command, argv.items);
+    var bound = server.bind(gpa, io, listen, &listen_problem) catch |e| listenFailed(listen, e, &listen_problem, parsed.command, argv);
     held = .{ .bound = &bound, .io = io };
     handleStopSignals(&bound);
 
-    // Secrets come from files only their owner can read, never from the command line (which every
-    // user on the machine can see). A layout's own files are made when missing.
+    const secrets = try readSecrets(arena, io, parsed);
+    const backend_secret = secrets.backend_secret;
+    const token = secrets.token;
+
+    var uids: std.ArrayList(u32) = .empty;
+    if (parsed.peer_uids) |list| for (list) |u| try uids.append(arena, switch (u) {
+        .uid => |n| n,
+        .self => sys.uid(),
+    });
+
+    const transfer = fileTransfer(arena, io, parsed);
+    defer if (transfer.upload_dir_handle) |d| d.close(io);
+    defer if (transfer.upload_parts_handle) |d| d.close(io);
+    var hub_cfg: hub.Config = .{ .observe_only = parsed.observe_only, .history_lines = parsed.history_lines, .transfer = transfer };
+    // The page may send its debug messages only when the bridge logs them (`--debug-input`).
+    hub_cfg.debug_input = parsed.debug_input;
+    // The page's mode frame says token mode (a dropped connection then waits for a tap).
+    hub_cfg.token_mode = token != null;
+
+    announce(arena, io, parsed, bound, backend_secret, token);
+
+    const rule = try accessRule(gpa, arena, io, parsed, bound, token, ts);
+
+    // ---- Rex: asked until it answers ----
+    var finder = RexFinder.init(arena, io, env_map, parsed.rex_socket) catch |e| {
+        releaseListener();
+        return e;
+    };
+    var rex_backoff: Backoff = .{};
+    const link = connectRex(gpa, io, &finder, hub_cfg, &rex_backoff) catch |e| {
+        releaseListener();
+        say("rweb: stopped while waiting for Rex\n", .{});
+        if (e == error.Canceled) std.process.exit(1);
+        return e;
+    };
+    defer link.ctl.close();
+    defer link.hub.close();
+
+    const srv = server.Server.startBound(gpa, io, link.hub, .{
+        .listen = bound.listen,
+        .problem = &listen_problem,
+        .debug_input = parsed.debug_input,
+        .backend_secret = backend_secret,
+        .lab = parsed.lab,
+        .own_address_max_age_ms = if (parsed.detect_own_addresses and !parsed.allow_own_address) own_address_max_age_ms else null,
+        .own_addresses_read_ms = rule.own_read_ms,
+        .access = .{
+            .owner = rule.owner,
+            .token = token,
+            .own_addresses = rule.own,
+            .allow_own_address = parsed.allow_own_address,
+            .allowed_peer_uids = if (parsed.peer_uids != null) uids.items else null,
+            .allowed_hosts = rule.hosts,
+        },
+    }, bound) catch |e| {
+        releaseListener();
+        say("rweb: cannot start serving: the system is out of resources\n", .{});
+        if (e == error.OutOfMemory) return e;
+        std.process.exit(1);
+    };
+    held = null; // the server owns the listener now
+    defer srv.stop();
+    say("rweb: serving (Rex at {s})\n", .{link.socket});
+
+    // Serve until the process is stopped, keeping this node's own addresses current meanwhile.
+    if (parsed.detect_own_addresses) keepOwnAddresses(gpa, io, srv, ts) else while (true) io.sleep(.fromSeconds(3600), .awake) catch return;
+}
+
+/// The command line, read and checked: the options to run with. Help and the version are printed and
+/// end the process here, as does a refusal (with its argument and the fix).
+fn commandLine(init: std.process.Init, arena: std.mem.Allocator) !struct { argv: []const []const u8, env_map: *std.process.Environ.Map, parsed: cli.Parsed } {
+    const io = init.io;
+    var argv: std.ArrayList([]const u8) = .empty;
+    var it = init.minimal.args.iterate();
+    _ = it.next();
+    while (it.next()) |a| try argv.append(arena, a);
+    const env_map = init.environ_map;
+    const env: layout.Env = .{
+        .home = env_map.get("HOME"),
+        .xdg_config_home = env_map.get("XDG_CONFIG_HOME"),
+        .xdg_runtime_dir = env_map.get("XDG_RUNTIME_DIR"),
+        .uid = sys.uid(),
+    };
+    var diag: cli.Diag = .{};
+    const action = cli.parseEnv(arena, argv.items, env, &diag) catch |e| {
+        switch (e) {
+            error.SocketPathTooLong => {
+                say("rweb: the socket path {f} is {d} bytes, longer than a unix socket path can be here (at most {d}).\n", .{ xfer.Clean{ .s = diag.arg }, diag.arg.len, server.max_unix_path - 1 });
+                say("  Fix: {s}\n", .{socketPathFix(argv.items)});
+                std.process.exit(2);
+            },
+            else => {
+                if (diag.arg.len > 0) say("rweb: {s}: {s}\n", .{ diag.arg, cli.explainArg(e, diag.arg) }) else say("rweb: {s}\n", .{cli.explain(e)});
+                say("rweb: `rweb help` lists every option\n", .{});
+                std.process.exit(2);
+            },
+        }
+    };
+    const parsed = switch (action) {
+        .run => |p| p,
+        .help => |h| {
+            const text = switch (h) {
+                .short => cli.short_usage,
+                .full => cli.usage,
+                .version => versionText(),
+            };
+            std.Io.File.stdout().writeStreamingAll(io, text) catch {}; // nothing to do if stdout is gone
+            std.process.exit(0);
+        },
+    };
+    return .{ .argv = argv.items, .env_map = env_map, .parsed = parsed };
+}
+
+/// The backend secret and the token, from files only their owner can read (never the command line,
+/// which every user on the machine can see). A layout's own files are made when missing. A refusal
+/// releases the listener and ends the process.
+fn readSecrets(arena: std.mem.Allocator, io: Io, parsed: cli.Parsed) !struct { backend_secret: ?[]const u8, token: ?[]const u8 } {
     var problem: xfer.Problem = .{};
     const secret_hints: xfer.Hints = .{ .item_option = "--backend-secret-file", .folder_option = if (parsed.make_backend_secret) "--config-dir" else null, .made_by_rweb = parsed.make_backend_secret };
     const token_hints: xfer.Hints = .{ .item_option = "--token-file", .folder_option = if (parsed.make_token_file) "--config-dir" else null, .made_by_rweb = parsed.make_token_file };
@@ -287,13 +315,12 @@ pub fn main(init: std.process.Init) !void {
         token = t;
     }
 
-    var uids: std.ArrayList(u32) = .empty;
-    if (parsed.peer_uids) |list| for (list) |u| try uids.append(arena, switch (u) {
-        .uid => |n| n,
-        .self => sys.uid(),
-    });
+    return .{ .backend_secret = backend_secret, .token = token };
+}
 
-    // File transfer: off unless asked for; uploads only into a folder that is ours alone.
+/// File transfer: off unless asked for; uploads only into a folder that is ours alone. The folders it
+/// opens stay open for the life of the process (the caller closes them).
+fn fileTransfer(arena: std.mem.Allocator, io: Io, parsed: cli.Parsed) xfer.Config {
     var transfer: xfer.Config = .{};
     if (parsed.enable_file_transfer) {
         transfer.enabled = true;
@@ -318,14 +345,12 @@ pub fn main(init: std.process.Init) !void {
             parsed.max_transfer_mb,
         });
     }
-    defer if (transfer.upload_dir_handle) |d| d.close(io);
-    defer if (transfer.upload_parts_handle) |d| d.close(io);
-    var hub_cfg: hub.Config = .{ .observe_only = parsed.observe_only, .history_lines = parsed.history_lines, .transfer = transfer };
-    // The page may send its debug messages only when the bridge logs them (`--debug-input`).
-    hub_cfg.debug_input = parsed.debug_input;
-    // The page's mode frame says token mode (a dropped connection then waits for a tap).
-    hub_cfg.token_mode = token != null;
+    return transfer;
+}
 
+/// What the operator needs to know once the listener is held: where it listens, what is weak about
+/// this setup, a token for a person at a terminal, and for `rweb ssh` the line to run on the laptop.
+fn announce(arena: std.mem.Allocator, io: Io, parsed: cli.Parsed, bound: server.Bound, backend_secret: ?[]const u8, token: ?[]const u8) void {
     const where = describeListener(arena, bound) catch "";
     say("rweb: listening on {s}{s}\n", .{ where, if (parsed.observe_only) ", observe-only" else "" });
     if (bound.listen == .tcp_loopback) {
@@ -354,10 +379,20 @@ pub fn main(init: std.process.Init) !void {
         layout.sshNextStep(&w, bound.listen.unix, parsed.ssh_port, user, host, parsed.token_file) catch {};
         say("{s}", .{w.buffered()});
     };
+}
 
-    // ---- Tailscale: this node's addresses, login and name, asked until it answers ----
-    var own: std.ArrayList([]const u8) = .empty;
-    try own.appendSlice(arena, parsed.own_addresses);
+/// Who may use the bridge: the owner, this node's own addresses (refused) and the host names requests
+/// may be for, from the options and, when asked, from Tailscale (asked until it answers). Fails closed:
+/// a rule that cannot be applied ends the process. For `rweb tailscale` it prints the step left.
+fn accessRule(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, parsed: cli.Parsed, bound: server.Bound, token: ?[]const u8, ts: []const u8) !struct {
+    owner: ?[]const u8,
+    own: []const access.Ip,
+    hosts: []const []const u8,
+    own_read_ms: ?i64,
+} {
+    // Kept as text until every source has answered, then parsed once below (`own`).
+    var own_text: std.ArrayList([]const u8) = .empty;
+    try own_text.appendSlice(arena, parsed.own_addresses);
     var owner = parsed.owner;
     var hosts: std.ArrayList([]const u8) = .empty;
     try hosts.appendSlice(arena, parsed.allowed_hosts);
@@ -378,7 +413,7 @@ pub fn main(init: std.process.Init) !void {
             }
             std.process.exit(2);
         };
-        try own.appendSlice(arena, facts.addresses);
+        try own_text.appendSlice(arena, facts.addresses);
         own_read_ms = bootNowMs(io);
         if (facts.owner) |o| owner = o;
         if (facts.dns_name) |n| {
@@ -388,11 +423,12 @@ pub fn main(init: std.process.Init) !void {
     }
     // Every own address must be one the rule can compare, and an owner rule needs at least one
     // unless the machine accepts its own address: fail closed rather than run without the rule.
-    for (own.items) |addr| if (!access.isAddress(addr)) {
+    var own: std.ArrayList(access.Ip) = .empty;
+    for (own_text.items) |addr| try own.append(arena, access.parseAddress(addr) orelse {
         releaseListener();
         say("rweb: Tailscale named \"{f}\" as one of this node's addresses, which is not an IP address, so rweb cannot refuse requests from this node.\n  Fix: pass this node's addresses with --own-address IP\n", .{xfer.Clean{ .s = addr }});
         std.process.exit(2);
-    };
+    });
     if ((owner != null) and !parsed.allow_own_address and own.items.len == 0) {
         releaseListener();
         say("rweb: rweb knows none of this node's Tailscale addresses, so it cannot refuse requests that come from this machine itself.\n  Fix: pass them with --own-address IP (from `tailscale ip`)\n", .{});
@@ -415,61 +451,25 @@ pub fn main(init: std.process.Init) !void {
         say("{s}", .{w.buffered()});
     }
 
-    // ---- Rex: asked until it answers ----
-    var finder = RexFinder.init(arena, io, env_map, parsed.rex_socket) catch |e| {
-        releaseListener();
-        return e;
-    };
-    var rex_backoff: Backoff = .{};
-    const link = connectRex(gpa, io, &finder, hub_cfg, &rex_backoff) catch |e| {
-        releaseListener();
-        say("rweb: stopped while waiting for Rex\n", .{});
-        if (e == error.Canceled) std.process.exit(1);
-        return e;
-    };
-    defer link.ctl.close();
-    defer link.hub.close();
+    return .{ .owner = owner, .own = own.items, .hosts = hosts.items, .own_read_ms = own_read_ms };
+}
 
-    const srv = server.Server.startBound(gpa, io, link.hub, .{
-        .listen = bound.listen,
-        .problem = &listen_problem,
-        .debug_input = parsed.debug_input,
-        .backend_secret = backend_secret,
-        .lab = parsed.lab,
-        .own_address_max_age_ms = if (parsed.detect_own_addresses and !parsed.allow_own_address) own_address_max_age_ms else null,
-        .own_addresses_read_ms = own_read_ms,
-        .access = .{
-            .owner = owner,
-            .token = token,
-            .own_addresses = own.items,
-            .allow_own_address = parsed.allow_own_address,
-            .allowed_peer_uids = if (parsed.peer_uids != null) uids.items else null,
-            .allowed_hosts = hosts.items,
-        },
-    }, bound) catch |e| {
-        releaseListener();
-        say("rweb: cannot start serving: the system is out of resources\n", .{});
-        if (e == error.OutOfMemory) return e;
-        std.process.exit(1);
-    };
-    held = null; // the server owns the listener now
-    defer srv.stop();
-    say("rweb: serving (Rex at {s})\n", .{link.socket});
-
-    // Serve until the process is stopped; meanwhile keep this node's own addresses current, so a
-    // request from a new address of this machine is refused too. The first check is made at once (the
-    // wait for Rex may have been long), then one a minute, sooner after a failure. The server itself
-    // refuses requests once the list has gone unconfirmed for `own_address_max_age_ms`, whatever this
-    // loop is doing.
-    if (!parsed.detect_own_addresses) {
-        while (true) io.sleep(.fromSeconds(3600), .awake) catch return;
-    }
+/// Keep this node's own addresses current while the bridge serves, so a request from a new address
+/// of this machine is refused too. The first check is made at once (the
+/// wait for Rex may have been long), then one a minute, sooner after a failure. The server itself
+/// refuses requests once the list has gone unconfirmed for `own_address_max_age_ms`, whatever this
+/// loop is doing.
+fn keepOwnAddresses(gpa: std.mem.Allocator, io: Io, srv: *server.Server, ts: []const u8) void {
     var refresh_failed = false;
     while (true) {
         {
             var attempt = std.heap.ArenaAllocator.init(gpa);
             defer attempt.deinit();
-            switch (srv.refreshOwnAddresses(tailscaleAddresses(attempt.allocator(), io, ts))) {
+            const fetched = tailscaleAddresses(attempt.allocator(), io, ts) catch |e| blk: {
+                log.debug("tailscale ip: {t}", .{e});
+                break :blk null;
+            };
+            switch (srv.refreshOwnAddresses(fetched)) {
                 .added => {
                     say("rweb: this node has a new Tailscale address; requests from it are refused from now on, as from the earlier ones\n", .{});
                     refresh_failed = false;
@@ -892,6 +892,67 @@ fn writeTmp(io: Io, dir: Io.Dir, name: []const u8, mode: u32, text: []const u8) 
     const f = try dir.createFile(io, name, .{ .permissions = @fromBackingInt(@intCast(mode)) });
     defer f.close(io);
     try f.writeStreamingAll(io, text);
+}
+
+test "the owner comes from the node's user, and a tagged node has none" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const user_node =
+        \\{"Self":{"UserID":42,"DNSName":"box.example.ts.net."},"User":{"42":{"LoginName":"you@example.com"}}}
+    ;
+    try std.testing.expectEqualStrings("you@example.com", try ownerFromStatus(a, user_node));
+    const tagged =
+        \\{"Self":{"UserID":7,"Tags":["tag:gateway"]},"User":{"7":{"LoginName":"box.example.ts.net"}}}
+    ;
+    try std.testing.expectError(error.TaggedNode, ownerFromStatus(a, tagged));
+    const empty_tags =
+        \\{"Self":{"UserID":42,"Tags":[]},"User":{"42":{"LoginName":"you@example.com"}}}
+    ;
+    try std.testing.expectEqualStrings("you@example.com", try ownerFromStatus(a, empty_tags));
+    try std.testing.expectError(error.NoSelf, ownerFromStatus(a, "{}"));
+    try std.testing.expectError(error.NoSelf, ownerFromStatus(a, "[]"));
+}
+
+test "malformed tailscale status is an error, never a crash" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const bad = [_][]const u8{
+        \\{"Self":{"UserID":"7"},"User":{"7":{"LoginName":"x@y"}}}
+        ,
+        \\{"Self":{"UserID":7},"User":[]}
+        ,
+        \\{"Self":{"UserID":7},"User":{"7":"x@y"}}
+        ,
+        \\{"Self":{"UserID":7},"User":{"7":{"LoginName":7}}}
+        ,
+        \\{"Self":[],"User":{}}
+        ,
+    };
+    for (bad) |j| try std.testing.expectError(error.NoSelf, ownerFromStatus(a, j));
+    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "[]"));
+    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "{\"Self\":7}"));
+    try std.testing.expectError(error.NoSelf, dnsNameFromStatus(a, "{\"Self\":{\"DNSName\":\".\"}}"));
+    try std.testing.expectEqualStrings("box.example.ts.net", try dnsNameFromStatus(a, "{\"Self\":{\"DNSName\":\"box.example.ts.net.\"}}"));
+}
+
+test "version text names the version, commit and Rex revisions" {
+    const t = versionText();
+    try std.testing.expect(std.mem.startsWith(u8, t, "rweb " ++ build_options.version ++ "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, t, "commit ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "rex api revisions 18-24") != null);
+}
+
+test "log: rweb's scopes as the build says, Ghostty's errors only, its output parsers not at all" {
+    try std.testing.expect(comptime logShown(.info, .rweb));
+    try std.testing.expect(comptime logShown(.debug, .rex_mirror));
+    try std.testing.expect(comptime logShown(.warn, .default));
+    try std.testing.expect(comptime !logShown(.err, .stream));
+    try std.testing.expect(comptime !logShown(.warn, .osc_color));
+    try std.testing.expect(comptime !logShown(.err, .kitty_gfx));
+    try std.testing.expect(comptime logShown(.err, .page_list));
+    try std.testing.expect(comptime !logShown(.warn, .page_list));
 }
 
 test "a secret file must be private, ours, long enough and made of safe characters" {

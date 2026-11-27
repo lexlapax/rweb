@@ -15,6 +15,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fsparse = @import("fsparse.zig");
 const sys = @import("sys.zig");
+const access = @import("access.zig");
 const Io = std.Io;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
@@ -131,12 +132,9 @@ pub const Registry = struct {
         defer r.mu.unlock(r.io);
         r.sweepLocked();
         var found: ?usize = null;
-        for (r.items.items, 0..) |e, i| {
-            if (token.len != e.token.len) continue;
-            var diff: u8 = 0;
-            for (e.token, token) |a, b| diff |= a ^ b;
-            if (diff == 0) found = i;
-        }
+        for (r.items.items, 0..) |e, i| if (access.constantTimeEql(&e.token, token)) {
+            found = i;
+        };
         const i = found orelse return null;
         if (r.items.items[i].kind != kind) return null; // a download token cannot start an upload
         return r.items.swapRemove(i);

@@ -866,7 +866,10 @@ pub const Hub = struct {
             // A refusal names the terminal it was for, so a page that has moved on can ignore it, and
             // says whether it may pass (Rex not answering, a snapshot that did not come) or not (Rex
             // refused: no such terminal).
-            .open => |o| h.openTerminal(v, o.session, o.block) catch |e| h.refuseOpen(v, o.session, o.block, @errorName(e), false, e != error.RexError),
+            .open => |o| h.openTerminal(v, o.session, o.block) catch |e| {
+                log.info("open failed: {t}", .{e});
+                h.refuseOpen(v, o.session, o.block, errorText(e), false, e != error.RexError);
+            },
             .close_view => h.unsubscribe(v),
             .redraw => {
                 v.mu.lockUncancelable(h.io);
@@ -927,7 +930,7 @@ pub const Hub = struct {
                 var api = h.rexApi();
                 defer api.deinit();
                 var t_info = api.downloadBegin(term.session_id, term.block_id, &ref, path) catch |e| {
-                    return h.refuse(v, what, if (api.last_error) |le| le else @errorName(e));
+                    return h.refuse(v, what, if (api.last_error) |le| le else errorText(e));
                 };
                 defer t_info.deinit();
                 if (t_info.value.size > h.cfg.transfer.max_bytes) {
@@ -1013,8 +1016,44 @@ pub const Hub = struct {
         v.pushTextOwned(text);
     }
 
-    fn fail(h: *Hub, v: *Viewer, what: []const u8, e: anyerror) void {
-        const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = what, .msg = @errorName(e) }, .{}) catch return;
+    /// What can go wrong with a page's request, by the time it is answered.
+    const BrowserError = rex.api.Error || rex.input.Input.SubmitError || error{
+        NotLive,
+        WriteFailed,
+        // Opening a terminal.
+        NoSnapshot,
+        StreamFailed,
+        NoSuchTerminal,
+        ConcurrencyUnavailable,
+        Closing,
+        RedrawTooLarge,
+    };
+
+    /// A failure in words the page shows as they are (it never matches on them); the error's own name
+    /// goes to the log, for whoever reads it.
+    fn errorText(e: BrowserError) []const u8 {
+        return switch (e) {
+            error.RexError => "Rex refused it or did not answer",
+            error.BadShape => "Rex answered in a form this rweb does not understand",
+            error.Canceled => "rweb is stopping",
+            error.OutOfMemory => "rweb is out of memory",
+            error.Backpressure => "too much is waiting to be sent to the terminal; try again in a moment",
+            error.Closed => "the terminal is closed",
+            error.InvalidUtf8 => "the text is not valid UTF-8",
+            error.NotLive => "the terminal is not showing yet",
+            error.WriteFailed => "the terminal's text could not be put together",
+            error.NoSnapshot => "Rex did not send the terminal's contents in time",
+            error.StreamFailed => "the terminal's output could not be reached",
+            error.NoSuchTerminal => "there is no such terminal",
+            error.ConcurrencyUnavailable => "rweb cannot start another task now",
+            error.Closing => "rweb is stopping",
+            error.RedrawTooLarge => "the terminal is too large to show",
+        };
+    }
+
+    fn fail(h: *Hub, v: *Viewer, what: []const u8, e: BrowserError) void {
+        log.info("{s} failed: {t}", .{ what, e });
+        const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = what, .msg = errorText(e) }, .{}) catch return;
         v.pushTextOwned(text);
     }
 
@@ -1094,7 +1133,7 @@ pub const Hub = struct {
             var api_v = h.rexApi();
             defer api_v.deinit();
             const api = &api_v;
-            const result: anyerror!void = switch (msg) {
+            const result: rex.api.Error!void = switch (msg) {
                 .new_session => |label| r: {
                     var made = api.createSession(label) catch |e| break :r e;
                     made.deinit();
@@ -1116,7 +1155,7 @@ pub const Hub = struct {
                 else => unreachable,
             };
             result catch |e| {
-                h.refuse(v, "manage", api.last_error orelse @errorName(e));
+                h.refuse(v, "manage", api.last_error orelse errorText(e));
                 break :blk false;
             };
             break :blk true;
@@ -1201,10 +1240,11 @@ pub const Hub = struct {
         v.history_lines = h.cfg.history_lines;
     }
 
-    fn openTerminal(h: *Hub, v: *Viewer, sid: []const u8, bid: []const u8) !void {
+    fn openTerminal(h: *Hub, v: *Viewer, sid: []const u8, bid: []const u8) BrowserError!void {
         h.unsubscribe(v);
         var kb: [512]u8 = undefined;
-        const key = try terminalKey(&kb, sid, bid);
+        // Ids longer than a key holds (the browser's are bounded well below it) name no terminal.
+        const key = terminalKey(&kb, sid, bid) catch return error.NoSuchTerminal;
 
         const term: *Terminal = blk: {
             h.mu.lockUncancelable(h.io);
@@ -1293,11 +1333,17 @@ pub const Hub = struct {
     const snapshot_wait_ms = 5000;
 
     /// A new mirror following a new data stream, live and observed by `t`.
-    fn openStream(h: *Hub, sid: []const u8, bid: []const u8, t: *Terminal) !Stream {
+    fn openStream(h: *Hub, sid: []const u8, bid: []const u8, t: *Terminal) error{ OutOfMemory, Canceled, NoSnapshot, StreamFailed }!Stream {
         const m = try Mirror.initPending(h.gpa, h.io);
         errdefer m.deinit();
         m.setObserver(t.observer());
-        const d = try Data.openTerminal(h.gpa, h.io, h.ctl, sid, bid, m.sink());
+        // Opening the stream can fail in some forty ways (the socket, the upgrade, Rex's ticket): to
+        // a page they are one, "the terminal's output could not be reached"; the log keeps which.
+        const d = Data.openTerminal(h.gpa, h.io, h.ctl, sid, bid, m.sink()) catch |e| {
+            if (e == error.OutOfMemory) return error.OutOfMemory;
+            log.info("opening {s}'s output stream: {t}", .{ bid, e });
+            return error.StreamFailed;
+        };
         errdefer d.close();
         // Live, failed or ended: whichever comes first.
         if (!try m.waitSettled(snapshot_wait_ms)) return error.NoSnapshot;
@@ -1346,23 +1392,25 @@ pub const Hub = struct {
             /// The viewer's redraw requests seen when this redraw started.
             seq: u64,
             /// Takes `body` (the redraw, made with the hub's allocator): queued as it is, or freed.
-            fn deliver(ctx: *anyopaque, body: []u8) anyerror!void {
+            fn deliver(ctx: *anyopaque, body: []u8) Mirror.DeliverError!void {
                 const c: *@This() = @ptrCast(@alignCast(ctx));
                 const gpa = c.h.gpa;
                 var queued = false;
                 defer if (!queued) gpa.free(body);
                 const m = c.t.mirror;
-                // The mirror is locked: read its state directly.
+                // The mirror is locked: read its state directly. A redraw is made from its terminal,
+                // so the terminal exists.
+                const term = &m.emu.?.term;
                 const opened = try std.json.Stringify.valueAlloc(gpa, .{
                     .t = "opened",
                     .session = c.t.session_id,
                     .block = c.t.block_id,
-                    .cols = m.term.cols,
-                    .rows = m.term.rows,
+                    .cols = term.cols,
+                    .rows = term.rows,
                     .history_rows = blk: {
-                        const primary = m.term.screens.get(.primary) orelse break :blk @as(usize, 0);
+                        const primary = term.screens.get(.primary) orelse break :blk @as(usize, 0);
                         const total = primary.pages.total_rows;
-                        break :blk if (total > m.term.rows) total - m.term.rows else 0;
+                        break :blk if (total > term.rows) total - term.rows else 0;
                     },
                     .history_max = max_redraw_history_rows,
                     .owner = m.owner,

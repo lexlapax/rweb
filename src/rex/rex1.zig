@@ -57,7 +57,7 @@ pub const Splitter = struct {
     /// sequences included: a candidate that turns out not to be a message is not passed on by
     /// itself but joins the plain run it sits in (ordinary colour output is one call, not one per
     /// ESC). Only a candidate begun in an earlier call is passed on separately.
-    pub fn feed(s: *Splitter, bytes: []const u8, sink: anytype) anyerror!void {
+    pub fn feed(s: *Splitter, bytes: []const u8, sink: anytype) !void {
         // Program output in `bytes[pending..]` not yet passed on: it ends where the current
         // candidate begins (`cand`), or at `i` when there is none.
         var pending: ?usize = null;
@@ -141,7 +141,7 @@ pub const Splitter = struct {
 
     /// The held candidate is program output. One that began in this call stays in `bytes` and
     /// joins the pending run; one from an earlier call is passed on now.
-    fn dropCandidate(s: *Splitter, cand: *?usize, sink: anytype) anyerror!void {
+    fn dropCandidate(s: *Splitter, cand: *?usize, sink: anytype) !void {
         if (cand.* != null) {
             s.held.clearRetainingCapacity();
             s.esc_pending = false;
@@ -152,7 +152,7 @@ pub const Splitter = struct {
     }
 
     /// Hand everything held to the sink as program output.
-    fn flushHeld(s: *Splitter, sink: anytype) anyerror!void {
+    fn flushHeld(s: *Splitter, sink: anytype) !void {
         defer {
             s.held.clearRetainingCapacity();
             s.esc_pending = false;

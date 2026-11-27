@@ -30,8 +30,9 @@ pub const Config = struct {
     owner: ?[]const u8 = null,
     /// Required shared secret, in the `rweb-token` header or the `token` query parameter.
     token: ?[]const u8 = null,
-    /// This node's own Tailscale addresses, as text.
-    own_addresses: []const []const u8 = &.{},
+    /// This node's own Tailscale addresses, parsed once where they enter (`parseAddress`), so a request
+    /// compares bytes and an address that does not parse cannot reach the rule.
+    own_addresses: []const Ip = &.{},
     allow_own_address: bool = false,
     /// The own addresses are read from Tailscale while running, and have not been confirmed for too
     /// long (`server.Options.own_address_max_age_ms`): the node may have a new address that is not on
@@ -77,7 +78,6 @@ pub const Refusal = enum {
     no_forwarded_for,
     bad_forwarded_for,
     /// One of the configured own addresses is not an address: the rule cannot be applied.
-    bad_own_address,
     /// The own addresses could not be confirmed with Tailscale for too long: the rule cannot be applied.
     own_addresses_stale,
     /// Token mode, and the request carries no token at all (header, query or cookie).
@@ -101,7 +101,6 @@ pub const Refusal = enum {
             .bad_host => "host not allowed",
             .no_forwarded_for => "no X-Forwarded-For",
             .bad_forwarded_for => "X-Forwarded-For is not an address",
-            .bad_own_address => "a configured own address is not an address",
             .own_addresses_stale => "this node's own addresses could not be confirmed with Tailscale for too long",
             .no_token => "no token",
             .cross_site_token => "a token sent from another site",
@@ -225,19 +224,13 @@ pub fn decideAllButToken(cfg: Config, request: Request) Decision {
     if (!cfg.allow_own_address and cfg.own_addresses.len > 0) {
         // A list that may be out of date would silently miss a new address of this node: refuse.
         if (cfg.own_addresses_stale) return .{ .deny = .own_addresses_stale };
-        // A configured address that does not parse would silently match nothing: refuse instead.
-        // (Startup already rejects such addresses; this is the second line.)
-        for (cfg.own_addresses) |own| if (parseAddress(own) == null) return .{ .deny = .bad_own_address };
         const xff = request.header("x-forwarded-for") orelse return .{ .deny = .no_forwarded_for };
         var seen = false;
         var it = std.mem.tokenizeAny(u8, xff, ", ");
         while (it.next()) |addr| {
             seen = true;
             const a = parseAddress(addr) orelse return .{ .deny = .bad_forwarded_for };
-            for (cfg.own_addresses) |own| {
-                const o = parseAddress(own).?; // checked above
-                if (sameAddress(a, o)) return .{ .deny = .own_address };
-            }
+            for (cfg.own_addresses) |own| if (sameAddress(a, own)) return .{ .deny = .own_address };
         }
         if (!seen) return .{ .deny = .bad_forwarded_for };
     }
@@ -306,7 +299,32 @@ fn splitHost(h: []const u8) ?struct { name: []const u8, port: ?[]const u8 } {
     return .{ .name = h, .port = null }; // a name, or a bare IPv6 address
 }
 
-const Ip = union(enum) { v4: [4]u8, v6: [16]u8 };
+/// An IP address as bytes (`parseAddress`).
+pub const Ip = union(enum) {
+    v4: [4]u8,
+    v6: [16]u8,
+
+    pub fn format(ip: Ip, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (ip) {
+            .v4 => |b| try w.print("{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }),
+            .v6 => |b| {
+                // std writes `[addr]:port`; the address is what is wanted.
+                var buf: [64]u8 = undefined;
+                const text = std.fmt.bufPrint(&buf, "{f}", .{std.Io.net.Ip6Address{ .bytes = b, .port = 0 }}) catch unreachable; // 47 bytes at most
+                try w.writeAll(text[1 .. std.mem.lastIndexOfScalar(u8, text, ']') orelse text.len]);
+            },
+        }
+    }
+};
+
+/// Addresses known when the program is written (tests, fixed lists), parsed at compile time.
+pub fn ips(comptime texts: []const []const u8) [texts.len]Ip {
+    return comptime blk: {
+        var out: [texts.len]Ip = undefined;
+        for (texts, 0..) |t, i| out[i] = parseAddress(t) orelse @compileError("not an IP address: " ++ t);
+        break :blk out;
+    };
+}
 
 /// Whether `text` is an IP address this module can compare (IPv4, IPv6, IPv4-mapped, with or
 /// without brackets or a zone).
@@ -315,7 +333,7 @@ pub fn isAddress(text: []const u8) bool {
 }
 
 /// An IP literal as bytes, with an IPv4-mapped IPv6 address turned into IPv4 and any zone dropped.
-fn parseAddress(text: []const u8) ?Ip {
+pub fn parseAddress(text: []const u8) ?Ip {
     const t = std.mem.trim(u8, text, "[]");
     if (std.Io.net.Ip4Address.parse(t, 0)) |a| return .{ .v4 = a.bytes } else |_| {}
     const no_zone = t[0 .. std.mem.indexOfScalar(u8, t, '%') orelse t.len];
@@ -325,31 +343,7 @@ fn parseAddress(text: []const u8) ?Ip {
     return .{ .v6 = b };
 }
 
-/// Whether two lists of address texts name the same addresses, in any order and spelling. A text that
-/// is not an address makes the lists different.
-pub fn sameAddressList(a: []const []const u8, b: []const []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a) |x| {
-        const px = parseAddress(x) orelse return false;
-        var found = false;
-        for (b) |y| {
-            const py = parseAddress(y) orelse return false;
-            if (sameAddress(px, py)) found = true;
-        }
-        if (!found) return false;
-    }
-    for (b) |y| {
-        const py = parseAddress(y) orelse return false;
-        var found = false;
-        for (a) |x| if (sameAddress(parseAddress(x).?, py)) {
-            found = true;
-        };
-        if (!found) return false;
-    }
-    return true;
-}
-
-fn sameAddress(a: Ip, b: Ip) bool {
+pub fn sameAddress(a: Ip, b: Ip) bool {
     return switch (a) {
         .v4 => |x| b == .v4 and std.mem.eql(u8, &x, &b.v4),
         .v6 => |x| b == .v6 and std.mem.eql(u8, &x, &b.v6),
@@ -369,7 +363,10 @@ pub fn originMatchesHost(origin: []const u8, host: []const u8) bool {
     return host.len > 0 and std.ascii.eqlIgnoreCase(rest, host);
 }
 
-fn constantTimeEql(a: []const u8, b: []const u8) bool {
+/// Whether two secrets are equal, taking the same time wherever they first differ (their lengths are
+/// not secret). The one comparison of secrets in rweb: tokens, the transfer tokens and the backend
+/// secret all use it. std's `crypto.timing_safe.eql` takes arrays of a length fixed at compile time.
+pub fn constantTimeEql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     var diff: u8 = 0;
     for (a, b) |x, y| diff |= x ^ y;
@@ -401,7 +398,7 @@ pub fn queryToken(target: []const u8) ?[]const u8 {
 const testing = std.testing;
 
 const owner = "owner@example.com";
-const base_cfg: Config = .{ .owner = owner, .own_addresses = &.{ "100.64.0.5", "fd7a:115c:a1e0::5" } };
+const base_cfg: Config = .{ .owner = owner, .own_addresses = &ips(&.{ "100.64.0.5", "fd7a:115c:a1e0::5" }) };
 
 fn req(headers: []const Header) Request {
     return .{ .headers = headers };
@@ -606,20 +603,14 @@ test "the own-address rule compares addresses, and fails closed" {
     try testing.expectEqual(Decision.allow, decide(base_cfg, req(&near)));
 }
 
-test "an own address that is not an address refuses every request, not none" {
-    const login = Header{ .name = "Tailscale-User-Login", .value = owner };
-    const bad_cfg: Config = .{ .owner = owner, .own_addresses = &.{ "100.64.0.5", "not-an-ip" } };
-    // Even from the node's own address and from another node: the rule cannot be applied.
-    const own = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "100.64.0.5" } };
-    try expectDeny(.bad_own_address, bad_cfg, req(&own));
-    const other = [_]Header{ login, .{ .name = "X-Forwarded-For", .value = "100.64.0.9" } };
-    try expectDeny(.bad_own_address, bad_cfg, req(&other));
-    // The machine's explicit choice to accept its own address still stands.
-    var allow_cfg = bad_cfg;
-    allow_cfg.allow_own_address = true;
-    try testing.expectEqual(Decision.allow, decide(allow_cfg, req(&own)));
+test "own addresses are parsed where they enter, and print as addresses" {
     try testing.expect(isAddress("100.64.0.5") and isAddress("[fd7a:115c:a1e0::5%1]") and isAddress("::ffff:100.64.0.5"));
     try testing.expect(!isAddress("") and !isAddress("100.64.0") and !isAddress("host.example") and !isAddress("100.64.0.5/32"));
+    // An IPv4-mapped address is the IPv4 one.
+    try testing.expect(sameAddress(parseAddress("::ffff:100.64.0.5").?, ips(&.{"100.64.0.5"})[0]));
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("100.64.0.5", try std.fmt.bufPrint(&buf, "{f}", .{ips(&.{"100.64.0.5"})[0]}));
+    try testing.expectEqualStrings("fd7a:115c:a1e0::5", try std.fmt.bufPrint(&buf, "{f}", .{ips(&.{"fd7a:115c:a1e0::5"})[0]}));
 }
 
 test "a security header that appears twice is refused, in any case" {
@@ -698,15 +689,6 @@ test "the token form is judged on every check but the token, and only in token m
     try testing.expectEqualStrings("h", presentedToken(.{ .headers = &.{.{ .name = "RWEB-TOKEN", .value = "h" }}, .query_token = "q" }).?);
     try testing.expectEqualStrings("q", presentedToken(.{ .headers = &.{}, .query_token = "q" }).?);
     try testing.expectEqualStrings("c", presentedToken(req(&.{.{ .name = "Cookie", .value = "rweb-token=c" }})).?);
-}
-
-test "address lists compare as sets of addresses" {
-    try testing.expect(sameAddressList(&.{ "100.64.0.5", "fd7a:115c:a1e0::5" }, &.{ "FD7A:115C:A1E0:0:0:0:0:5", "100.64.0.5" }));
-    try testing.expect(sameAddressList(&.{}, &.{}));
-    try testing.expect(!sameAddressList(&.{"100.64.0.5"}, &.{"100.64.0.6"}));
-    try testing.expect(!sameAddressList(&.{"100.64.0.5"}, &.{ "100.64.0.5", "100.64.0.6" }));
-    try testing.expect(!sameAddressList(&.{ "100.64.0.5", "100.64.0.5" }, &.{ "100.64.0.5", "100.64.0.6" }));
-    try testing.expect(!sameAddressList(&.{"junk"}, &.{"junk"}));
 }
 
 test "own addresses that could not be confirmed refuse every request the rule would judge" {

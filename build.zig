@@ -22,7 +22,7 @@ fn commitFile(b: *std.Build, given: ?[]const u8) std.Build.LazyPath {
 /// tests and every release target use it.
 const Modules = struct { rex: *std.Build.Module, bridge: *std.Build.Module };
 
-fn bridgeModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, opts: *std.Build.Step.Options, commit: std.Build.LazyPath, strip: ?bool) Modules {
+fn bridgeModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, opts: *std.Build.Step.Options, commit: std.Build.LazyPath, asset_gen: std.Build.LazyPath, strip: ?bool) Modules {
     const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = optimize });
     const rex = b.createModule(.{ .root_source_file = b.path("src/rex/root.zig"), .target = target, .optimize = optimize });
     rex.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
@@ -33,7 +33,18 @@ fn bridgeModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     m.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
     m.addOptions("build_options", opts);
     m.addAnonymousImport("git_commit", .{ .root_source_file = commit });
+    m.addAnonymousImport("asset_gen", .{ .root_source_file = asset_gen });
     return .{ .rex = rex, .bridge = m };
+}
+
+/// The page assets' ETags and gzip bodies, made once per build on the build machine by
+/// `tools/assetgen.zig` (the same for every target), for `src/bridge/assets.zig` to embed.
+fn assetGen(b: *std.Build) std.Build.LazyPath {
+    const table = b.createModule(.{ .root_source_file = b.path("src/bridge/asset_table.zig"), .target = b.graph.host, .optimize = .safe });
+    const gen_mod = b.createModule(.{ .root_source_file = b.path("tools/assetgen.zig"), .target = b.graph.host, .optimize = .safe });
+    gen_mod.addImport("asset_table", table);
+    const run = b.addRunArtifact(b.addExecutable(.{ .name = "assetgen", .root_module = gen_mod }));
+    return run.addOutputDirectoryArg("assets").path(b, "asset_gen.zig");
 }
 
 fn bridgeExe(b: *std.Build, m: *std.Build.Module) *std.Build.Step.Compile {
@@ -70,7 +81,8 @@ pub fn build(b: *std.Build) void {
     opts.addOption([]const u8, "ghostty", ghosttyTag(zon.dependencies.ghostty.url));
     const commit = commitFile(b, b.option([]const u8, "commit", "Commit this build is from (default: git rev-parse HEAD at build time)"));
 
-    const host = bridgeModules(b, target, optimize, opts, commit, null);
+    const asset_gen = assetGen(b);
+    const host = bridgeModules(b, target, optimize, opts, commit, asset_gen, null);
     // The Rex library, for a package that depends on this one.
     b.modules.put(b.graph.arena, "rex", host.rex) catch @panic("OOM");
     const tests = b.addTest(.{ .root_module = host.rex, .filters = filters });
@@ -94,7 +106,7 @@ pub fn build(b: *std.Build) void {
     pack.has_side_effects = true;
     for (dist_targets) |t| {
         const resolved = b.resolveTargetQuery(t.query);
-        const d = bridgeExe(b, bridgeModules(b, resolved, .safe, opts, commit, true).bridge);
+        const d = bridgeExe(b, bridgeModules(b, resolved, .safe, opts, commit, asset_gen, true).bridge);
         const inst = b.addInstallArtifact(d, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("dist/stage/{s}", .{t.name}) } } });
         pack.step.dependOn(&inst.step);
     }

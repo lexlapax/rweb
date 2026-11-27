@@ -133,9 +133,25 @@ pub const Api = struct {
         var r = a.ctl.callValue(method, payload, timeout_ms) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
-            else => {
-                // No answer from Rex: say why, rather than leave an older call's message.
-                a.setLastError("{s}", .{@errorName(e)});
+            // No answer from Rex: say why, in words, rather than leave an older call's message.
+            error.Timeout => {
+                a.setLastError("{s}", .{"Rex did not answer in time"});
+                return error.RexError;
+            },
+            error.NotConnected, error.ConnectionLost => {
+                a.setLastError("{s}", .{"Rex is not reachable (not running, or restarting)"});
+                return error.RexError;
+            },
+            error.Closed => {
+                a.setLastError("{s}", .{"rweb is stopping"});
+                return error.RexError;
+            },
+            error.MessageTooLarge => {
+                a.setLastError("{s}", .{"the request is larger than Rex accepts"});
+                return error.RexError;
+            },
+            error.BadResponse => {
+                a.setLastError("{s}", .{"Rex answered in a form this rweb does not understand"});
                 return error.RexError;
             },
         };
@@ -546,9 +562,9 @@ test "live: every typed call on a throwaway session, and what ownership does (ne
     {
         m.mu.lockUncancelable(testing.io);
         defer m.mu.unlock(testing.io);
-        std.debug.print("ownership: after owned resize the stream's resize owner = {?s}; size {d}x{d}\n", .{ m.owner, m.term.cols, m.term.rows });
-        try testing.expectEqual(@as(u16, 100), m.term.cols);
-        try testing.expectEqual(@as(u16, 30), m.term.rows);
+        std.debug.print("ownership: after owned resize the stream's resize owner = {?s}; size {d}x{d}\n", .{ m.owner, m.emu.?.term.cols, m.emu.?.term.rows });
+        try testing.expectEqual(@as(u16, 100), m.emu.?.term.cols);
+        try testing.expectEqual(@as(u16, 30), m.emu.?.term.rows);
     }
     var saw_owner_event = false;
     while (try ctl.nextEvent(300)) |e| {
@@ -661,7 +677,7 @@ test "api: a call that gets no answer says why, and does not keep an older messa
     try testing.expectError(error.RexError, api.attach("session:none"));
     try testing.expect(std.mem.indexOf(u8, api.last_error.?, "session_not_found") != null);
     try testing.expectError(error.RexError, api.run("rweb.test.no_answer", null));
-    try testing.expectEqualStrings("Timeout", api.last_error.?);
+    try testing.expectEqualStrings("Rex did not answer in time", api.last_error.?);
 }
 
 /// A fake with one attached session, and an Api on a control connection to it.
@@ -734,10 +750,10 @@ test "api: listings, downloads and terminal info wait for Rex only as long as th
         const t0 = Io.Clock.awake.now(testing.io).toMilliseconds();
         if (std.mem.endsWith(u8, method, "list_dir")) {
             try testing.expectError(error.RexError, r.api.listDir(r.sid, r.bid, ""));
-            try testing.expectEqualStrings("Timeout", r.api.last_error.?);
+            try testing.expectEqualStrings("Rex did not answer in time", r.api.last_error.?);
         } else if (std.mem.endsWith(u8, method, "download_begin")) {
             try testing.expectError(error.RexError, r.api.downloadBegin(r.sid, r.bid, "download:x", "/nope"));
-            try testing.expectEqualStrings("Timeout", r.api.last_error.?);
+            try testing.expectEqualStrings("Rex did not answer in time", r.api.last_error.?);
         } else {
             var info = try r.api.termInfo(r.sid, r.bid); // a piece that timed out is left out
             defer info.deinit();

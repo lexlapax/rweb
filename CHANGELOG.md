@@ -4,6 +4,13 @@ Versions follow [semantic versioning](https://semver.org). Newest first. `rweb -
 version, the commit it was built from, the build mode and target, the Ghostty (libghostty-vt) tag and
 the Rex API revisions it speaks.
 
+## Unreleased
+
+- When the page reports a failure it says what happened in words ("Rex did not answer in time", "the
+  terminal's output could not be reached"), not an internal error name; the name goes to rweb's log.
+- Building: the page's files are compressed and given their validators at build time, not on the first
+  request.
+
 ## 0.2.0 (2026-11-27)
 
 Works with Rex 0.1.0-preview.25, is quicker to react and lighter on busy terminals, and is the result of a
