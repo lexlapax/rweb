@@ -547,6 +547,7 @@ pub const Conn = struct {
     }
 
     fn writeFrameLocked(c: *Conn, op: Opcode, data: []const u8) !void {
+        std.debug.assert(@import("sync.zig").held(&c.write_mutex));
         const w = c.w;
         var mask: [4]u8 = .{ 0, 0, 0, 0 };
         if (c.is_client) c.io.random(&mask);

@@ -135,7 +135,7 @@ Tally: 20 pass, 16 fix needed, 1 not applicable, 1 needs a run.
 | 35 | `single_threaded` | not applicable | Not set anywhere; the server needs real concurrency. | |
 | 36 | Diagnostics and shutdown | fix needed | 47 scoped `std.log` calls; refusals are logged by reason, never with header values, tokens or client text (`knownPath`, `src/bridge/server.zig:1370`). `std.debug.print` (15) is `say`, the operator's startup messages, on purpose. Missing: error return traces are off in ReleaseSafe and `error_tracing` is not set; the release is stripped and `tools/release.sh` keeps no unstripped copy, so a panic's addresses cannot be mapped to source. SIGTERM and SIGINT end the process with `_exit` after removing its socket (`src/bridge/main.zig:128-131`): an upload in progress leaves its partial file behind, because the `defer` that removes it never runs (`src/bridge/server.zig:1113-1116`). | Keep the unstripped binaries beside each release; measure `error_tracing` in ReleaseSafe; write uploads under a temporary name that startup clears, or say in the user guide that a stop mid-upload leaves a partial file. |
 | 37 | Naming and docs | pass | Official casing throughout; 1254 doc-comment lines that give ownership, lifetimes and which lock guards what. Small things: the type `Data` (`src/rex/data.zig:48`) is a filler name, and the test double `fake` is exported from the library's root (`src/rex/root.zig:6`). | |
-| 38 | Optional TigerStyle pass | fix needed (house style) | 11 functions are over 70 lines: `main` 269, `Server.serve` 203, `cli.parseEnv` 168, `xfer.explainWith` 163, `Control.callTimeout` 91, `serveUpload` 87, `Splitter.feed` 84, `Hub.handle` 74, `redrawInto` 73, `refreshTree` 72, `viewerSession` 71. One recursion, bounded at depth 64 (`cloneValue`, `src/rex/api.zig:583`; it goes with Phase B 1). Three assertions in the whole tree (`src/bridge/main.zig:96`, `src/bridge/xfer.zig:180`, `:773`). No unbounded loop driven by a peer was found. | Phase B 6. |
+| 38 | Optional TigerStyle pass | fix needed (house style) | 11 functions are over 70 lines: `main` 269, `Server.serve` 203, `cli.parseEnv` 168, `xfer.explainWith` 163, `Control.callTimeout` 91, `serveUpload` 87, `Splitter.feed` 84, `Hub.handle` 74, `redrawInto` 73, `refreshTree` 72, `viewerSession` 71. One recursion, bounded at depth 64 (`cloneValue`, `src/rex/api.zig:583`; it goes with Phase B 1). Three assertions in the whole tree (34 after Phase B step 6) (`src/bridge/main.zig:96`, `src/bridge/xfer.zig:180`, `:773`). No unbounded loop driven by a peer was found. | Phase B 6. |
 
 ### Correctness and security items from this pass
 
@@ -422,6 +422,28 @@ Rex, in ReleaseSafe.
    binary flag. Never on anything a peer sends: that stays an error.
    Measure: the count (3 now); a fuzz and test run in ReleaseSafe with them in, to see that none
    fires; the step 2 workload once more, since an assert's argument is evaluated in every mode.
+
+   **Done 2026-11-26.** 30 assertions added (4 before, 34 now), none on anything a peer sends:
+   - Every `...Locked` function asserts its lock is held (`rex.sync.held`, which reads `Io.Mutex`'s
+     state: it catches a call with the lock not held at all, not one made while another task holds it):
+     the viewer's five, the hub's nine, the Rex client's four, the mirror's, the WebSocket writer's and
+     the transfer registry's.
+   - A viewer's queue counts are exact: taking a frame asserts the count covers it (the subtraction
+     saturated before, which would have hidden a drift), and an empty queue has zero live bytes, reply
+     frames and reply bytes. A frame is binary exactly when it is output or a redraw.
+   - A terminal's reference count is above zero before each decrement; a terminal is on no other list
+     when it is linked into one (`Terminal.link`).
+   - The event ring's index is within the ring, and after an append its length and bytes are within
+     their limits.
+
+   Found by them: `Control.close` drained the event ring with `popLocked` without the lock (harmless,
+   nothing else runs by then; it takes the lock now), and the ring's tests called the locked functions
+   bare (they go through small locking helpers now).
+   Checks: Debug and ReleaseSafe suites (ReleaseSafe with the live Rex) passed; the fuzz targets ran five
+   minutes in ReleaseSafe without a failure; the fixed workload in ReleaseSafe, twice: 32 MiB to one
+   viewer 105 to 115 ms and to three 117 to 122 ms (109 to 112 and about 120 before), redraw and Copy
+   view unchanged, keystroke median 1.9 to 2.0 ms (2.9 to 3.1 in the morning's runs: the machine's spread,
+   not the assertions).
 
 7. **What the checklist adds, small and independent of the above.**
    - The five correctness items of section 3, if any is still open then.

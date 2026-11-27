@@ -168,6 +168,7 @@ pub const Registry = struct {
     }
 
     fn sweepLocked(r: *Registry) void {
+        std.debug.assert(@import("rex").sync.held(&r.mu));
         const t = r.now();
         var i: usize = 0;
         while (i < r.items.items.len) {

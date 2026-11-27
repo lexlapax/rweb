@@ -526,6 +526,7 @@ pub const Mirror = struct {
     }
 
     fn historyRowsLocked(m: *Mirror) u32 {
+        std.debug.assert(@import("sync.zig").held(&m.mu));
         const primary = m.term.screens.get(.primary) orelse return 0;
         const total = primary.pages.total_rows;
         return @intCast(@min(if (total > m.term.rows) total - m.term.rows else 0, std.math.maxInt(u32)));

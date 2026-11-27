@@ -25,6 +25,8 @@ const protocol = @import("protocol.zig");
 const xfer = @import("xfer.zig");
 
 const log = std.log.scoped(.hub);
+const assert = std.debug.assert;
+const lockHeld = rex.sync.held;
 
 pub const Config = struct {
     /// The bridge never writes, resizes or takes ownership, whatever a browser asks.
@@ -150,18 +152,27 @@ pub const Viewer = struct {
             if (!redraw and v.head < v.frames.items.len) {
                 const f = v.frames.items[v.head];
                 v.head += 1;
+                // Only output and the redraw are binary.
+                assert(f.binary == (f.kind == .live or f.kind == .redraw));
+                // The counts are exact: each frame takes back what queueing it charged.
+                switch (f.kind) {
+                    .live => {
+                        assert(v.live_bytes >= f.data.len + live_frame_overhead);
+                        v.live_bytes -= f.data.len + live_frame_overhead;
+                    },
+                    .reply, .copy => {
+                        assert(v.text_frames >= 1 and v.text_bytes >= f.data.len);
+                        v.text_frames -= 1;
+                        v.text_bytes -= f.data.len;
+                    },
+                    .opened, .theme, .redraw, .mode, .rex, .tree, .closed, .exited => {},
+                }
                 if (v.head == v.frames.items.len) {
                     v.frames.clearRetainingCapacity();
                     v.head = 0;
+                    // Nothing queued: nothing counted.
+                    assert(v.live_bytes == 0 and v.text_frames == 0 and v.text_bytes == 0);
                 } else if (v.head >= 64 and v.head * 2 >= v.frames.items.len) v.compactLocked();
-                switch (f.kind) {
-                    .live => v.live_bytes -|= f.data.len + live_frame_overhead,
-                    .reply, .copy => {
-                        v.text_frames -|= 1;
-                        v.text_bytes -|= f.data.len;
-                    },
-                    else => {},
-                }
                 v.mu.unlock(v.hub.io);
                 return f;
             }
@@ -183,6 +194,7 @@ pub const Viewer = struct {
 
     /// Move the unsent frames to the front of the list.
     fn compactLocked(v: *Viewer) void {
+        assert(lockHeld(&v.mu));
         const rest = v.frames.items[v.head..];
         std.mem.copyForwards(Frame, v.frames.items[0..rest.len], rest);
         v.frames.items.len = rest.len;
@@ -300,6 +312,7 @@ pub const Viewer = struct {
 
     /// The viewer fell behind: drop its queued screen content and redraw it, at most once a second.
     fn overflowLocked(v: *Viewer) void {
+        assert(lockHeld(&v.mu));
         v.dropScreenLocked();
         v.needs_redraw = true;
         v.redraw_seq +%= 1;
@@ -313,11 +326,13 @@ pub const Viewer = struct {
     /// queueing goes through here, so once a viewer has been pointed at a terminal (`claimLocked`
     /// reserves the slot) a `closed` always has room.
     fn reserveLocked(v: *Viewer, n: usize) Allocator.Error!void {
+        assert(lockHeld(&v.mu));
         try v.frames.ensureUnusedCapacity(v.hub.gpa, n + 1);
     }
 
     /// Tell the viewer its terminal went, with the frame made when it was opened. Never allocates.
     fn queueClosedLocked(v: *Viewer) void {
+        assert(lockHeld(&v.mu));
         const text = v.closed_frame orelse return;
         v.closed_frame = null;
         if (v.closed) return v.hub.gpa.free(text);
@@ -335,6 +350,7 @@ pub const Viewer = struct {
     /// Drop queued screen content (live output, and any earlier redraw with its `opened` and theme
     /// frames): a redraw replaces all of it. Replies and state frames stay, in order.
     fn dropScreenLocked(v: *Viewer) void {
+        assert(lockHeld(&v.mu));
         const gpa = v.hub.gpa;
         var w: usize = 0;
         for (v.frames.items[v.head..]) |f| switch (f.kind) {
@@ -698,6 +714,7 @@ pub const Hub = struct {
 
     /// Caller holds `mu`.
     fn pushModeLocked(h: *Hub, v: *Viewer) void {
+        assert(lockHeld(&h.mu));
         v.mu.lockUncancelable(h.io);
         const observe = v.observe;
         v.mu.unlock(h.io);
@@ -1160,6 +1177,8 @@ pub const Hub = struct {
     /// Drop one reference; true when it was the last, and the caller must destroy `t` (after
     /// releasing `mu`).
     fn unrefLocked(h: *Hub, t: *Terminal) bool {
+        assert(lockHeld(&h.mu));
+        assert(t.refs > 0);
         t.refs -= 1;
         if (t.refs > 0) return false;
         h.unregisterLocked(t);
@@ -1168,12 +1187,14 @@ pub const Hub = struct {
 
     /// Caller holds `mu`. Forget every attached session; each is attached again when needed.
     fn forgetAttachedLocked(h: *Hub) void {
+        assert(lockHeld(&h.mu));
         var it = h.attached.keyIterator();
         while (it.next()) |k| h.gpa.free(k.*);
         h.attached.clearRetainingCapacity();
     }
 
     fn unregisterLocked(h: *Hub, t: *Terminal) void {
+        assert(lockHeld(&h.mu));
         if (!t.registered) return;
         var it = h.terminals.iterator();
         while (it.next()) |e| if (e.value_ptr.* == t) {
@@ -1189,6 +1210,7 @@ pub const Hub = struct {
     /// `closed` frame for `t` and a slot for it are made first: on failure nothing has changed.
     /// Caller holds `mu`.
     fn claimLocked(h: *Hub, v: *Viewer, t: *Terminal) Allocator.Error!void {
+        assert(lockHeld(&h.mu));
         const closed = try std.json.Stringify.valueAlloc(h.gpa, .{ .t = "closed", .session = t.session_id, .block = t.block_id, .reason = "closed" }, .{});
         v.mu.lockUncancelable(h.io);
         defer v.mu.unlock(h.io);
@@ -1717,11 +1739,13 @@ pub const Hub = struct {
     /// Caller holds `mu`. Close every terminal the last tree does not have; returns those the caller
     /// destroys after releasing `mu`.
     fn closeGoneLocked(h: *Hub) ?*Terminal {
+        assert(lockHeld(&h.mu));
         const known = if (h.known) |*k| k else return null;
         var dead: ?*Terminal = null;
         // One at a time: closing takes a terminal out of `terminals`, which must not change while it
         // is iterated.
         while (h.goneLocked(known)) |t| if (h.closeTerminalLocked(t)) {
+            assert(t.link == null); // on no other list
             t.link = dead;
             dead = t;
         };
@@ -1730,6 +1754,7 @@ pub const Hub = struct {
 
     /// Caller holds `mu`. A terminal whose block, and whose session's blocks, are not in `known`.
     fn goneLocked(h: *Hub, known: *const Known) ?*Terminal {
+        assert(lockHeld(&h.mu));
         var it = h.terminals.valueIterator();
         while (it.next()) |tp| {
             const t = tp.*;
@@ -1757,6 +1782,7 @@ pub const Hub = struct {
     /// left and the caller must destroy `t` after releasing `mu`; otherwise the last task holding
     /// it does. Never allocates: every viewer of `t` is told `closed` (see `Viewer.closed_frame`).
     fn closeTerminalLocked(h: *Hub, t: *Terminal) bool {
+        assert(lockHeld(&h.mu));
         h.unregisterLocked(t);
         // Detach every viewer and empty the list in one step under `vmu`: a subscribe in progress
         // either finishes before (and is emptied out) or finds `term` cleared (and adds nothing).
@@ -1767,6 +1793,7 @@ pub const Hub = struct {
             if (v.term != t) continue;
             v.term = null;
             v.queueClosedLocked();
+            assert(t.refs > 0);
             t.refs -= 1;
         }
         t.viewers.clearRetainingCapacity();
@@ -1792,6 +1819,7 @@ pub const Hub = struct {
             while (it.next()) |tp| {
                 const t = tp.*;
                 if (t.ended.load(.acquire) == 0 or t.restarting) continue;
+                assert(t.link == null); // on no other list
                 t.link = ended;
                 ended = t;
             }

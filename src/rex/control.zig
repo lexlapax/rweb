@@ -11,6 +11,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ws = @import("ws.zig");
+const sync = @import("sync.zig");
 const wire = @import("wire.zig");
 
 const log = std.log.scoped(.rex_control);
@@ -187,7 +188,10 @@ pub const Control = struct {
         c.conn = null;
         if (c.token) |t| c.gpa.free(t);
         c.token = null;
+        // Nothing else runs by now; the lock is taken anyway, as `popLocked` requires.
+        c.mu.lockUncancelable(c.io);
         while (c.popLocked()) |e| e.deinit(c.gpa);
+        c.mu.unlock(c.io);
         c.pending.deinit(c.gpa);
     }
 
@@ -263,6 +267,7 @@ pub const Control = struct {
     // ---- the event queue: a fixed ring, O(1) push and pop, never fails ----
 
     fn slot(c: *Control, k: usize) *Event {
+        std.debug.assert(k < max_queued_events);
         return &c.events[(c.ev_head + k) % max_queued_events];
     }
 
@@ -271,6 +276,7 @@ pub const Control = struct {
     /// events are replaced by one `dropped` (which already means "re-read your state").
     /// `connected` and `disconnected` are never dropped (see `mergeNoticesLocked`).
     fn pushLocked(c: *Control, e: Event) void {
+        std.debug.assert(sync.held(&c.mu));
         defer c.signal.set(c.io);
         const full = c.ev_len == max_queued_events;
         switch (e) {
@@ -300,9 +306,12 @@ pub const Control = struct {
         if (e == .server) c.ev_bytes += e.server.json.len;
         c.slot(c.ev_len).* = e;
         c.ev_len += 1;
+        // Within the ring, and within the byte budget `pushLocked` checks.
+        std.debug.assert(c.ev_len <= max_queued_events and c.ev_bytes <= max_queued_event_bytes);
     }
 
     fn popLocked(c: *Control) ?Event {
+        std.debug.assert(sync.held(&c.mu));
         if (c.ev_len == 0) return null;
         const e = c.events[c.ev_head];
         c.ev_head = (c.ev_head + 1) % max_queued_events;
@@ -314,6 +323,7 @@ pub const Control = struct {
     /// Drop every queued `server` and `dropped` event, keeping the connection notices in order,
     /// and queue one `dropped` carrying the latest `seq` lost (`seq` included, if not null).
     fn collapseLocked(c: *Control, seq: ?u64) void {
+        std.debug.assert(sync.held(&c.mu));
         var lost = seq;
         var kept: usize = 0;
         for (0..c.ev_len) |k| {
@@ -343,6 +353,7 @@ pub const Control = struct {
     /// `connected` anyway. A run of notices shrinks to at most three, so a full ring always
     /// makes room.
     fn mergeNoticesLocked(c: *Control) void {
+        std.debug.assert(sync.held(&c.mu));
         var out: usize = 0;
         for (0..c.ev_len) |k| {
             c.slot(out).* = c.slot(k).*;
@@ -885,6 +896,19 @@ fn bareControl() !*Control {
     return c;
 }
 
+/// `pushLocked` and `popLocked` under the lock they require, for the ring's tests.
+fn testPush(c: *Control, e: Event) void {
+    c.mu.lockUncancelable(c.io);
+    defer c.mu.unlock(c.io);
+    c.pushLocked(e);
+}
+
+fn testPop(c: *Control) ?Event {
+    c.mu.lockUncancelable(c.io);
+    defer c.mu.unlock(c.io);
+    return c.popLocked();
+}
+
 fn freeBare(c: *Control) void {
     c.freeState();
     testing.allocator.destroy(c);
@@ -893,19 +917,19 @@ fn freeBare(c: *Control) void {
 fn pushServer(c: *Control, seq: u64, len: usize) !void {
     const json = try testing.allocator.alloc(u8, len);
     @memset(json, 'x');
-    c.pushLocked(.{ .server = .{ .seq = seq, .json = json } });
+    testPush(c, .{ .server = .{ .seq = seq, .json = json } });
 }
 
 test "control: the event queue is a bounded ring; overflow becomes one dropped, notices stay" {
     const c = try bareControl();
     defer freeBare(c);
-    c.pushLocked(.{ .connected = .{ .generation = 1, .resumed = false } });
+    testPush(c, .{ .connected = .{ .generation = 1, .resumed = false } });
     var seq: u64 = 1;
     while (seq <= 3000) : (seq += 1) {
         try pushServer(c, seq, 100);
         if (seq == 1500) {
-            c.pushLocked(.disconnected);
-            c.pushLocked(.{ .connected = .{ .generation = 2, .resumed = true } });
+            testPush(c, .disconnected);
+            testPush(c, .{ .connected = .{ .generation = 2, .resumed = true } });
         }
         try testing.expect(c.ev_len <= max_queued_events);
     }
@@ -914,7 +938,7 @@ test "control: the event queue is a bounded ring; overflow becomes one dropped, 
         for (got.items) |e| e.deinit(testing.allocator);
         got.deinit(testing.allocator);
     }
-    while (c.popLocked()) |e| try got.append(testing.allocator, e);
+    while (testPop(c)) |e| try got.append(testing.allocator, e);
     try testing.expectEqual(@as(usize, 0), c.ev_bytes);
     try testing.expect(got.items.len <= max_queued_events);
     // The notices, in order, then one dropped, then the server events since.
@@ -938,28 +962,28 @@ test "control: server events have a byte budget" {
     try testing.expect(c.ev_bytes <= max_queued_event_bytes);
     // Four fit exactly; the fifth replaced them with a dropped carrying its seq.
     try testing.expectEqual(@as(usize, 1), c.ev_len);
-    const e = c.popLocked().?;
+    const e = testPop(c).?;
     try testing.expect(e == .dropped and e.dropped.seq == 5);
     // One event over the whole budget is dropped too.
     try pushServer(c, 6, max_queued_event_bytes + 1);
-    try testing.expect(c.popLocked().? == .dropped);
+    try testing.expect(testPop(c).? == .dropped);
 }
 
 test "control: a queue full of connection notices merges them without losing the last state" {
     const c = try bareControl();
     defer freeBare(c);
-    c.pushLocked(.{ .connected = .{ .generation = 1, .resumed = false } });
+    testPush(c, .{ .connected = .{ .generation = 1, .resumed = false } });
     var gen: u32 = 2;
     while (gen < 3000) : (gen += 1) {
-        c.pushLocked(.disconnected);
-        c.pushLocked(.{ .connected = .{ .generation = gen, .resumed = gen != 700 } });
+        testPush(c, .disconnected);
+        testPush(c, .{ .connected = .{ .generation = gen, .resumed = gen != 700 } });
         try testing.expect(c.ev_len <= max_queued_events);
     }
     try pushServer(c, 1, 10);
     var last_connected: ?Event = null;
     var saw_unresumed = false;
     var prev: ?std.meta.Tag(Event) = null;
-    while (c.popLocked()) |e| {
+    while (testPop(c)) |e| {
         defer e.deinit(testing.allocator);
         if (e == .connected) {
             last_connected = e;

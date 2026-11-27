@@ -1,7 +1,7 @@
 # Agent context map
 
-Last updated: 2026-11-26 (Phase B step 5: the supervisor and stream opening wait on events, one
-write-deadline watcher per connection, no lock around Rex calls; step 6 next). Read first; load linked
+Last updated: 2026-11-26 (Phase B step 6: assertions on internal invariants, 4 to 34; step 7 next).
+Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
@@ -45,8 +45,10 @@ a 4-second `echo` loop, upright again after it.
   before), and each task calls Rex through its own `Api` (one lock serialised every call). A closed block
   reaches the page in 2.4 ms (195), opening takes 0.8 ms (7.4), a resize behind another browser's stuck
   listing 0.7 ms (4.9 s). Found on the way: the supervisor swallowed a cancel in places, which the 200 ms
-  poll had hidden (`close` waited 30 s); it now checks `closing` before every wait. **Next: step 6**,
-  assertions on internal invariants; then step 7.
+  poll had hidden (`close` waited 30 s); it now checks `closing` before every wait. **Step 6 done**:
+  30 assertions (lock held in every `...Locked` function via `rex.sync.held`, exact viewer queue counts,
+  frame kinds, reference counts, list links, the event ring's bounds); the workload is unchanged with
+  them. **Next: step 7**, the checklist's small items, and lockstep with the current Rex release.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
