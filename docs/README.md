@@ -21,6 +21,8 @@
   `tools/vendor/rebuild.sh` rebuilds them byte for byte.
 - [Packaging](../packaging/README.md): the Homebrew tap and the AUR package, and how each release
   updates them.
+- [Upstream check](upstream-check.md): what changed upstream of rweb's pins (Rex, Ghostty, Zig, the
+  vendored packages), what to do about each, and the results after each release.
 
 ## How it was reviewed
 

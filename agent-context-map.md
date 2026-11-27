@@ -25,6 +25,21 @@ a 4-second `echo` loop, upright again after it.
 
 ## Where things stand (2026-11-27)
 
+- **0.3.0 is released (2026-11-27)** and closed out: GitHub Release `v0.3.0` at `38f4a3f` (archives,
+  `SHA256SUMS`, `SHA256SUMS.sig`, the first signed release; `tools/release.sh 38f4a3f` on laptop-mac,
+  signed through 1Password with the owner's approval; signature and sums verified after download; the
+  latest-release API answers v0.3.0). Homebrew tap `19a54b4`, AUR `rweb-bin` `bc0eca2`, both 0.3.0
+  (packaging/README.md). **Not deployed yet** on the owner's machines (they run 0.2.0); the owner's next
+  item is setup-repo on the upstream binaries for macOS and Linux (download the release vs Homebrew/AUR:
+  the owner's choice), which is also the 0.3.0 live run through Serve.
+- **Upstream check (owner, 2026-11-27):** `tools/upstream-check.sh rex|network`, `tools/upstream.lock`,
+  [docs/upstream-check.md](docs/upstream-check.md); AGENTS.md makes it the first step after each release.
+  First run: Rex preview.25 / revision 24 and its `llms.txt` unchanged on laptop-mac and linux-box;
+  network half in the sandbox's job profile (proposal `20261127-123921-job-shell/rweb-upstream-check`):
+  **Ghostty `vt-1.0.2` is out** (pinned `vt-1.0.1`): look at it before new features; esbuild 0.28.2 is
+  newer but kept (it makes the wterm bundle byte-identical); Zig and the npm packages as pinned.
+  Checked: shellcheck; the rex half here (same), with a changed lock hash (CHANGED) and with no server
+  (unreadable).
 - **0.3.0 docs pass (owner, 2026-11-27: every current document checked one by one for correctness, not
   only versions):** README (features, security wording for the stricter Origin, seven rounds, docs table,
   status), user guide (each install method's service, upgrade, logs, removal; the ⋯ menu as the page has

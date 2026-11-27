@@ -1,0 +1,6 @@
+# What this rweb was built and checked against, for tools/upstream-check.sh. Updated when an upstream
+# change has been looked at and accounted for (docs/upstream-check.md).
+# The Rex server's own protocol document (GET /llms.txt on its socket), checked 2026-11-27 for 0.3.0:
+# the same on macOS and Linux at this version.
+rex-version 0.1.0-preview.25
+rex-llms-sha256 a0953db7b42c54ad09572e8c0b7eb863f3d4a15c573e9c7bb6f77ab7ab59300e

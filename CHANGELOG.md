@@ -4,6 +4,12 @@ Versions follow [semantic versioning](https://semver.org). Newest first. `rweb -
 version, the commit it was built from, the build mode and target, the Ghostty (libghostty-vt) tag and
 the Rex API revisions it speaks.
 
+## Unreleased
+
+- `tools/upstream-check.sh` reports what changed upstream of rweb's pins: the Rex server's API revision
+  and protocol document, Ghostty's libghostty-vt tags, Zig and the vendored browser packages
+  (`docs/upstream-check.md`, in the source repository).
+
 ## 0.3.0 (2026-11-27)
 
 Easier to install, check and keep current: Homebrew and the AUR, `rweb doctor`, a daily check for a newer

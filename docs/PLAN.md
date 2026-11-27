@@ -327,6 +327,8 @@ Where the steps below stand (2026-11-27):
   0.3.0.
 - Added by the owner, 2026-11-27, for after 0.3.0 and before new features: a check of the upstreams rweb
   pins (Rex, Ghostty's libghostty-vt, Zig, the vendored browser packages) for changes to account for.
+  Done: `tools/upstream-check.sh` ([upstream-check.md](upstream-check.md)). First run after 0.3.0:
+  Ghostty `vt-1.0.2` is out (rweb pins `vt-1.0.1`); everything else as pinned or kept on purpose.
 - Exit: not met (nobody else has installed it from a channel).
 
 Then:

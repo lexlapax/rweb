@@ -76,6 +76,11 @@ global agent instructions ("Worktrees in the core repos").
 
 ## Work and validation
 
+**After each release, before new features (owner, 2026-11-27):** run `tools/upstream-check.sh rex` here
+and `tools/upstream-check.sh network` in the sandbox's job profile (it reads the internet), and account
+for every change it reports as [docs/upstream-check.md](docs/upstream-check.md) says: take it, or record
+why not. Record the results there, and in the commit that closes out the release.
+
 Read the task's phase in the plan through the map, make focused changes, add tests, and run the
 relevant checks. Build with Ghostty in the same optimize mode as the bridge, and measure
 performance only in `ReleaseSafe` or faster. Tests that need no real Rex use the fake server;

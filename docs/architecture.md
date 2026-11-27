@@ -291,7 +291,7 @@ and validated; the full list is at the top of `src/bridge/protocol.zig`.
 | `tests/web/` | Tests for the page's logic (`zig build web-test`) |
 | `assets/logo/` | The logo's SVG sources, the social preview and `build.sh`, which exports the rasters (the page's icons are in `src/bridge/web/icons/`) |
 | `assets/screenshots/` | The README's and the user guide's screenshots (also in the release archives) |
-| `tools/` | `dist.sh` and `release.sh` (release archives, signed; `release-base.test.sh` checks its folder rules; `release-signers` holds the release key), `packaging.sh` (the Homebrew formula and AUR package from a release), `vendor/` (rebuilds the vendored browser code), `assetgen.zig` (the page's table, ETags and gzip bodies, run by the build), `notices.py` (third-party notices; `licenses/` holds licence texts a package does not ship) |
+| `tools/` | `dist.sh` and `release.sh` (release archives, signed; `release-base.test.sh` checks its folder rules; `release-signers` holds the release key), `packaging.sh` (the Homebrew formula and AUR package from a release), `upstream-check.sh` and `upstream.lock` (what changed upstream of the pins), `vendor/` (rebuilds the vendored browser code), `assetgen.zig` (the page's table, ETags and gzip bodies, run by the build), `notices.py` (third-party notices; `licenses/` holds licence texts a package does not ship) |
 | `packaging/`, `contrib/` | The Homebrew formula and AUR templates; the systemd unit and LaunchAgent shipped in the archive |
 
 ## Pinned dependencies

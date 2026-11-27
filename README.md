@@ -176,6 +176,7 @@ zig build web-test                    # the page's logic (needs Node)
 zig build fuzz --fuzz=1M              # fuzz the parsers; -Dtest-filter=<name> picks one target
 zig build dist                        # archives of this working tree (uncommitted edits included) in zig-out/dist
 tools/release.sh [COMMIT]             # release archives: one commit's clean export, tested, built with the pinned Zig
+tools/upstream-check.sh [rex|network] # what changed upstream of the pins (Rex, Ghostty, Zig, npm)
 ```
 
 ## Documentation
