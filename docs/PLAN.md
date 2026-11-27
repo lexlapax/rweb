@@ -310,7 +310,11 @@ Where the steps below stand (2026-11-26):
   Serve as the command it names would use them, and says what to fix.
 - Step 2: rounds five and six reviewed rweb for other people's machines (shared hosts, groups, disks,
   procedures). Done for now; repeat when step 1 or 3 changes much.
-- Step 3: no channel yet (no Homebrew tap, Linux unit or AUR package).
+- Step 3: made 2026-11-27, published with the next release: a Homebrew formula (release binary, macOS ARM64
+  and Linux x86-64, `brew services`), an AUR package `rweb-bin` (with a systemd user unit), and the
+  services in the archive (`contrib/`); `tools/packaging.sh` makes them from a signed release
+  ([packaging/README.md](../packaging/README.md)). Not yet published: the tap repository
+  `lexlapax/homebrew-rweb` (the owner's word to create it) and the AUR package (the owner's AUR account).
 - Step 4: tagged releases with checksums and notes, and the Rex revisions in `rweb --version`: done.
   Signed checksums: since 2026-11-27, `SHA256SUMS.sig` (`ssh-keygen -Y sign`, namespace `file`, key
   `rweb-release` in `tools/release-signers`, the README and the user guide; held in the owner's 1Password

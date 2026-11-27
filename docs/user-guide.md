@@ -28,7 +28,21 @@ Contents: [1 What you need](#1-what-you-need) · [2 Install](#2-install) ·
 
 ## 2. Install
 
-Download the archive for your platform, `SHA256SUMS` and `SHA256SUMS.sig` from the release, then:
+**Homebrew** (macOS on Apple silicon, Linux x86-64), from the release after 0.2.0:
+
+```sh
+brew tap lexlapax/rweb && brew trust lexlapax/rweb   # Homebrew loads a tap's formulae only once trusted
+brew install rweb
+```
+
+Then run `rweb tailscale` once in a terminal (section 5 or 6), and `brew services start rweb` keeps it
+running at login. The formula installs the release archive below, checked by its SHA-256.
+
+**Arch Linux**, from the AUR (from the release after 0.2.0): the package `rweb-bin`, with any AUR helper
+(`yay -S rweb-bin`). It installs `/usr/bin/rweb` and a systemd user unit, `rweb.service`, that runs
+`rweb tailscale`: `systemctl --user enable --now rweb`.
+
+**The release archive**, anywhere else. Download the archive for your platform, `SHA256SUMS` and `SHA256SUMS.sig` from the release, then:
 
 ```sh
 echo 'rweb-release namespaces="file" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB0wc9eAtN/xCGWv2pru3OpgCrJd6mUNNxhHU7ht0RdW' > rweb-release-signers
@@ -45,8 +59,9 @@ OpenSSH; it should say `Good "file" signature for rweb-release`); the third that
 repository), not from the release page, so that someone who could change the release could not also
 change the key. Releases signed so: from the one after 0.2.0.
 
-The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README and its logo
-(`assets/logo/`), the changelog, the licence (MIT) and the third-party notices. `rweb --version` shows the
+The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README and its pictures
+(`assets/`), the services of sections 5 and 6 (`contrib/systemd/rweb.service`,
+`contrib/launchd/local.rweb.plist`), the changelog, the licence (MIT) and the third-party notices. `rweb --version` shows the
 version, the commit it was built from, and the Rex API revisions it speaks. To build from source instead:
 `zig build -Doptimize=ReleaseSafe` with Zig 0.17.1 (see the README).
 

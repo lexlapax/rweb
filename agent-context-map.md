@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-27 (0.2.0 released; Phase 6: `rweb doctor`, rebuildable browser code and signed checksums done; channels next).
+Last updated: 2026-11-27 (0.2.0 released; Phase 6: doctor, rebuildable browser code, signed checksums and channels done; the update checker next).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -98,7 +98,14 @@ a 4-second `echo` loop, upright again after it.
   `RWEB_RELEASE_UNSIGNED=1`. On the owner's Macs run it with `RWEB_SIGN_AGENT` set to the 1Password agent
   socket (`~/Library/Group Containers/<team>.com.1password/t/agent.sock`); the owner approves each
   signature. Checked end to end: a trial `tools/release.sh` signed through 1Password and verified.
-  **Next:** channels (PLAN Phase 6 step 3).
+  Channels made (owner 2026-11-27: Homebrew from the release binary; Linux: archive + systemd unit, AUR,
+  Homebrew on Linux): `packaging/` templates, `tools/packaging.sh VERSION` (refuses an unsigned release),
+  `contrib/` services in the archive. Checked: brew style/audit/fetch in a temporary trusted tap (removed),
+  makepkg on linux-box. To publish at the release: create `lexlapax/homebrew-rweb` (owner's word), the AUR
+  package (owner's account). **Next: the update checker** (owner 2026-11-27: on by default,
+  `--no-update-check` turns it off; the bridge asks GitHub's latest-release API 10 min after start, then
+  daily with up to an hour's spread; tells the log, the page's ⋯ menu and `rweb doctor`; downloads
+  nothing). **Then, per the owner:** everything release-ready, the owner's review round 7, fixes, release.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

@@ -70,7 +70,9 @@ It never listens on the network itself. You reach it in one of two ways:
 ## Quick start (Tailscale)
 
 You need Rex running, [Tailscale](https://tailscale.com/download) on the Rex machine and on your phone
-(same account, with MagicDNS and HTTPS certificates turned on for the tailnet), and a release archive.
+(same account, with MagicDNS and HTTPS certificates turned on for the tailnet), and rweb: from Homebrew
+(`brew tap lexlapax/rweb && brew trust lexlapax/rweb && brew install rweb`), the AUR (`rweb-bin`), both
+from the release after 0.2.0, or a release archive:
 
 ```sh
 echo 'rweb-release namespaces="file" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB0wc9eAtN/xCGWv2pru3OpgCrJd6mUNNxhHU7ht0RdW' > rweb-release-signers

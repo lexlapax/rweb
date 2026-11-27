@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- rweb as a macOS LaunchAgent (docs/user-guide.md, "Run behind Tailscale on macOS"): replace YOU with your
+     account name, copy to ~/Library/LaunchAgents/local.rweb.plist, then
+     launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.rweb.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.rweb</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/YOU/.local/bin/rweb</string>
+    <string>tailscale</string>
+  </array>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/rweb.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/rweb.log</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

@@ -1,0 +1,29 @@
+# A template: tools/packaging.sh fills in @VERSION@ and the archive's SHA-256 from a release's SHA256SUMS;
+# the result is the AUR package rweb-bin (with its .SRCINFO from `makepkg --printsrcinfo`).
+# Maintainer: Sandeep Puri <381394+lexlapax@users.noreply.github.com>
+pkgname=rweb-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Web client for Rex terminal sessions, reached through Tailscale Serve or SSH"
+arch=('x86_64')
+url="https://github.com/lexlapax/rweb"
+license=('MIT')
+provides=('rweb')
+conflicts=('rweb')
+optdepends=('tailscale: to reach it with rweb tailscale'
+            'openssh: to check the release signature, and for rweb ssh')
+# The release binary as built and signed: static, stripped, position-independent.
+options=('!strip' '!debug')
+source=("https://github.com/lexlapax/rweb/releases/download/v${pkgver}/rweb-${pkgver}-linux-x86_64.tar.gz")
+sha256sums=('@SHA256_LINUX_X86_64@')
+
+package() {
+  cd "rweb-${pkgver}-linux-x86_64"
+  install -Dm755 rweb "$pkgdir/usr/bin/rweb"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 THIRD-PARTY-NOTICES.md "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-NOTICES.md"
+  install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname/"
+  install -Dm644 docs/user-guide.md docs/architecture.md -t "$pkgdir/usr/share/doc/$pkgname/docs/"
+  install -Dm644 contrib/systemd/rweb.service "$pkgdir/usr/lib/systemd/user/rweb.service"
+  sed -i 's|%h/.local/bin/rweb|/usr/bin/rweb|' "$pkgdir/usr/lib/systemd/user/rweb.service"
+}

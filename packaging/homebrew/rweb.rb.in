@@ -1,0 +1,47 @@
+# Homebrew formula for rweb, from its signed release archives. A template: tools/packaging.sh fills in
+# @VERSION@ and the archives' SHA-256 from a release's SHA256SUMS; the result goes to the tap
+# (lexlapax/homebrew-rweb, Formula/rweb.rb).
+class Rweb < Formula
+  desc "Web client for Rex terminal sessions, reached through Tailscale Serve or SSH"
+  homepage "https://github.com/lexlapax/rweb"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/lexlapax/rweb/releases/download/v@VERSION@/rweb-@VERSION@-macos-arm64.tar.gz"
+      sha256 "@SHA256_MACOS_ARM64@"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/lexlapax/rweb/releases/download/v@VERSION@/rweb-@VERSION@-linux-x86_64.tar.gz"
+      sha256 "@SHA256_LINUX_X86_64@"
+    end
+  end
+
+  def install
+    bin.install "rweb"
+    doc.install "README.md", "CHANGELOG.md", "docs/user-guide.md", "docs/architecture.md"
+  end
+
+  service do
+    run [opt_bin/"rweb", "tailscale"]
+    keep_alive true
+    log_path var/"log/rweb.log"
+    error_log_path var/"log/rweb.log"
+  end
+
+  def caveats
+    <<~EOS
+      Run `rweb tailscale` once in a terminal: it makes its files and prints the
+      `tailscale serve` line to run once, and the address to open. Stop it with Ctrl-C, then
+      `brew services start rweb` keeps it running. `rweb doctor` checks the setup.
+      For an SSH tunnel instead, run `rweb ssh` (the user guide has a service for it).
+    EOS
+  end
+
+  test do
+    assert_match "rweb #{version}", shell_output("#{bin}/rweb --version")
+  end
+end
