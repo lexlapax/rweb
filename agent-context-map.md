@@ -1,7 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (Phase B step 7 in progress: build, test timeout, socket causes, fuzz
-targets; laptop-mac's Rex now at revision 24).
+Last updated: 2026-11-27 (Phase B step 7 done but F14, F17, F18, F19, F22; 0.2.0 prepared for release).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -63,8 +62,11 @@ a 4-second `echo` loop, upright again after it.
   std's `Io.Threaded`. `src/bridge/sys.zig` holds every raw call of the bridge, each
   returning a Zig error set (macOS live 370/5 skip, linux-box live 454/6 skip). `error_tracing` measured: +6 % binary, no CPU or
   latency cost beyond noise, not enabled (stripped releases would show addresses only). **Open in step 7:**
-  F14, F17, F18, F19, F22 as their files are next touched. CHANGELOG "Unreleased" lists the user-visible
-  changes since 0.1.1. **Next:** the owner's release choices.
+  F14, F17, F18, F19, F22 as their files are next touched. **0.2.0 (owner, 2026-11-27: every recommendation
+  taken):** version set, changelog dated, archives carry the README's screenshots, user guide notes the
+  upgrade. **Next:** `tools/release.sh` on this commit, trial of those archives on laptop-mac and linux-box
+  (desktop Chrome, iOS Simulator, Android emulator, the log filter), the owner's phone, then the GitHub
+  Release and setup-repo pins on all four.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

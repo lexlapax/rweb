@@ -365,6 +365,10 @@ if you may want it back), then restart rweb: `systemctl --user restart rweb` on 
 sessions; pages behind Tailscale reconnect by themselves, and a page through an SSH tunnel waits for a
 tap on Reconnect. The Serve entry, the secret and the token stay as they are.
 
+**Upgrading to 0.2.0.** Nothing to change: the options, files and Serve entry are the same as in 0.1.1.
+It speaks Rex API revisions 18 to 24, so it works with Rex 0.1.0-preview.25 at its own revision and still
+with older servers.
+
 **Upgrading to 0.1.1.** A service that starts rweb with the 0.1.0 options (`--listen-unix`,
 `--listen-tcp`, `--owner-from-tailscale`, `--backend-secret-file`, `--token-file` and the rest) keeps
 working: they are all still there (section 13). You can move to `rweb tailscale` or `rweb ssh` when it

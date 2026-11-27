@@ -4,7 +4,7 @@ Versions follow [semantic versioning](https://semver.org). Newest first. `rweb -
 version, the commit it was built from, the build mode and target, the Ghostty (libghostty-vt) tag and
 the Rex API revisions it speaks.
 
-## Unreleased
+## 0.2.0 (2026-11-27)
 
 - README: screenshots of the page on a desktop and on a phone (`assets/screenshots/`).
 - Issues are for bug reports, through a bug report form; pull requests are turned off on GitHub.
@@ -25,6 +25,7 @@ the Rex API revisions it speaks.
 - Terminal output reaches the page without memory allocations once warm (before: one per chunk for
   each viewer, and two per chunk read from Rex); a keystroke makes 4 instead of 23. Linux: about 12 %
   less CPU and half the page faults on a 32 MiB burst to three viewers.
+- The release archive carries the README's screenshots (they were missing, so its pictures were broken).
 - Fixed a double free in the terminal mirror when memory runs out as a stream reconnects; when a
   transfer cannot be registered for lack of memory the page now says so (it said "too many transfers").
 - The log no longer repeats what the terminal emulator thinks of a program's output (unknown escape
