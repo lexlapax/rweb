@@ -351,6 +351,26 @@ Then:
 Exit: someone else installs it from a published channel on Linux and macOS and reaches their own
 Rex from a phone, following only the docs.
 
+### Next point release (0.3.1): planned, not started
+
+Owner, 2026-11-27: "the web interface does not show anywhere what version of rweb it is". Do not start
+before the owner says so; the upstream check's item comes first (Ghostty `vt-1.0.2`,
+[upstream-check.md](upstream-check.md)).
+
+1. **The page shows rweb's version.** Today only the update item ("rweb X.Y.Z is available") and
+   `rweb --version` name a version; the page never says which rweb it is talking to.
+   - Where: in the ⋯ menu's "About rweb" item (for example "About rweb 0.3.0", or the version as the
+     item's small second line, as "Text copied in the terminal" has one), so it sits beside the update
+     item and the link to the project. Choose with the owner, from a screenshot of each.
+   - How: the bridge adds its version to the `mode` frame (`hub.zig` `modeJson`, next to `update`), read
+     by `keys.js` with the same strict `X.Y.Z` check as `updateVersion`, and shown with `textContent`.
+     The page's own files do not carry it, so a cached page never shows a stale version.
+   - Who sees it: only a page that has passed every access check (the `mode` frame goes over the
+     authenticated WebSocket). The token form, which anyone who reaches the address gets, shows no
+     version, so it tells nothing about which rweb runs there.
+   - Tests: the hub's mode-frame test, a `keys.js` web test for the parse, the browser check on desktop
+     and the simulators. Docs: the user guide's ⋯ menu list (section 9), the CHANGELOG, a new `menu.png`.
+
 ### Later, not planned in detail
 
 - Draw a Rex window's split layout.
