@@ -26,6 +26,17 @@ body:
     validations:
       required: true
   - type: dropdown
+    id: install
+    attributes:
+      label: How rweb was installed
+      options:
+        - Homebrew (lexlapax/rweb)
+        - AUR (rweb-bin)
+        - Release archive
+        - Built from source
+    validations:
+      required: true
+  - type: dropdown
     id: setup
     attributes:
       label: How rweb is reached
@@ -66,8 +77,14 @@ body:
     validations:
       required: true
   - type: textarea
+    id: doctor
+    attributes:
+      label: Output of rweb doctor (optional)
+      description: "`rweb doctor` (or `rweb doctor ssh`) with the options you start rweb with. It names your machine and Tailscale login: replace them first."
+      render: text
+  - type: textarea
     id: logs
     attributes:
       label: rweb's log lines around it (optional)
-      description: "Linux: `journalctl --user -u rweb -n 50`; macOS: the log file your service writes. Remove anything private first."
+      description: "Linux: `journalctl --user -u rweb -n 50`; macOS: the log file your service writes; `brew services`: `$(brew --prefix)/var/log/rweb.log`. Remove anything private first."
       render: text

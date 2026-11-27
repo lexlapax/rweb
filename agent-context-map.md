@@ -25,6 +25,18 @@ a 4-second `echo` loop, upright again after it.
 
 ## Where things stand (2026-11-27)
 
+- **0.3.0 docs pass (owner, 2026-11-27: every current document checked one by one for correctness, not
+  only versions):** README (features, security wording for the stricter Origin, seven rounds, docs table,
+  status), user guide (each install method's service, upgrade, logs, removal; the ⋯ menu as the page has
+  it; troubleshooting rows for the update check, doctor, bad Origin and `brew trust`), architecture
+  (update check in the diagram; the protocol lists corrected: no `size`, plus `rex`, `text`, `clip`, `ls`,
+  `xfer`, `dbg`; pins; tools; further reading), docs index, packaging, CONTRIBUTING, the bug form
+  (install method, doctor output, Homebrew log), vendored-code doc, protocol.zig's header. Dated records
+  (phase results, review rounds) left as written. **Screenshots replaced** (desktop, phone) and one added
+  (`menu.png`), made on laptop-mac from a 127.0.0.1 token bridge, headless Chrome over a loopback
+  debugging port and the iPhone simulator (terminal restored by writing the page's `rweb.last` into the
+  simulator Safari's storage for that origin, since UI scripting timed out); throwaway sessions
+  `rweb-test-shots-*`, bridge, token and simulator all removed or stopped; `dist.sh` ships `menu.png`.
 - **0.3.0, release commit** (version, CHANGELOG heading and summary, README "Current release", the guide's
   "Upgrading to 0.3.0", the doctor sample, "from 0.3.0 on are signed", PLAN Phase 6; docs swept for stale
   version and status wording; Rex on laptop-mac and linux-box is 0.1.0-preview.25, API revision 24, so the

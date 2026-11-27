@@ -13,7 +13,7 @@ prompt that is waiting, run the quick command, and go. Not affiliated with Super
 <p align="center">
   <img src="assets/screenshots/desktop.png" alt="rweb in a desktop browser: the session list on the left and a terminal running vim" width="600">
   &nbsp;
-  <img src="assets/screenshots/phone.png" alt="rweb on a phone: a terminal with git log and ls output, and the key bar above the browser's address bar" width="200">
+  <img src="assets/screenshots/phone.png" alt="rweb on a phone: a terminal showing rweb --version and git log, and the key bar above the browser's address bar" width="200">
 </p>
 
 **Current release: 0.3.0** (2026-11-27). It installs from Homebrew and the AUR, checks a setup with
@@ -40,10 +40,13 @@ back at a real keyboard you use Rex itself.
 - Shows what each terminal is doing at a glance: the running program, its folder, listening ports and,
   where a program reports it, its status.
 - Phone and tablet friendly: key bar (Enter, Esc, Tab, ^C, Ctrl, Alt, Shift, arrows and more), touch
-  scrolling (also inside full-screen programs), a Copy view, a view-only switch.
+  scrolling (also inside full-screen programs), a Copy view, a view-only switch. The ⋯ menu holds the rest
+  ([picture](assets/screenshots/menu.png)).
 - Optional file transfer: download a file from the machine, upload into one folder (off by default).
 - Runs only for you: your own Tailscale login (every device you signed in to Tailscale as you), or a
   token. One rweb per machine: each machine with Rex runs its own rweb, at its own address.
+- Easy to keep right: `rweb doctor` checks a setup and says what to fix, and rweb tells you (in its log
+  and on the page) when a newer release is out. Install from Homebrew, the AUR or a signed archive.
 
 ## How it works
 
@@ -118,7 +121,7 @@ starting rweb at boot or login, several machines, using the page, upgrading and 
 rweb can do anything you can do in Rex, so it trusts no one but you. It listens only on a unix socket
 or on loopback, never on the network. Behind Tailscale it accepts only your Tailscale login and refuses
 requests from the public internet (Funnel), from the machine itself, for another host name, or a
-WebSocket opened by another site; "your login" covers every device you sign in to Tailscale as you, so keep
+WebSocket or upload from any page but its own (another site, a plain-HTTP page, another port); "your login" covers every device you sign in to Tailscale as you, so keep
 it on devices only you use. Behind an SSH tunnel it requires a long token and listens on a unix socket in
 a private folder, so no other account can take its place while it is down; the tunnel's local end is plain
 HTTP on loopback, which cannot prove who is answering, so use it only on devices nobody else uses. It never
@@ -131,7 +134,7 @@ change, and it bounds what every browser and Rex can make it hold in memory. Des
 [docs/security-hardening-2026-11-23.md](docs/security-hardening-2026-11-23.md) (in the source repository).
 
 **How it was reviewed.** Before its first release, rweb went through a security review of its design
-and then six rounds of review on its release candidate. Each round had three independent parts: an
+and then six rounds of review on its release candidate, and a seventh before 0.3.0. Each round had three independent parts: an
 external static security scan of the whole repository; a release-readiness review (builds, the test
 suite, the release archives, the docs against the code); and an internal adversarial review in several
 parts, each reviewer reading the code without the others' conclusions. In the first four rounds the
@@ -179,7 +182,7 @@ tools/release.sh [COMMIT]             # release archives: one commit's clean exp
 
 | | |
 | --- | --- |
-| [User guide](docs/user-guide.md) | Tailscale or SSH setup, run at boot, several machines, using the page, upgrade, troubleshooting |
+| [User guide](docs/user-guide.md) | Install (Homebrew, AUR, archive), Tailscale or SSH setup, run at boot, several machines, using the page, upgrade, troubleshooting with `rweb doctor`, every option |
 | [Architecture](docs/architecture.md) | Components, diagrams, data and input paths, access checks, source layout |
 | [Changelog](CHANGELOG.md) | What changed in each version |
 | [Licence](LICENSE) | MIT |
@@ -229,5 +232,6 @@ which it is built. The software it contains or serves keeps its own licences:
 
 rweb is in daily use on Linux and macOS. Rex is a preview: rweb pins the Rex API revisions it speaks
 (see `rweb --version`; 0.3.0 speaks 18 to 24, Rex 0.1.0-preview.21 to preview.25) and is tested against
-each Rex update. Release archives: macOS on Apple silicon,
-and Linux x86-64 (static, any distribution). Windows support will come later.
+each Rex update. Release archives, signed: macOS on Apple silicon,
+and Linux x86-64 (static, any distribution); the same through Homebrew (both) and the AUR (Arch Linux).
+Windows support will come later.

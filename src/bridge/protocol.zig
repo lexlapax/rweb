@@ -25,8 +25,9 @@
 //!   new_session {label?} / new_terminal {session} / rename_session {session, label}
 //!   rename_block {session, block, label} / close_block {session, block} / destroy_session {session}
 //!   ping
-//! Server to client: see `hub.zig` (`tree`, `opened`, `size`, `theme`, `exited`, `closed`,
-//! `mode`, `notice`, `error`, `pong`).
+//!   dbg                           keyboard diagnostics (`?dbg=1`), logged only with --debug-input
+//! Server to client: see `hub.zig` (`tree`, `opened`, `theme`, `exited`, `closed`, `mode`, `rex`,
+//! `info`, `text`, `clip`, `ls`, `xfer`, `notice`, `error`, `pong`).
 //!
 //! Everything here is untrusted input: bounded, validated, and never trusted to be well formed.
 

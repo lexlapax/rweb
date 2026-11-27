@@ -45,6 +45,7 @@ flowchart TB
     HUB["hub.zig<br/>session tree, open terminals, viewers"]
     PAGE["assets.zig + web/<br/>the page, built in"]
     XF["xfer.zig<br/>file transfer (optional)"]
+    UPD["update.zig<br/>daily release check (optional)"]
     subgraph LIB["src/rex: Rex client library"]
       CTL["control.zig<br/>hello, calls, events, reconnect"]
       API["api.zig<br/>typed calls"]
@@ -58,6 +59,8 @@ flowchart TB
   SRV --> PAGE
   SRV <--> HUB
   SRV --> XF
+  UPD -- "newer release" --> HUB
+  UPD -- "HTTPS, once a day" --> GH["GitHub's latest-release API"]
   HUB --> API --> CTL
   HUB --> DATA --> MIR
   HUB --> IN --> CTL
@@ -271,9 +274,11 @@ mouse-wheel reports (or ↑/↓ keys if the program did not ask for the mouse).
 WebSocket at `/ws`. JSON text frames carry commands and notices; binary frames carry terminal output.
 Browser to rweb: `tree`, `open`, `close_view`, `in`, `key`, `paste`, `fit`, `redraw`, `more_history`,
 `text`, `info`, `clip`, `observe`, `new_session`, `new_terminal`, `rename_session`, `rename_block`,
-`close_block`, `destroy_session`, `term_action`, transfer requests, `ping`. rweb to browser: `tree`,
-`opened`, `size`, `theme`, `exited`, `closed`, `mode`, `info`, `notice`, `error`, `pong`. Every message
-is bounded and validated; the full list is at the top of `src/bridge/protocol.zig`.
+`close_block`, `destroy_session`, `term_action`, transfer requests (`ls`, `dl`, `ul`), `ping`, and `dbg`
+(keyboard diagnostics, logged only with `--debug-input`). rweb to browser: `tree`, `opened`, `theme`, `exited`, `closed`, `mode` (what
+this page may do, and `update`, a newer release), `rex` (Rex up or down), `info`, `text`, `clip`, `ls`,
+`xfer`, `notice`, `error`, `pong`; a resize reaches the page as a fresh redraw. Every message is bounded
+and validated; the full list is at the top of `src/bridge/protocol.zig`.
 
 ## Source layout
 
@@ -285,8 +290,8 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 | `src/fuzz.zig` | Fuzz targets for every parser that reads outside bytes (`zig build fuzz --fuzz`) |
 | `tests/web/` | Tests for the page's logic (`zig build web-test`) |
 | `assets/logo/` | The logo's SVG sources, the social preview and `build.sh`, which exports the rasters (the page's icons are in `src/bridge/web/icons/`) |
-| `assets/screenshots/` | The README's screenshots (also in the release archives) |
-| `tools/` | `dist.sh` and `release.sh` (release archives, signed; `release-base.test.sh` checks its folder rules; `release-signers` holds the release key), `packaging.sh` (the Homebrew formula and AUR package from a release), `vendor/` (rebuilds the vendored browser code), `notices.py` (third-party notices) |
+| `assets/screenshots/` | The README's and the user guide's screenshots (also in the release archives) |
+| `tools/` | `dist.sh` and `release.sh` (release archives, signed; `release-base.test.sh` checks its folder rules; `release-signers` holds the release key), `packaging.sh` (the Homebrew formula and AUR package from a release), `vendor/` (rebuilds the vendored browser code), `assetgen.zig` (the page's table, ETags and gzip bodies, run by the build), `notices.py` (third-party notices; `licenses/` holds licence texts a package does not ship) |
 | `packaging/`, `contrib/` | The Homebrew formula and AUR templates; the systemd unit and LaunchAgent shipped in the archive |
 
 ## Pinned dependencies
@@ -296,7 +301,7 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 | Zig | 0.17.1 | Builds everything, including Ghostty's C++ |
 | libghostty-vt | Ghostty tag `vt-1.0.1` (by hash in `build.zig.zon`) | Decodes Rex's snapshot format; rweb refuses an unknown snapshot version |
 | Rex API | revisions 18–24 (Rex 0.1.0-preview.25 speaks 0–24) | Rex refuses clients outside its supported range |
-| wterm, xterm.js | 0.6.0, 6.0.0 (checksums in `vendor/SHA256SUMS`, checked by a test) | The browser terminals |
+| wterm, xterm.js | wterm 0.6.0, xterm.js 6.0.0 with `@xterm/addon-fit` 0.11.0 (checksums in `vendor/SHA256SUMS`, checked by a test; rebuilt byte for byte from npm by `tools/vendor/rebuild.sh`) | The browser terminals |
 
 ## Further reading (in the source repository)
 
@@ -305,3 +310,6 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 - [design-research.md](design-research.md), [rex-web-research.md](rex-web-research.md): the evidence behind the design.
 - [security-hardening-2026-11-23.md](security-hardening-2026-11-23.md): the security review and fixes.
 - [file-transfer.md](file-transfer.md): file transfer design and limits.
+- [vendored-browser-code.md](vendored-browser-code.md): where each vendored browser file comes from.
+- [The security review rounds](README.md), the latest
+  [round 7](security-review-2026-11-27-round7.md).

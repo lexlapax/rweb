@@ -6,5 +6,5 @@ rweb and improve it under its [MIT licence](LICENSE); when the author sees chang
 help, they may be merged, reworked or brought in some other way.
 
 Issues are for bug reports only, through the bug report form (it asks for `rweb --version`, the Rex
-version and how rweb is reached). Feature requests are not tracked. The maintainer's address is in the
+version, how rweb was installed and is reached, and optionally `rweb doctor`'s output). Feature requests are not tracked. The maintainer's address is in the
 README.

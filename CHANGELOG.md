@@ -34,6 +34,11 @@ and restart rweb. The update check is on by default; `--no-update-check` turns i
   each file is byte-identical; all are. Where each comes from: `docs/vendored-browser-code.md`.
 - Building: the page's files are compressed and given their validators at build time, not on the first
   request.
+- Docs: the user guide gives each way of installing its own service, upgrade, log and removal steps
+  (Homebrew, the AUR, the archive, whose `contrib/` files are the guide's services), lists the ⋯ menu
+  as the page has it, and adds troubleshooting for the update check, `rweb doctor` and the stricter
+  origin check. The bug report form asks how rweb was installed and for `rweb doctor`'s output. New screenshots
+  of 0.3.0, and a third of the ⋯ menu (`assets/screenshots/`, also in the archives).
 
 From the seventh review (details: `docs/security-review-2026-11-27-round7.md`, in the source repository):
 

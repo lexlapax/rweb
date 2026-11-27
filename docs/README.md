@@ -2,8 +2,9 @@
 
 ## Using rweb
 
-- [User guide](user-guide.md): install (an archive, Homebrew or the AUR, with the signature checked); reach it through Tailscale or an SSH tunnel; run it at boot or
-  login on Linux and macOS; several machines; using the page; file transfer; upgrade, stop or remove;
+- [User guide](user-guide.md): install (an archive with its signature checked, Homebrew or the AUR); reach
+  it through Tailscale or an SSH tunnel; run it at boot or login on Linux and macOS; several machines;
+  using the page; file transfer; knowing when to upgrade, upgrading, stopping or removing it;
   troubleshooting with `rweb doctor`; every option.
 - [Changelog](../CHANGELOG.md): what changed in each version.
 - [Licence](../LICENSE): MIT.
@@ -16,11 +17,15 @@
 - [Architecture](architecture.md): components, diagrams, request checks, data and input paths, the
   browser protocol, source layout, pinned dependencies.
 - [File transfer](file-transfer.md): design, limits and threat model of the optional file transfer.
+- [Vendored browser code](vendored-browser-code.md): where each vendored file comes from and how
+  `tools/vendor/rebuild.sh` rebuilds them byte for byte.
+- [Packaging](../packaging/README.md): the Homebrew tap and the AUR package, and how each release
+  updates them.
 
 ## How it was reviewed
 
-Before the first release: a security review of the design, then six rounds on the release candidate,
-each with an external static security scan, a release-readiness review and an internal adversarial
+Before the first release: a security review of the design, then six rounds on the release candidate;
+a seventh before 0.3.0. Each round had an external static security scan, a release-readiness review and an internal adversarial
 review in several parts. Every finding was checked against the code, and every fix has a test. Before
 each release the candidate is run live on macOS and Linux and tested from the simulators and a phone;
 the round's document records those runs.
@@ -44,10 +49,6 @@ the round's document records those runs.
   Origin compared on scheme and port, redirects refused.
 - [Zig idiom audit](zig-idiom-audit-2026-11-26.md): the code against Zig's own practice, a 38-item
   checklist, and Phase B, done in 0.2.0 and after.
-- [Vendored browser code](vendored-browser-code.md): where each vendored file comes from and how
-  `tools/vendor/rebuild.sh` rebuilds them byte for byte.
-- [Packaging](../packaging/README.md): the Homebrew tap and the AUR package, and how each release
-  updates them.
 
 ## Why it is built this way
 

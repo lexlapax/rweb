@@ -55,7 +55,7 @@ module. Rebuilding it from source needs the wterm repository at the commit of `@
 the Ghostty commit it was built against; that was not attempted. What is checked is that the file is
 byte-identical to the one in the published package, which the registry's integrity covers.
 
-Run again 2026-11-27 in that sandbox (Linux, ARM64): every package verified against the lock and the
+Run again 2026-11-27 in the owner's sandbox (Linux, ARM64): every package verified against the lock and the
 registry, all eight files identical. `@esbuild/linux-arm64`'s integrity came from that run, matched the
 registry's, and was recorded at the owner's word.
 

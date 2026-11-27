@@ -36,7 +36,8 @@ brew install rweb
 ```
 
 Then run `rweb tailscale` once in a terminal (section 5 or 6), and `brew services start rweb` keeps it
-running at login. The formula installs the release archive below, checked by its SHA-256.
+running at login (on Linux, also `sudo loginctl enable-linger "$USER"` to start it at boot). The formula
+installs the release archive below, checked by its SHA-256.
 
 **Arch Linux**, from the AUR: the package `rweb-bin`, with any AUR helper
 (`yay -S rweb-bin`). It installs `/usr/bin/rweb` and a systemd user unit, `rweb.service`, that runs
@@ -152,7 +153,11 @@ It prints the `sudo tailscale serve …` line to run once and the address to ope
 terminal, then open the address on your phone or laptop (from **another device**: a request from the Rex
 machine itself is refused, because any program there could make it). Stop rweb with Ctrl-C.
 
-To keep it running, a systemd user service, `~/.config/systemd/user/rweb.service`:
+To keep it running, a systemd user service. **From the AUR** it is installed already
+(`/usr/lib/systemd/user/rweb.service`, running `/usr/bin/rweb tailscale`): skip the file and run the
+commands below it. **With Homebrew**, `brew services start rweb` takes its place (and the `loginctl` line
+below still applies). **From the archive**, copy `contrib/systemd/rweb.service` from it to
+`~/.config/systemd/user/rweb.service`; it is this file:
 
 ```ini
 [Unit]
@@ -213,8 +218,10 @@ itself is never printed) and the address to open. Run that line in another termi
 request from the Rex machine itself is refused, because any program there could make it. Stop rweb with
 Ctrl-C. `--port N` chooses another loopback port.
 
-To keep it running, a LaunchAgent, `~/Library/LaunchAgents/local.rweb.plist` (replace `YOU` with your
-user name):
+To keep it running: **with Homebrew**, `brew services start rweb` (its log is
+`$(brew --prefix)/var/log/rweb.log`, where the Serve line and the address appear). **From the archive**, a LaunchAgent: copy
+`contrib/launchd/local.rweb.plist` from it to `~/Library/LaunchAgents/local.rweb.plist` and replace `YOU`
+with your user name. It is this file:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -278,7 +285,9 @@ holds the port, ssh then stops with an error instead of running without a tunnel
 prints another laptop port. On a phone, use an SSH app that can forward a local port to a remote unix
 socket, and keep it open while you use the page.
 
-To keep rweb running, use the service file from section 5 or 6 with `ssh` in place of `tailscale`.
+To keep rweb running, use the service file from section 5 or 6 with `ssh` in place of `tailscale`. The
+Homebrew and AUR services run `rweb tailscale`; for a tunnel, write that file yourself (on Linux,
+`systemctl --user edit --full rweb` makes a copy of the AUR unit to change).
 
 **Signing in.** Open `http://127.0.0.1:7700/` (use `127.0.0.1`, not `localhost`). The page shows a token
 form. On the Rex machine, `cat` the token file rweb named at startup (`~/.config/rweb/token` unless you
@@ -343,12 +352,15 @@ each has its own token and its own sign-in, and each `/s/<id>/` address is as se
 - **Size.** Rex owns the terminal's size, and every client shares it. On a touch screen the page asks Rex
   to fit the terminal to your screen ("Fit Rex to this screen" in the ⋯ menu); elsewhere it shrinks the
   text to fit instead. **+/−** in the ⋯ menu changes the text size.
-- **The ⋯ menu** (top right): text size; View only (no typing from this browser); Fit Rex to this screen;
-  Fit terminal to this window; Load all scrollback; Copy text (a view for selecting and copying lines);
-  Text copied in the terminal (what a program put on the clipboard); Paste; Clear screen; Reset terminal;
-  Download a file and Upload files (when enabled); the terminal engine (wterm, or the older xterm.js);
-  Touch diagnostics; Reconnect; About rweb (rweb's page on GitHub, in a new tab, as the logo at the top
-  left also opens; no address of your page is sent with it). The logo turns slowly while the terminal
+- **The ⋯ menu** (top right): Copy text (a view for selecting and copying lines); Text copied in the
+  terminal (what a program put on the clipboard); Paste; Download a file and Upload files (when enabled);
+  Clear screen; Reset terminal; text size **−/+**; View only (no typing from this browser); Fit Rex to this
+  screen; Use Rex colours (with wterm, Rex's colour theme in place of the page's own; xterm.js always uses Rex's); Fit terminal to this window;
+  Load all scrollback; Touch diagnostics; the terminal engine (wterm, or the older xterm.js); Reconnect;
+  "rweb X.Y.Z is available" when a newer release is out (the ⋯ button then has a dot; the item opens the
+  release notes, section 11); About rweb (rweb's page on GitHub, in a new tab, as the logo at the top
+  left also opens; no address of your page is sent with it).
+  [The menu in a desktop browser](../assets/screenshots/menu.png). The logo turns slowly while the terminal
   on screen is printing and comes to rest upright a moment after it stops; it stays still if your
   device asks for reduced motion.
 - **Pasting.** A paste reaches the program as a paste, without escape characters, so pasted text cannot
@@ -385,12 +397,19 @@ read; it follows no redirect). When a newer version is out it says so once in it
 item, "rweb X.Y.Z is available", that opens the release notes, and `rweb doctor` reports it with the
 upgrade command for how rweb was installed. It never downloads or installs anything. What GitHub learns
 from it: this machine's address, that it runs rweb, and which version. To turn it off, start rweb with
-`--no-update-check` (add it to `ExecStart`, the LaunchAgent's `ProgramArguments`, or, with Homebrew, run
-rweb from your own service instead of `brew services`).
+`--no-update-check`: add it to `ExecStart` or the LaunchAgent's `ProgramArguments`; for the AUR unit,
+`systemctl --user edit --full rweb`; with Homebrew, run rweb from your own service (section 5 or 6)
+instead of `brew services`.
 
-Read [CHANGELOG.md](../CHANGELOG.md), install the new archive over `~/.local/bin/rweb` (keep the old binary
-if you may want it back), then restart rweb: `systemctl --user restart rweb` on Linux,
-`launchctl kickstart -k "gui/$(id -u)/local.rweb"` on macOS. Restarting rweb does not touch your Rex
+To upgrade, read [CHANGELOG.md](../CHANGELOG.md), then:
+
+- **Homebrew:** `brew upgrade rweb && brew services restart rweb`.
+- **AUR:** upgrade `rweb-bin` with your helper (`yay -Syu rweb-bin`), then `systemctl --user restart rweb`.
+- **Archive:** install the new archive over `~/.local/bin/rweb` as in section 2, signature first (keep the
+  old binary if you may want it back), then `systemctl --user restart rweb` on Linux or
+  `launchctl kickstart -k "gui/$(id -u)/local.rweb"` on macOS.
+
+`rweb doctor` names the command for how this rweb was installed. Restarting rweb does not touch your Rex
 sessions; pages behind Tailscale reconnect by themselves, and a page through an SSH tunnel waits for a
 tap on Reconnect. The Serve entry, the secret and the token stay as they are.
 
@@ -479,7 +498,8 @@ rweb doctor: checking rweb tailscale (rweb 0.3.0)
 rweb doctor: 5 passed, 0 notes, 1 failed
 ```
 
-Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.log` (macOS LaunchAgent).
+Logs: `journalctl --user -u rweb -n 50` (Linux service, the AUR's included), `~/Library/Logs/rweb.log`
+(macOS LaunchAgent), `$(brew --prefix)/var/log/rweb.log` (`brew services`, on macOS and Linux).
 When rweb refuses to start, its message names what is wrong and, for a file or folder, ends with a
 `Fix:` line holding the command or change that puts it right. Run it and start rweb again; a second
 message means a second thing to fix.
@@ -515,6 +535,10 @@ message means a second thing to fix.
 | The browser cannot connect at all | Tailscale: `tailscale serve status` on the Rex machine. SSH: is the tunnel still open? |
 | Sessions do not appear | rweb cannot reach Rex, or Rex refused its API revision: check the log and `rweb --version`. |
 | Typing does nothing | View only is on (⋯ menu), or rweb runs with `--observe-only`. |
+| The page loads but never connects, and the log says `refused: bad Origin` | The page was opened at another address than the one rweb serves: over `http://` behind Tailscale, on another port, or through another name. Open the `https://` address `rweb tailscale` printed (or, for a tunnel, the `http://127.0.0.1:<port>/` one). |
+| A dot on the ⋯ button | A newer rweb is released: the ⋯ menu's "rweb X.Y.Z is available" opens its notes; section 11 says how to upgrade. |
+| `rweb doctor` notes `could not ask GitHub for rweb's latest release` | This machine could not reach `api.github.com` (offline, a proxy, a firewall). A note, not a failure; `--no-update-check` leaves the check out. |
+| `brew install rweb` will not load the formula | Homebrew loads a third-party tap's formulae only once the tap is trusted: `brew trust lexlapax/rweb`, then install again. |
 
 **Files and folders rweb checks.** The backend secret, the token file, the upload folder, the unix
 socket's folder and the `tailscale` program must be such that no other account could change them. The
