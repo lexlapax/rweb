@@ -63,7 +63,8 @@ a 4-second `echo` loop, upright again after it.
   std's `Io.Threaded`. `src/bridge/sys.zig` holds every raw call of the bridge, each
   returning a Zig error set (macOS live 370/5 skip, linux-box live 454/6 skip). `error_tracing` measured: +6 % binary, no CPU or
   latency cost beyond noise, not enabled (stripped releases would show addresses only). **Open in step 7:**
-  F14, F17, F18, F19, F22 as their files are next touched. **Next:** the owner's release choices.
+  F14, F17, F18, F19, F22 as their files are next touched. CHANGELOG "Unreleased" lists the user-visible
+  changes since 0.1.1. **Next:** the owner's release choices.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

@@ -27,6 +27,12 @@ the Rex API revisions it speaks.
   less CPU and half the page faults on a 32 MiB burst to three viewers.
 - Fixed a double free in the terminal mirror when memory runs out as a stream reconnects; when a
   transfer cannot be registered for lack of memory the page now says so (it said "too many transfers").
+- The log no longer repeats what the terminal emulator thinks of a program's output (unknown escape
+  sequences, bad colours), which any program could fill it with; its other errors still show. A
+  connection that ends on a socket error says which (`ConnectionResetByPeer`, say), not only "ReadFailed".
+- Building: `zig build --help` says a plain build is Debug (for tests; the terminal emulator runs much
+  slower) and ReleaseSafe is what releases ship; `zig build --release` alone now means ReleaseSafe.
+  `zig build fuzz` takes `-Dtest-filter` to fuzz one target.
 
 ## 0.1.1 (2026-11-26)
 
