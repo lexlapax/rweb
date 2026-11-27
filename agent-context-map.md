@@ -1,9 +1,18 @@
 # Agent context map
 
-Last updated: 2026-11-26 (the repository is made public: its history was rewritten to generic host and tailnet names and a no-reply author; 0.1.1 is tagged on the release commit).
+Last updated: 2026-11-26 (screenshots for the README in `assets/screenshots/`; the repository is public).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
+
+## 2026-11-26: screenshots
+
+`assets/screenshots/desktop.png` and `phone.png`, shown at the top of the README; how they were made and
+what was kept out of them (host and tailnet names, personal sessions, the prompt): its README. The phone
+address is blurred. Found while making them: the clones' `zig-pkg/` and `zig-out/` were writable by group
+and others (Zig keeps the modes of the dependency tarballs); fixed by hand on the owner's machines with
+`chmod -R go-w`. Release archives were not affected (`tools/release.sh` builds in its own private folder
+with a new cache). Not yet decided: whether rweb's build should do this itself.
 ## 2026-11-26: public
 
 - Superlogical (Discord, 2026-11-22): no restrictions on Rex clients; please do not use Rex's dinosaur logo

@@ -10,6 +10,12 @@
 away from your Rex machines.** Open your Rex sessions in a phone, tablet or laptop browser, answer the
 prompt that is waiting, run the quick command, and go. Not affiliated with Superlogical.
 
+<p align="center">
+  <img src="assets/screenshots/desktop.png" alt="rweb in a desktop browser: the session list on the left and a terminal running vim" width="600">
+  &nbsp;
+  <img src="assets/screenshots/phone.png" alt="rweb on a phone: a terminal with git log and ls output, and the key bar above the browser's address bar" width="200">
+</p>
+
 What changed in each version, and the current one: [CHANGELOG.md](CHANGELOG.md). `rweb --version` names
 the version you have.
 

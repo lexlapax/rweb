@@ -4,6 +4,10 @@ Versions follow [semantic versioning](https://semver.org). Newest first. `rweb -
 version, the commit it was built from, the build mode and target, the Ghostty (libghostty-vt) tag and
 the Rex API revisions it speaks.
 
+## Unreleased
+
+- README: screenshots of the page on a desktop and on a phone (`assets/screenshots/`).
+
 ## 0.1.1 (2026-11-26)
 
 - A machine that is a tagged Tailscale device has no owner login: `--owner-from-tailscale` now refuses
