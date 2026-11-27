@@ -6,6 +6,8 @@ the Rex API revisions it speaks.
 
 ## Unreleased
 
+- The page says which rweb it is talking to: the ⋯ menu's "About rweb" item shows the version under it.
+  The bridge sends it after sign-in only; the token form shows none.
 - Ghostty's libghostty-vt `vt-1.0.2` (was `vt-1.0.1`): terminal fixes, among them a restored snapshot
   keeping a pending wrap at any column, soft wraps kept when lines are inserted or deleted, and wider
   skin-tone emoji. `rweb --version` names it.

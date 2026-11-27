@@ -358,8 +358,8 @@ each has its own token and its own sign-in, and each `/s/<id>/` address is as se
   screen; Use Rex colours (with wterm, Rex's colour theme in place of the page's own; xterm.js always uses Rex's); Fit terminal to this window;
   Load all scrollback; Touch diagnostics; the terminal engine (wterm, or the older xterm.js); Reconnect;
   "rweb X.Y.Z is available" when a newer release is out (the ⋯ button then has a dot; the item opens the
-  release notes, section 11); About rweb (rweb's page on GitHub, in a new tab, as the logo at the top
-  left also opens; no address of your page is sent with it).
+  release notes, section 11); About rweb, with this rweb's version under it (it opens rweb's page on
+  GitHub in a new tab, as the logo at the top left also does; no address of your page is sent with it).
   [The menu in a desktop browser](../assets/screenshots/menu.png). The logo turns slowly while the terminal
   on screen is printing and comes to rest upright a moment after it stops; it stays still if your
   device asks for reduced motion.

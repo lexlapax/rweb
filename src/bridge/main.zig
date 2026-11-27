@@ -192,6 +192,8 @@ pub fn main(init: std.process.Init) !void {
     hub_cfg.debug_input = parsed.debug_input;
     // The page's mode frame says token mode (a dropped connection then waits for a tap).
     hub_cfg.token_mode = token != null;
+    // The page's About item names this rweb (over the authenticated socket only).
+    hub_cfg.version = build_options.version;
 
     announce(arena, io, parsed, bound, backend_secret, token);
 

@@ -276,7 +276,7 @@ Browser to rweb: `tree`, `open`, `close_view`, `in`, `key`, `paste`, `fit`, `red
 `text`, `info`, `clip`, `observe`, `new_session`, `new_terminal`, `rename_session`, `rename_block`,
 `close_block`, `destroy_session`, `term_action`, transfer requests (`ls`, `dl`, `ul`), `ping`, and `dbg`
 (keyboard diagnostics, logged only with `--debug-input`). rweb to browser: `tree`, `opened`, `theme`, `exited`, `closed`, `mode` (what
-this page may do, and `update`, a newer release), `rex` (Rex up or down), `info`, `text`, `clip`, `ls`,
+this page may do, `version`, this rweb's, and `update`, a newer release), `rex` (Rex up or down), `info`, `text`, `clip`, `ls`,
 `xfer`, `notice`, `error`, `pong`; a resize reaches the page as a fresh redraw. Every message is bounded
 and validated; the full list is at the top of `src/bridge/protocol.zig`.
 

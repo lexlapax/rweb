@@ -559,3 +559,11 @@ test('a newer release in the mode frame is a plain version, or nothing', () => {
     assert.equal(K.updateVersion({t: 'mode', update: bad}), null);
   assert.equal(K.releaseUrl('https://github.com/lexlapax/rweb', '0.2.1'), 'https://github.com/lexlapax/rweb/releases/tag/v0.2.1');
 });
+
+test("this rweb's version in the mode frame is a plain version, or nothing", () => {
+  assert.equal(K.pageVersion({t: 'mode', version: '0.3.1'}), '0.3.1');
+  assert.equal(K.pageVersion({t: 'mode'}), null);
+  assert.equal(K.pageVersion(null), null);
+  for (const bad of ['', 'v0.3.1', '0.3', '0.3.1-dev', '0.3.1 ', '<i>0.3.1</i>', '00.3.1', 3, {}, []])
+    assert.equal(K.pageVersion({t: 'mode', version: bad}), null);
+});

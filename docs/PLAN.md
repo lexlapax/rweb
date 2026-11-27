@@ -352,11 +352,12 @@ Then:
 Exit: someone else installs it from a published channel on Linux and macOS and reaches their own
 Rex from a phone, following only the docs.
 
-### Next point release (0.3.1): planned, not started
+### Next point release (0.3.1)
 
-Owner, 2026-11-27: "the web interface does not show anywhere what version of rweb it is". Do not start
-before the owner says so; the upstream check's item comes first (Ghostty `vt-1.0.2`,
-[upstream-check.md](upstream-check.md)).
+Owner, 2026-11-27: "the web interface does not show anywhere what version of rweb it is"; started at the
+owner's "go" the same day, after the upstream check's item (Ghostty `vt-1.0.2`,
+[upstream-check.md](upstream-check.md)). **Done 2026-11-27, not released:** the owner chose the second
+line ("About rweb", "Version X.Y.Z" under it) from a screenshot of each.
 
 1. **The page shows rweb's version.** Today only the update item ("rweb X.Y.Z is available") and
    `rweb --version` name a version; the page never says which rweb it is talking to.

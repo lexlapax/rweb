@@ -6,7 +6,8 @@ Shown in the top-level README and the user guide, and shipped in the release arc
   `src/bridge/access.zig` (1294 × 822, the page area only, so no address bar).
 - `phone.png`: Mobile Safari on an iPhone simulator, a terminal showing `rweb --version` and `git log`,
   the key bar above Safari's address bar (1206 × 2622).
-- `menu.png`: the same desktop page with the ⋯ menu open (1294 × 822).
+- `menu.png`: the same desktop page with the ⋯ menu open, "About rweb" with the version under it
+  (1294 × 822; retaken 2026-11-27 for 0.3.1 the same way).
 
 How they were made (2026-11-27, rweb 0.3.0): a test bridge on `127.0.0.1` with a random token (the
 page is the same as behind Tailscale Serve), on two throwaway Rex sessions running plain `bash` with a

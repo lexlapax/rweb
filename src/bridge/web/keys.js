@@ -254,10 +254,12 @@
   function debugOn(asked, mode) { return !!asked && !!mode && mode.debug === true; }
   // A newer rweb the bridge found (`update` in the mode frame): a plain `X.Y.Z`, or null. Anything else
   // is ignored, so nothing the page builds from it can be other than a version.
-  function updateVersion(mode) {
-    const v = mode && mode.update;
+  function plainVersion(v) {
     return typeof v === 'string' && /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/.test(v) ? v : null;
   }
+  function updateVersion(mode) { return plainVersion(mode && mode.update); }
+  // This rweb's version, from the mode frame (the page's files do not carry it), or null.
+  function pageVersion(mode) { return plainVersion(mode && mode.version); }
   // The release's notes, under rweb's own page (`home`, the logo's link).
   function releaseUrl(home, version) { return home + '/releases/tag/v' + version; }
 
@@ -384,7 +386,7 @@
   function tokenModeFrom(wasTokenMode, mode) { return wasTokenMode === true || (!!mode && mode.auth === 'token'); }
   function tokenModeFromPath(pathname) { return /^\/s\/[A-Za-z0-9_-]+\//.test(String(pathname || '')); }
 
-  const api = {linkStep, LINK_START, waitText, looksLikeRweb, tokenModeFrom, tokenModeFromPath, sameTerm, keepTurning, LOGO_IDLE_MS, holdView, stillView, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, updateVersion, releaseUrl, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {linkStep, LINK_START, waitText, looksLikeRweb, tokenModeFrom, tokenModeFromPath, sameTerm, keepTurning, LOGO_IDLE_MS, holdView, stillView, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, updateVersion, pageVersion, releaseUrl, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

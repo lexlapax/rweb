@@ -33,9 +33,12 @@ a 4-second `echo` loop, upright again after it.
   Homebrew on the Macs, the AUR's `rweb-bin` on linux-box and gateway-box; setup-repo installs them, minimum
   0.3.0, its own services). That was 0.3.0's live run: through each machine's real Serve address from
   another node, page 200, WebSocket from the page's `https://` origin 101, from `http://` or another port
-  403; `rweb doctor` 7/7 on laptop-mac. Next: Ghostty `vt-1.0.2` (upstream check) before new features.
-  **Planned for 0.3.1, not started (owner, 2026-11-27):** the page shows rweb's version, by the ⋯ menu's
-  About item (docs/PLAN.md, "Next point release (0.3.1)"); wait for the owner's go.
+  403; `rweb doctor` 7/7 on laptop-mac. Ghostty `vt-1.0.2` taken (upstream check). **Next: release 0.3.1** (vt-1.0.2 and the version line; the owner's word).
+  **For 0.3.1, done, not released (owner's go, 2026-11-27):** the page shows rweb's version under the ⋯
+  menu's "About rweb" (owner chose the second line from two screenshots): `hub.Config.version` from
+  `build_options.version` into the `mode` frame (authenticated socket only), `keys.js` `pageVersion` (strict
+  X.Y.Z), `textContent`; tests: hub "mode frame names this rweb's version", web test; `menu.png` retaken
+  showing 0.3.1 (a binary built with the version set to 0.3.1 for the picture only).
 - **Upstream check (owner, 2026-11-27):** `tools/upstream-check.sh rex|network`, `tools/upstream.lock`,
   [docs/upstream-check.md](docs/upstream-check.md); AGENTS.md makes it the first step after each release.
   First run: Rex preview.25 / revision 24 and its `llms.txt` unchanged on laptop-mac and linux-box;

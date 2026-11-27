@@ -44,6 +44,9 @@ pub const Config = struct {
     /// Browsers sign in with a token (the SSH-tunnel layout): the page then reconnects only when asked,
     /// so a credential is never re-sent to a local port nobody checked after the tunnel dropped.
     token_mode: bool = false,
+    /// This rweb's version (`build.zig.zon`), for the page's About item. The mode frame carries it only
+    /// to a page that has passed every access check; null leaves it out (tests that do not set it).
+    version: ?[]const u8 = null,
 };
 
 /// What a queued frame is, so that stale ones are replaced instead of piling up.
@@ -714,6 +717,7 @@ pub const Hub = struct {
             .debug = h.cfg.debug_input,
             .auth = if (h.cfg.token_mode) "token" else null,
             .update = h.update,
+            .version = h.cfg.version,
         }, .{ .emit_null_optional_fields = false });
     }
 
@@ -2855,6 +2859,25 @@ test "hub: the mode frame says token mode only when the bridge signs in with a t
         defer m.deinit(testing.allocator);
         try testing.expect(std.mem.indexOf(u8, m.data, "\"auth\"") == null);
     }
+}
+
+test "hub: the mode frame names this rweb's version when it is set, and nothing else when not" {
+    {
+        const hs = try Harness.init(.{ .version = "0.3.1" });
+        defer hs.deinit();
+        const v = try hs.hub.addViewer();
+        defer hs.hub.removeViewer(v);
+        const m = (try waitFrame(v, isMode)).?;
+        defer m.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(u8, m.data, "\"version\":\"0.3.1\"") != null);
+    }
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    const m = (try waitFrame(v, isMode)).?;
+    defer m.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, m.data, "\"version\"") == null);
 }
 
 test "hub: a newer release reaches every page's mode frame, and pages that connect later" {
