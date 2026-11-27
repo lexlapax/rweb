@@ -1,7 +1,7 @@
 # Agent context map
 
-Last updated: 2026-11-26 (rweb speaks Rex API revisions 18 to 24, in step with Rex 0.1.0-preview.25;
-the tree lists terminals only; Phase B step 7 next).
+Last updated: 2026-11-26 (Phase B step 7 in progress: build, test timeout, socket causes, fuzz
+targets; laptop-mac's Rex now at revision 24).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -49,10 +49,21 @@ a 4-second `echo` loop, upright again after it.
   poll had hidden (`close` waited 30 s); it now checks `closing` before every wait. **Step 6 done**:
   30 assertions (lock held in every `...Locked` function via `rex.sync.held`, exact viewer queue counts,
   frame kinds, reference counts, list links, the event ring's bounds); the workload is unchanged with
-  them. **Next: step 7**, the checklist's small items, and lockstep with the current Rex release.
+  them. **Step 7 in progress** (its "Progress" note in the audit): one `bridgeModules` in `build.zig`
+  and an `-Doptimize` whose help says a plain build is Debug; `--test-timeout 60s` in `tools/release.sh`;
+  the socket's own error logged where Rex and browser connections end; fuzz targets for `cleanPaste`,
+  `escCut`, the mountinfo and POSIX ACL parsers (moved to std-only `rex/escape.zig`, `bridge/protocol.zig`,
+  `bridge/fsparse.zig`) and a seeded random-output test for the mirror; `zig build fuzz -Dtest-filter=`.
+  Checked: macOS live against revision 24 (ReleaseSafe 366 pass, 5 skip), Debug 358/13 skip, linux-box
+  live 450/6 skip, 2M fuzz inputs per new target. **Open in step 7:** `sys.zig` and Valgrind (item 25);
+  unstripped binaries, which need a post-link strip because Zig's `strip` changes the code and no ELF
+  strip tool is on the release Macs (the owner's choice), then `error_tracing` (item 36); Ghostty's
+  `stream` warnings and errors reach rweb's log unfiltered; F14, F17, F18, F19, F22.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
+- Rex (2026-11-26, later): laptop-mac rebooted and its server now runs revision 24 (`server.version`);
+  rweb's live suite passed against it.
 - Rex (2026-11-26): every machine has 0.1.0-preview.25 installed (API revision 24, server speaks 0 to 24).
   linux-box and the other machines restarted onto it; desktop-mac's server still ran revision 18 when
   this was built (its restart ends every session there; the owner's). rweb now asks for 18 to 24: its

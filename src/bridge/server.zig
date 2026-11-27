@@ -746,6 +746,13 @@ pub const Server = struct {
         defer gpa.free(send);
         var r = conn.reader(s.io, recv);
         var w = conn.writer(s.io, send);
+        // Callers see a failed read or write only as `ReadFailed` or `WriteFailed`, here and in the
+        // WebSocket session that reads through these; the socket's cause is kept here, so it is
+        // logged here.
+        defer {
+            if (r.err) |e| log.debug("browser connection: read failed: {t}", .{e});
+            if (w.err) |e| log.debug("browser connection: write failed: {t}", .{e});
+        }
         var http = std.http.Server.init(&r.interface, &w.interface);
         var req = try http.receiveHead();
         head_done.store(true, .release);

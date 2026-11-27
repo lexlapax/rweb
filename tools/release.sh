@@ -87,8 +87,9 @@ same version compile differently). Install it, or set RWEB_RELEASE_ANY_ZIG=1 to 
 fi
 echo "building with $zig $("$zig" version) ($(command -v "$zig"))"
 # The tests run on exactly what is packed (the exported commit), never against a real Rex: the live
-# tests need REX_SOCKET, which is removed here.
-(cd "$build" && env -u REX_SOCKET ZIG_GLOBAL_CACHE_DIR="$cache" "$zig" build test -Doptimize=ReleaseSafe) || die "the tests failed on $commit; nothing was packed"
+# tests need REX_SOCKET, which is removed here. A test that hangs fails after 60 s (the whole
+# ReleaseSafe suite takes about 25 s) instead of stopping the release.
+(cd "$build" && env -u REX_SOCKET ZIG_GLOBAL_CACHE_DIR="$cache" "$zig" build test -Doptimize=ReleaseSafe --test-timeout 60s) || die "the tests failed on $commit; nothing was packed"
 (cd "$build" && ZIG_GLOBAL_CACHE_DIR="$cache" "$zig" build dist -Dcommit="$commit")
 mkdir -p "$top/zig-out/release"
 mkdir "$out" || die "$out appeared during the build; nothing was copied into it"

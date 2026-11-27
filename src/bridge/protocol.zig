@@ -237,6 +237,32 @@ fn wordField(o: std.json.ObjectMap, name: []const u8, max: usize) ParseError![]c
     return v.string;
 }
 
+/// What a browser's paste may send to a terminal: `text` without ESC and without the C1 controls
+/// (U+0080 to U+009F, which UTF-8 encodes as C2 80 to C2 9F). Every other character is kept whole: bytes
+/// 0x80 to 0x9F are also the continuation bytes of ordinary characters (’ € ß emoji), so only the
+/// two-byte C1 sequences are removed. The result is valid UTF-8 when `text` is (the browser's JSON always
+/// is); `error.InvalidUtf8` otherwise. Caller frees.
+pub fn cleanPaste(gpa: Allocator, text: []const u8) error{ InvalidUtf8, OutOfMemory }![]u8 {
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    var out = try std.ArrayList(u8).initCapacity(gpa, text.len);
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c == 0x1b) {
+            i += 1;
+            continue;
+        }
+        if (c == 0xc2 and i + 1 < text.len and text[i + 1] >= 0x80 and text[i + 1] <= 0x9f) {
+            i += 2;
+            continue;
+        }
+        out.appendAssumeCapacity(c);
+        i += 1;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 // ---- tests ----
 
 const testing = std.testing;
@@ -433,4 +459,26 @@ fn parseEach(a: Allocator, texts: []const []const u8) !void {
 
 test "protocol: every message type parses, and a failed allocation at any point is OutOfMemory with nothing leaked" {
     try testing.checkAllAllocationFailures(testing.allocator, parseEach, .{@as([]const []const u8, &one_of_each)});
+}
+
+test "cleanPaste removes ESC and C1 and keeps every other character whole" {
+    const a = testing.allocator;
+    const out = try cleanPaste(a, "a\x1bb\xc2\x9bc\xc2\xa0e\u{00e9}\t\n");
+    defer a.free(out);
+    try testing.expectEqualStrings("abc\xc2\xa0e\u{00e9}\t\n", out);
+    // Characters whose UTF-8 holds bytes 0x80 to 0x9f are ordinary text, not C1 controls.
+    const text = "it\u{2019}s \u{201c}fine\u{201d} \u{2014} 5\u{20ac} Stra\u{00df}e \u{0410}\u{0411} \u{1f600} \u{65e5}\u{672c}";
+    const kept = try cleanPaste(a, text);
+    defer a.free(kept);
+    try testing.expectEqualStrings(text, kept);
+    // A bare 0x9b is not UTF-8: refused, never sent half-cleaned.
+    try testing.expectError(error.InvalidUtf8, cleanPaste(a, "x\x9by"));
+}
+
+fn cleanAndFree(a: Allocator, text: []const u8) !void {
+    a.free(try cleanPaste(a, text));
+}
+
+test "cleanPaste fails cleanly at every allocation" {
+    try testing.checkAllAllocationFailures(testing.allocator, cleanAndFree, .{"a\x1bb\xc2\x9bc it\u{2019}s \u{1f600}\n"});
 }

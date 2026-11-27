@@ -17,9 +17,13 @@ fn commitFile(b: *std.Build, given: ?[]const u8) std.Build.LazyPath {
     return stamp.captureStdOut(.{ .basename = "git_commit.zig" });
 }
 
-/// The bridge for one target, with its own Rex library and Ghostty built for that target.
-fn bridgeExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: anytype, opts: *std.Build.Step.Options, commit: std.Build.LazyPath, strip: ?bool) ?*std.Build.Step.Compile {
-    const ghostty = b.dependencyLazy("ghostty", .{ .target = target, .optimize = optimize }) catch return null;
+/// The Rex library and the bridge for one target, each built on Ghostty for that target in the same mode
+/// (a Debug Ghostty is ~400x slower). The one place the bridge's modules are made: the host build, its
+/// tests and every release target use it.
+const Modules = struct { rex: *std.Build.Module, bridge: *std.Build.Module };
+
+fn bridgeModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, opts: *std.Build.Step.Options, commit: std.Build.LazyPath, strip: ?bool) Modules {
+    const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = optimize });
     const rex = b.createModule(.{ .root_source_file = b.path("src/rex/root.zig"), .target = target, .optimize = optimize });
     rex.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
     // libc: the bridge calls it directly (getpwuid, umask, ACLs on macOS); said here, not left to the
@@ -29,10 +33,14 @@ fn bridgeExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: anytype,
     m.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
     m.addOptions("build_options", opts);
     m.addAnonymousImport("git_commit", .{ .root_source_file = commit });
+    return .{ .rex = rex, .bridge = m };
+}
+
+fn bridgeExe(b: *std.Build, m: *std.Build.Module) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{ .name = "rweb", .root_module = m });
     // Linux: position independent, so the static musl binary is static-pie and its addresses are
     // randomized at every start like a dynamic one's.
-    if (target.result.os.tag == .linux) exe.pie = true;
+    if (m.resolved_target.?.result.os.tag == .linux) exe.pie = true;
     return exe;
 }
 
@@ -45,39 +53,30 @@ fn ghosttyTag(url: []const u8) []const u8 {
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
-
-    // Ghostty is built in the same mode as the rest: a Debug Ghostty is ~400x slower.
-    const ghostty: ?*std.Build.Dependency = b.dependencyLazy("ghostty", .{ .target = target, .optimize = optimize }) catch null;
-
-    const rex = b.addModule("rex", .{
-        .root_source_file = b.path("src/rex/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    if (ghostty) |dep| rex.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    // Not `standardOptimizeOption`: its preferred mode would take `-Doptimize` away, which every
+    // build of this repository passes. `--release` alone means ReleaseSafe, the mode releases ship.
+    const optimize_help = "Debug (the default: Ghostty runs ~400x slower, for tests only), ReleaseSafe (what releases ship; also --release), ReleaseFast or ReleaseSmall";
+    const optimize: std.lang.Optimize = b.option(std.lang.Optimize, "optimize", optimize_help) orelse switch (b.graph.release_mode) {
+        .off => .debug,
+        .any, .safe => .safe,
+        .fast => .fast,
+        .small => .small,
+    };
 
     const filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this") orelse &.{};
-    const tests = b.addTest(.{ .root_module = rex, .filters = filters });
-    const run_tests = b.addRunArtifact(tests);
-    run_tests.has_side_effects = true; // live tests read REX_SOCKET, which the cache cannot see
-    // The bridge: imports the Rex library and, through it, Ghostty.
-    const bridge_mod = b.createModule(.{
-        .root_source_file = b.path("src/bridge/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    bridge_mod.addImport("rex", rex);
-    if (ghostty) |dep| bridge_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     // What `rweb --version` reports (the commit: see `commitFile`).
     const opts = b.addOptions();
     opts.addOption([]const u8, "version", zon.version);
     opts.addOption([]const u8, "ghostty", ghosttyTag(zon.dependencies.ghostty.url));
-    bridge_mod.addOptions("build_options", opts);
     const commit = commitFile(b, b.option([]const u8, "commit", "Commit this build is from (default: git rev-parse HEAD at build time)"));
-    bridge_mod.addAnonymousImport("git_commit", .{ .root_source_file = commit });
-    const exe = b.addExecutable(.{ .name = "rweb", .root_module = bridge_mod });
+
+    const host = bridgeModules(b, target, optimize, opts, commit, null);
+    // The Rex library, for a package that depends on this one.
+    b.modules.put(b.graph.arena, "rex", host.rex) catch @panic("OOM");
+    const tests = b.addTest(.{ .root_module = host.rex, .filters = filters });
+    const run_tests = b.addRunArtifact(tests);
+    run_tests.has_side_effects = true; // live tests read REX_SOCKET, which the cache cannot see
+    const exe = bridgeExe(b, host.bridge);
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);
     run_exe.addPassthruArgs();
@@ -94,13 +93,14 @@ pub fn build(b: *std.Build) void {
     pack.addDirectoryArg(b.graph.path(.install_prefix, "dist"));
     pack.has_side_effects = true;
     for (dist_targets) |t| {
-        const d = bridgeExe(b, b.resolveTargetQuery(t.query), .safe, opts, commit, true) orelse continue;
+        const resolved = b.resolveTargetQuery(t.query);
+        const d = bridgeExe(b, bridgeModules(b, resolved, .safe, opts, commit, true).bridge);
         const inst = b.addInstallArtifact(d, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("dist/stage/{s}", .{t.name}) } } });
         pack.step.dependOn(&inst.step);
     }
     b.step("dist", "Release archives for macOS ARM64 and Linux x86-64 in zig-out/dist").dependOn(&pack.step);
 
-    const bridge_tests = b.addTest(.{ .root_module = bridge_mod, .filters = filters });
+    const bridge_tests = b.addTest(.{ .root_module = host.bridge, .filters = filters });
     const run_bridge_tests = b.addRunArtifact(bridge_tests);
     run_bridge_tests.has_side_effects = true;
 
@@ -111,9 +111,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const fuzz_tests = b.addTest(.{ .root_module = fuzz_mod });
+    const fuzz_tests = b.addTest(.{ .root_module = fuzz_mod, .filters = filters });
     const run_fuzz = b.addRunArtifact(fuzz_tests);
-    b.step("fuzz", "Fuzz the parsers: zig build fuzz --fuzz").dependOn(&run_fuzz.step);
+    b.step("fuzz", "Fuzz the parsers: zig build fuzz --fuzz[=N] [-Dtest-filter=NAME]").dependOn(&run_fuzz.step);
 
     // The page's pure logic (needs Node). Not part of `test`, so a machine without Node still builds.
     const web_tests = b.addSystemCommand(&.{ "node", "--test", "tests/web/keys.test.mjs" });

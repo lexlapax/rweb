@@ -1747,3 +1747,90 @@ test "mirror: a new nonce that cannot be stored leaves the old splitter whole, f
     try testing.expectError(error.OutOfMemory, m.setNonce(2));
     try testing.expect(m.splitter != null);
 }
+
+/// Terminal output built from pieces a program sends, so random input reaches the escape-sequence
+/// states that random bytes alone seldom do: controls, CSI with parameters, the alternate screen,
+/// OSC and DCS strings cut short, kitty graphics, UTF-8 (whole and broken), Rex's own resize messages
+/// (some over the limits, some for another stream) and raw bytes. Never a `t`: Ghostty logs `CSI t` with
+/// no parameters as an error, and the test runner fails a test that logs one.
+fn fuzzOutput(r: std.Random, out: *std.ArrayList(u8), gpa: Allocator, nonce: u64, max: usize) !void {
+    const pieces = [_][]const u8{
+        "words ",           "\r\n",             "\n",          "\x1b",        "\x1b[",                   "\x1b[2J", "\x1b[H",
+        "\x1b[31m",         "\x1b[0m",          "\x1b[?1049h", "\x1b[?1049l", "\x1b[?2004h",             "\x1b[K",  "\x1b[1;1r",
+        "\x1b]0;title\x07", "\x1b]52;c;aGk=",   "\x1bP",       "\x1b\\",      "\x1b_Ga=T,f=24,s=1,v=1;", "\x18",    "\x07",
+        "\xe2\x80\x99",     "\xf0\x9f\x98\x80", "\xc2",        "\x9b",        "\x1b[?1000h",             "\x1b[L",  "\x1b[200~",
+        "\x1b[3;5H",        "\x1b[100;200H",    "\x1b[?25l",   "\t",          "\x08",                    "\x1b(0",  "\x1b[S",
+    };
+    while (out.items.len < max) {
+        switch (r.uintLessThan(u8, 10)) {
+            0 => {
+                // A resize message: usually for this stream, sometimes for another; sizes up to past
+                // the limits.
+                const n = if (r.boolean()) nonce else nonce + 1;
+                const cols = r.uintAtMost(u32, 5000);
+                const rows = r.uintAtMost(u32, 300);
+                try out.print(gpa, "\x1b_rex1;{d};{{\"type\":\"resize\",\"cols\":{d},\"rows\":{d},\"owner\":null}}\x1b\\", .{ n, cols, rows });
+            },
+            1 => {
+                // Digits and separators, as parameters.
+                for (0..r.uintAtMost(usize, 6)) |_| try out.append(gpa, "0123456789;:?"[r.uintLessThan(usize, 13)]);
+            },
+            2 => try out.append(gpa, switch (r.int(u8)) {
+                't' => 'u',
+                else => |b| b,
+            }),
+            else => try out.appendSlice(gpa, pieces[r.uintLessThan(usize, pieces.len)]),
+        }
+    }
+}
+
+test "mirror: random terminal output in random pieces never breaks the mirror, its redraw or its text" {
+    const a = testing.allocator;
+    const nonce = 7;
+    const stream = try makeStream(a, nonce, 40, 10, "before\r\n\x1b[1mbold\x1b[0m\r\n");
+    defer a.free(stream);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    // Ghostty in Debug is hundreds of times slower: a few rounds there, the full run in ReleaseSafe
+    // (the mode releases are tested in).
+    const total: u32 = if (@import("builtin").mode == .debug) 4 else 300;
+    var rounds: u32 = 0;
+    while (rounds < total) : (rounds += 1) {
+        const seed = testing.random_seed +% rounds;
+        errdefer std.debug.print("mirror fuzz: seed {d}\n", .{seed});
+        var prng = std.Random.DefaultPrng.init(seed);
+        const r = prng.random();
+        out.clearRetainingCapacity();
+        try fuzzOutput(r, &out, a, nonce, r.uintAtMost(usize, 4096));
+        const m = try Mirror.init(a, testing.io, nonce);
+        defer m.deinit();
+        // Every few rounds, garbage takes the snapshot's place.
+        const garbage = r.uintLessThan(u8, 8) == 0;
+        const all = if (garbage) out.items else try std.mem.concat(a, u8, &.{ stream, out.items });
+        defer if (!garbage) a.free(all);
+        // Through the sink, as a stream from Rex reaches it: a failure there is final, said once.
+        const sk = m.sink();
+        var off: usize = 0;
+        while (off < all.len) {
+            const step = 1 + r.uintAtMost(usize, 300);
+            const piece = all[off..@min(all.len, off + step)];
+            off += piece.len;
+            sk.bytes(sk.ctx, piece);
+        }
+        if (m.getStatus() == .failed) {
+            try testing.expectEqual(data.End.mirror_failed, m.endReason().?);
+            try testing.expectError(error.MirrorFailed, m.feed("x"));
+            continue;
+        }
+        if (m.getStatus() != .live) continue;
+        const sz = m.size().?;
+        try testing.expect(resizeAllowed(sz.cols, sz.rows));
+        const text = try m.plainText(a);
+        a.free(text);
+        // The redraw replays on a fresh terminal of the same size.
+        const bytes = try m.redraw(a);
+        defer a.free(bytes);
+        var alt = false;
+        a.free(try replay(a, bytes, sz.cols, sz.rows, &alt));
+    }
+}

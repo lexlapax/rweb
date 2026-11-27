@@ -651,7 +651,10 @@ pub const Control = struct {
         var buf: ws.Conn.ReadBuffer = .{};
         defer buf.deinit(gpa);
         while (true) {
-            const m = cn.readMessageInto(gpa, &buf) catch return;
+            const m = cn.readMessageInto(gpa, &buf) catch |e| {
+                log.debug("control connection ended: {t} ({?t})", .{ e, cn.socketError() });
+                return;
+            };
             if (m.opcode != .text) return; // close or something we do not speak
             c.dispatch(m.data) catch |e| {
                 log.debug("dropping a message: {t}", .{e});

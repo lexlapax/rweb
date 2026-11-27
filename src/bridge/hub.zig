@@ -493,31 +493,6 @@ pub const Terminal = struct {
     }
 };
 
-/// `text` without ESC and without the C1 controls (U+0080 to U+009F, which UTF-8 encodes as C2 80 to
-/// C2 9F). Every other character is kept whole: bytes 0x80 to 0x9F are also the continuation bytes of
-/// ordinary characters (’ € ß emoji), so only the two-byte C1 sequences are removed. The result is valid
-/// UTF-8 when `text` is (the browser's JSON always is); `error.InvalidUtf8` otherwise. Caller frees.
-fn cleanPaste(gpa: Allocator, text: []const u8) ![]u8 {
-    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
-    var out = try std.ArrayList(u8).initCapacity(gpa, text.len);
-    errdefer out.deinit(gpa);
-    var i: usize = 0;
-    while (i < text.len) {
-        const c = text[i];
-        if (c == 0x1b) {
-            i += 1;
-            continue;
-        }
-        if (c == 0xc2 and i + 1 < text.len and text[i + 1] >= 0x80 and text[i + 1] <= 0x9f) {
-            i += 2;
-            continue;
-        }
-        out.appendAssumeCapacity(c);
-        i += 1;
-    }
-    return out.toOwnedSlice(gpa);
-}
-
 fn themeFrame(gpa: Allocator, theme: *const rex.mirror.Theme) ![]u8 {
     return std.json.Stringify.valueAlloc(gpa, .{
         .t = "theme",
@@ -1081,7 +1056,7 @@ pub const Hub = struct {
                 if (!h.forTerminal(v, "paste", term, p.at)) return;
                 // ESC and C1 never go through: a pasted "end of paste" would type the rest. The page
                 // removes them too; this is the second line.
-                const clean = cleanPaste(h.gpa, p.text) catch |e| return h.fail(v, "paste", e);
+                const clean = protocol.cleanPaste(h.gpa, p.text) catch |e| return h.fail(v, "paste", e);
                 defer h.gpa.free(clean);
                 // Without bracketed paste a program reads a pasted newline as Enter: several lines
                 // would run one by one. The page asks the user, then sends `force`.
@@ -2779,20 +2754,6 @@ test "hub: a paste, a resize, a terminal action, an upload or a file request for
     try testing.expect(std.mem.indexOf(u8, seen.items, "SECRET-CLIPBOARD") == null);
 }
 
-test "hub: cleanPaste removes ESC and C1 and keeps every other character whole" {
-    const a = testing.allocator;
-    const out = try cleanPaste(a, "a\x1bb\xc2\x9bc\xc2\xa0e\u{00e9}\t\n");
-    defer a.free(out);
-    try testing.expectEqualStrings("abc\xc2\xa0e\u{00e9}\t\n", out);
-    // Characters whose UTF-8 holds bytes 0x80 to 0x9f are ordinary text, not C1 controls.
-    const text = "it\u{2019}s \u{201c}fine\u{201d} \u{2014} 5\u{20ac} Stra\u{00df}e \u{0410}\u{0411} \u{1f600} \u{65e5}\u{672c}";
-    const kept = try cleanPaste(a, text);
-    defer a.free(kept);
-    try testing.expectEqualStrings(text, kept);
-    // A bare 0x9b is not UTF-8: refused, never sent half-cleaned.
-    try testing.expectError(error.InvalidUtf8, cleanPaste(a, "x\x9by"));
-}
-
 test "hub: a viewer that falls behind is redrawn at most once a second" {
     const hs = try Harness.init(.{ .max_live_bytes = 4096 });
     defer hs.deinit();
@@ -2983,14 +2944,6 @@ test "hub: re-attaching after a Rex restart with no memory forgets the sessions,
     const attached = hs.hub.attached.contains(hs.session_id);
     hs.hub.mu.unlock(testing.io);
     try testing.expect(attached);
-}
-
-fn cleanAndFree(a: Allocator, text: []const u8) !void {
-    a.free(try cleanPaste(a, text));
-}
-
-test "hub: cleanPaste fails cleanly at every allocation" {
-    try testing.checkAllAllocationFailures(testing.allocator, cleanAndFree, .{"a\x1bb\xc2\x9bc it\u{2019}s \u{1f600}\n"});
 }
 
 /// Fails every allocation from the `fail_from`th on (counted from 0), like `std.testing.FailingAllocator`,

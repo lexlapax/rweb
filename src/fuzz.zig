@@ -10,6 +10,8 @@ const rex1 = @import("rex/rex1.zig");
 const wire = @import("rex/wire.zig");
 const protocol = @import("bridge/protocol.zig");
 const access = @import("bridge/access.zig");
+const fsparse = @import("bridge/fsparse.zig");
+const escape = @import("rex/escape.zig");
 
 /// A corpus entry for a target that reads its input with `smith.slice`: the length first.
 fn seed(comptime bytes: []const u8) []const u8 {
@@ -291,4 +293,128 @@ test "fuzz originMatchesHost never matches a different host" {
             }
         }
     }.run, .{});
+}
+
+test "fuzz cleanPaste: no ESC or C1 control survives, and the rest is kept as it was" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const text = buf[0..smith.slice(&buf)];
+            const out = protocol.cleanPaste(testing.allocator, text) catch |e| switch (e) {
+                error.InvalidUtf8 => return testing.expect(!std.unicode.utf8ValidateSlice(text)),
+                error.OutOfMemory => return e,
+            };
+            defer testing.allocator.free(out);
+            try testing.expect(std.unicode.utf8ValidateSlice(out));
+            try testing.expect(std.mem.indexOfScalar(u8, out, 0x1b) == null);
+            var it = std.unicode.Utf8View.initUnchecked(out).iterator();
+            while (it.nextCodepoint()) |c| try testing.expect(c < 0x80 or c > 0x9f);
+            // Only removed, never changed: the input with ESC and C1 taken out, by code point.
+            var want: std.ArrayList(u8) = .empty;
+            defer want.deinit(testing.allocator);
+            var in = std.unicode.Utf8View.initUnchecked(text).iterator();
+            while (in.nextCodepointSlice()) |c| {
+                const cp = std.unicode.utf8Decode(c) catch unreachable; // validated above
+                if (cp != 0x1b and (cp < 0x80 or cp > 0x9f)) try want.appendSlice(testing.allocator, c);
+            }
+            try testing.expectEqualSlices(u8, want.items, out);
+        }
+    }.run, .{ .corpus = &.{
+        seed("plain text\n"),
+        seed("a\x1b[31mred\x1b[0m \xc2\x9b2J \xc2\xa0 it\xe2\x80\x99s \xf0\x9f\x98\x80"),
+        seed("x\x9by"),
+        seed("\xc2"),
+    } });
+}
+
+test "fuzz escCut: a write ends where it was asked or at the ESC of the sequence it would split" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const text = buf[0..smith.slice(&buf)];
+            const n = smith.value(u16) % (text.len + 2);
+            const cut = escape.escCut(text, n);
+            if (n >= text.len) return testing.expectEqual(n, cut);
+            try testing.expect(cut <= n);
+            // A cut short of `n` is at an ESC and leaves something to send.
+            if (cut < n) try testing.expect(cut > 0 and text[cut] == 0x1b);
+        }
+    }.run, .{ .corpus = &.{
+        seed("abc\x1b[12;3...."),
+        seed("ab\x1b]0;title\x07cd...."),
+        seed("a\x1b[M\x1b\x1b\x1bb...."),
+        seed("x\x1b[<0;12;34M\x1b[<0;12...."),
+    } });
+}
+
+test "fuzz parseMountInfoLine: fields are pieces of the line, and a line is found by its id" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const line = buf[0..smith.slice(&buf)];
+            const mi = fsparse.parseMountInfoLine(line) orelse return;
+            const lo = @intFromPtr(line.ptr);
+            const hi = lo + line.len;
+            for ([_][]const u8{ mi.mount_point, mi.options, mi.fstype, mi.source, mi.super_options }) |f| {
+                try testing.expect(std.mem.indexOfScalar(u8, f, ' ') == null);
+                if (f.len > 0) try testing.expect(@intFromPtr(f.ptr) >= lo and @intFromPtr(f.ptr) + f.len <= hi);
+            }
+            // The same line inside a file is found by its id, unless an earlier line has that id.
+            if (std.mem.indexOfScalar(u8, line, '\n') == null) {
+                const found = fsparse.findMountInfo(line, mi.id) orelse return error.TestExpectedFound;
+                try testing.expectEqualStrings(mi.mount_point, found.mount_point);
+            }
+        }
+    }.run, .{ .corpus = &.{
+        seed("36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue"),
+        seed("22 1 8:1 / / rw - ext4 /dev/sda1 rw"),
+        seed("22 1 8:1 / / rw shared:1"),
+        seed("x 1 8:1 / / rw - ext4 /dev/sda1"),
+    } });
+}
+
+test "fuzz checkPosixAcl: a refusal names whom it refuses, and an ACL without write is never refused for it" {
+    try testing.fuzz({}, struct {
+        const Groups = struct {
+            safe_gid: u32,
+            fn safe(g: Groups, gid: u32) bool {
+                return gid == g.safe_gid;
+            }
+        };
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [128]u8 = undefined;
+            const blob = buf[0..smith.slice(&buf)];
+            const uid = smith.value(u32) % 4;
+            const file_gid = smith.value(u32) % 4;
+            const g: Groups = .{ .safe_gid = smith.value(u32) % 4 };
+            var who: fsparse.AclWho = .none;
+            const got = fsparse.checkPosixAcl(blob, uid, file_gid, g, Groups.safe, &who);
+            if (got) |_| {
+                try testing.expect(who == .none);
+            } else |e| switch (e) {
+                error.AclUnreadable => try testing.expect(who == .none),
+                error.AclGivesOthersWrite => try testing.expect(who == .user and who.user != 0 and who.user != uid),
+                error.AclGivesGroupWrite => try testing.expect(who == .group and !g.safe(who.group)),
+            }
+            // The same list with every write bit cleared: as readable as before, and never refused
+            // for giving write.
+            if (blob.len < 4 or (blob.len - 4) % 8 != 0) return testing.expectError(error.AclUnreadable, got);
+            var i: usize = 4;
+            while (i < blob.len) : (i += 8) blob[i + 2] &= ~@as(u8, fsparse.posix_acl.write);
+            const quiet = fsparse.checkPosixAcl(blob, uid, file_gid, g, Groups.safe, null);
+            if (got == error.AclUnreadable) {
+                try testing.expectError(error.AclUnreadable, quiet);
+            } else try quiet;
+        }
+    }.run, .{
+        .corpus = &.{
+            // version 2; user_obj rwx, a named user 5 with rwx, group_obj r-x, mask rwx, other r-x
+            seed("\x02\x00\x00\x00" ++ "\x01\x00\x07\x00\xff\xff\xff\xff" ++ "\x02\x00\x07\x00\x05\x00\x00\x00" ++
+                "\x04\x00\x05\x00\xff\xff\xff\xff" ++ "\x10\x00\x07\x00\xff\xff\xff\xff" ++ "\x20\x00\x05\x00\xff\xff\xff\xff"),
+            // a named group 9 with write, under a mask that allows it
+            seed("\x02\x00\x00\x00" ++ "\x08\x00\x02\x00\x09\x00\x00\x00" ++ "\x10\x00\x07\x00\xff\xff\xff\xff"),
+            seed("\x02\x00\x00\x00\x01"),
+            seed("\x01\x00\x00\x00"),
+        },
+    });
 }

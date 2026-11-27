@@ -256,7 +256,10 @@ pub const Data = struct {
                 },
                 error.OutOfMemory => return .{ .done = .failed },
                 // The connection dropped: resume.
-                else => return .reconnect,
+                else => {
+                    log.debug("data stream dropped: {t} ({?t}); resuming", .{ e, c.socketError() });
+                    return .reconnect;
+                },
             };
             switch (m.opcode) {
                 .binary => {

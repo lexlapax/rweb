@@ -27,6 +27,7 @@ test {
     _ = api;
     _ = transfer;
     _ = sync;
+    _ = @import("escape.zig");
     _ = @import("measure.zig");
     _ = counting;
 }

@@ -206,13 +206,13 @@ pub fn peerUid(stream: Io.net.Stream) ?u32 {
             return @intCast(uid);
         },
         .linux => {
-            var cred: extern struct { pid: i32, uid: u32, gid: u32 } = undefined;
+            var cred: LinuxUcred = undefined;
             // The system call itself, so this needs no libc (the fuzz build links none).
             const linux = std.os.linux;
-            var len: linux.socklen_t = @sizeOf(@TypeOf(cred));
+            var len: linux.socklen_t = @sizeOf(LinuxUcred);
             const rc = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &len);
             if (linux.errno(rc) != .SUCCESS) return null;
-            if (len != @sizeOf(@TypeOf(cred))) return null;
+            if (len != @sizeOf(LinuxUcred)) return null;
             return cred.uid;
         },
         else => return null,
@@ -220,6 +220,15 @@ pub fn peerUid(stream: Io.net.Stream) ?u32 {
 }
 
 extern "c" fn getpeereid(fd: c_int, uid: *std.c.uid_t, gid: *std.c.gid_t) c_int;
+
+/// Linux's `struct ucred` (`SO_PEERCRED`), which std does not declare: the same on every Linux
+/// architecture (pid_t, uid_t and gid_t are 32 bits on all of them).
+const LinuxUcred = extern struct { pid: i32, uid: u32, gid: u32 };
+
+comptime {
+    std.debug.assert(@sizeOf(LinuxUcred) == 12 and @offsetOf(LinuxUcred, "uid") == 4);
+    if (builtin.os.tag == .linux) std.debug.assert(@sizeOf(std.os.linux.uid_t) == 4 and @sizeOf(std.os.linux.pid_t) == 4);
+}
 
 /// Most pings and pongs a peer may send in any one second: each ping makes us write a pong, so a
 /// flood is work we do for the peer. A connection that stays idle with a ping every few seconds is
@@ -503,6 +512,18 @@ pub const Conn = struct {
             };
         }
     }
+
+    /// The socket error behind a failed read or write: `ReadFailed` and `WriteFailed` say only which
+    /// side failed, and the socket's reader and writer keep why. Null when neither failed, and for a
+    /// connection made by `fromHttp`, which reads and writes through the HTTP server's reader and
+    /// writer (whose owner logs their cause).
+    pub fn socketError(c: *const Conn) ?SocketError {
+        if (c.r == &c.reader.interface) if (c.reader.err) |e| return e;
+        if (c.w == &c.writer.interface) if (c.writer.err) |e| return e;
+        return null;
+    }
+
+    pub const SocketError = Io.net.Stream.Reader.Error || Io.net.Stream.Writer.Error;
 
     pub fn deinit(c: *Conn, gpa: Allocator) void {
         c.stopWatcher();
@@ -1170,6 +1191,20 @@ test "a connection carries no socket buffers unless it owns its socket" {
     const c = try Conn.fromHttp(std.testing.allocator, std.testing.io, undefined, &r, &sink.writer, 1 << 16);
     defer c.deinit(std.testing.allocator);
     try std.testing.expect(c.bufs == null);
+    // So it has no socket error of its own to tell: the HTTP server's reader and writer hold it.
+    try std.testing.expect(c.socketError() == null);
+}
+
+test "socketError: a failed write names the socket's cause, not only WriteFailed" {
+    const io = std.testing.io;
+    var p: TestPair = .{};
+    try p.init(io);
+    defer p.deinit(io);
+    try std.testing.expect(p.client.socketError() == null);
+    // Writing on a socket shut for sending fails in the kernel, not in this code.
+    try p.client.stream.shutdown(io, .send);
+    try std.testing.expectError(error.WriteFailed, p.client.writeFrame(.text, "after shutdown"));
+    try std.testing.expect(p.client.socketError() != null);
 }
 
 test "writeFrame: timed writes share one deadline watcher per connection" {

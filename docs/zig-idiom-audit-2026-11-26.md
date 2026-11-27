@@ -77,7 +77,7 @@ mechanical changes above), **part fixed**, or **open**.
 | F18 | errors | nice-to-have | `anyerror` where an inferred or named set would do (25 functions); Zig error names reach the browser | open | `src/rex/rex1.zig:60`, `:144`, `:155`; `src/bridge/hub.zig:764`, `:820`, `:902`, `:988`; `src/bridge/server.zig:1234` |
 | F19 | build | nice-to-have | ETags and gzip bodies are made at run time on first use; lookup is a scan of 28 entries | open | `src/bridge/server.zig:908-926`; `src/bridge/assets.zig:46-54` |
 | F20 | build | should-fix | libc not asked for; the Linux release not position independent | **fixed in round five**: `link_libc = true`, `pie` on Linux. The archive itself: see checklist item 34 | `build.zig:27`, `:34`, `:69` |
-| F21 | build | nice-to-have | the bridge's module graph is built twice; `optimize: anytype`; a plain `zig build` is Debug | open | `build.zig:21-36` against `:65-80`; `build.zig:21`; `build.zig:48` |
+| F21 | build | nice-to-have | the bridge's module graph is built twice; `optimize: anytype`; a plain `zig build` is Debug | **fixed in Phase B step 7** (2026-11-26): one `bridgeModules`, `std.lang.Optimize`, the help says what a plain build is | `build.zig:21-36` against `:65-80`; `build.zig:21`; `build.zig:48` |
 | F22 | style | nice-to-have | `@hasField` on the project's own struct; a function-static buffer; tests before `main`; a long `main`; help and version returned as errors | **part fixed in round five**: the `@hasField` is gone and `rexProblem` takes a buffer (`src/bridge/main.zig:614`). **Open**: tests at `src/bridge/main.zig:26-74` before `main` at `:154`; `main` is 269 lines; `src/bridge/cli.zig:146-150` | as named |
 | F23 | performance | nice-to-have | four or five small allocations per keystroke; byte-wise masking; a ping payload copied to the heap; hand-made deques | **mostly fixed in Phase B step 3**: requests written in one pass, ping on the stack; deques left | `src/rex/input.zig:285-305`, `:273`; `src/rex/ws.zig:504`, `:553`, `:560`; `src/bridge/hub.zig:88`, `:171` |
 | F24 | tests | nice-to-have | waits are polls with wall-clock limits; `checkAllAllocationFailures` is not used | done for allocation failures (step 4); test sleeps did not fall in step 5 (see there) | 0 uses; 56 `sleep` calls, about 40 of them in tests |
@@ -103,12 +103,12 @@ Tally: 20 pass, 16 fix needed, 1 not applicable, 1 needs a run.
 | 3 | Dead code analysis | pass | No `refAllDecls`; every file is reached through `test { _ = ...; }` (`src/rex/root.zig:15`, `src/bridge/main.zig:1124`) and each has tests (3 to 52). `fuzz.zig` is its own module. Linux-only branches are compiled on macOS only by `zig build dist`, and their tests run only on Linux. | |
 | 4 | Stale APIs | fix needed | None of the listed names is left, except two deprecated `std.fmt.allocPrintSentinel` in tests (`src/bridge/xfer.zig:2020`, `:2359`). `std.fs.path` (10 uses) is current. | `arena.printSentinel(...)` in those two places. |
 | 5 | Upgrade hazards | pass | Three `@bitCast`, all between scalar integers of one width: `dev_t` to `u32` or `u64` (`src/bridge/xfer.zig:478-479`) and a descriptor `isize` to `usize` for a raw system call (`:783`). None is on an array, a vector or an `extern` type, so 0.17's logical bit order does not touch them. No `containsAtLeastScalar`. | |
-| 6 | Release mode | fix needed | The archives are forced to `.safe` (`build.zig:98`) and Ghostty is given the same mode (`build.zig:22`, `:51`). No `@setRuntimeSafety`. But `standardOptimizeOption(.{})` (`build.zig:48`) makes a plain `zig build` a Debug build, where Ghostty is hundreds of times slower; the README tells builders to pass `-Doptimize=ReleaseSafe`. | `preferred_optimize_mode = .safe`, or say in the build's own help what a plain build is. |
+| 6 | Release mode | **done in Phase B step 7** (2026-11-26) | The archives are forced to `.safe` (`build.zig:98`) and Ghostty is given the same mode (`build.zig:22`, `:51`). No `@setRuntimeSafety`. But `standardOptimizeOption(.{})` (`build.zig:48`) makes a plain `zig build` a Debug build, where Ghostty is hundreds of times slower; the README tells builders to pass `-Doptimize=ReleaseSafe`. | `preferred_optimize_mode = .safe`, or say in the build's own help what a plain build is. |
 | 7 | Safety overrides and casts | pass | 34 `@ptrCast` (27 recover a callback's context, 6 are socket and ACL calls, 1 turns `[][]u8` into `[]const []const u8`), 29 `@alignCast`, 0 `@constCast`, 0 `@ptrFromInt`, 59 `@intCast`, 6 `@truncate`, 5 wrapping operators (2 sequence counters, 3 test patterns). Every `@intCast` on a value from a browser or Rex follows a range check (`src/rex/ws.zig:545`, `src/rex/wire.zig:52-55`, `:119-120`, `src/rex/control.zig:496-505`, `src/bridge/protocol.zig:110`, `:156`, `src/rex/api.zig:494`). | |
 | 8 | `unreachable` and panics | pass | 4 bare `unreachable`: three after a dispatch that already chose the tag (`src/bridge/hub.zig:851`, `:956`, `:985`), one state handled just above (`src/rex/input.zig:385`). 11 `catch unreachable`: 7 in tests, 4 into a buffer sized for the worst case (`src/bridge/server.zig:876`, `src/bridge/xfer.zig:245`, `src/rex/control.zig:434`, `src/rex/rex1.zig:238`). No `@panic`. | |
 | 9 | Swallowed errors | fix needed | 84 `catch {}` (about 50 outside tests): socket shutdown, close frames, cleanup deletes and messages into fixed buffers are best effort on a path already ending. Not justified: `src/bridge/server.zig:643` (see F7); `src/bridge/server.zig:153`, where the result of `fcntl(FD_CLOEXEC)` on the loopback listener is thrown away; and the hub's replies, which are dropped without a word when `valueAlloc` fails (`catch return`, 45 in the tree). | Refuse the connection when it cannot be tracked; fail `listenLoopback` when `fcntl` fails; count dropped replies in `Viewer.overflows` and log once. |
 | 10 | Error sets | fix needed | Explicit sets at the trust boundaries: `cli.Error`, `xfer.CheckError` and `OpenError`, `protocol.ParseError`, `ws.ParseError`, `api.Error`. But 47 `anyerror` (25 function signatures), 59 public functions with inferred sets, and `@errorName` as the text of a browser error (F18). Out of memory is kept apart from bad input everywhere it was read. | Phase B 1 and F18: named sets on the `rex` entry points; a small error-to-code table for the browser. |
-| 11 | Cancelation and causes | fix needed | Loops end on `Canceled` (`src/bridge/server.zig:561`, the sleeps' `catch return`, `src/rex/control.zig` reader, `src/rex/data.zig` reader); `swapCancelProtection` guards a frame being written (`src/rex/ws.zig:477`). No `.?` on a stream's `err`. But the cause behind `ReadFailed` and `WriteFailed` is never read (no use of a reader's or writer's `err`), so the log says "connection ended: ReadFailed" (`src/bridge/server.zig:661`) whatever happened. In `Hub.handle` a `Canceled` becomes an error frame for the browser; the task still ends, because `stop` shuts the socket first. | Log `r.err` / `w.err` where a connection ends. |
+| 11 | Cancelation and causes | **done in Phase B step 7** (2026-11-26) | Loops end on `Canceled` (`src/bridge/server.zig:561`, the sleeps' `catch return`, `src/rex/control.zig` reader, `src/rex/data.zig` reader); `swapCancelProtection` guards a frame being written (`src/rex/ws.zig:477`). No `.?` on a stream's `err`. But the cause behind `ReadFailed` and `WriteFailed` is never read (no use of a reader's or writer's `err`), so the log says "connection ended: ReadFailed" (`src/bridge/server.zig:661`) whatever happened. In `Hub.handle` a `Canceled` becomes an error frame for the browser; the task still ends, because `stop` shuts the socket first. | Log `r.err` / `w.err` where a connection ends. |
 | 12 | `errdefer` and `defer` | fix needed | 106 `errdefer`; ownership handed over is said in comments (`Registry.add`, `Input.push`). One leak found: **`Hub.open`** (`src/bridge/hub.zig:524-534`) frees only the struct when it fails, so a failed first `attach_all` or tree read leaves `Api.last_error` allocated, and a failed task start also leaves the tree and its key set. `main` calls it again on every retry while Rex is not ready (`src/bridge/main.zig:593`). A few dozen bytes per failed try, at most every 10 s. | `errdefer` in `Hub.open` that frees what `close` frees (`api.deinit`, the tree, `known`). A test with `checkAllAllocationFailures` (item 30) would have found it. |
 | 13 | Allocator flow | fix needed | One source: `init.gpa` (`src/bridge/main.zig:155`), passed down; no `page_allocator`, `c_allocator` or `smp_allocator` anywhere in `src` now. What `init.gpa` is in the shipped mode is known (`SafeAllocator`) but not chosen or measured (F1). | Phase B 2. |
 | 14 | Arena and fixed-buffer lifetime | pass | 65 arenas, nearly all per call or per test. The one that lives as long as a connection is reset for each message with `.retain_capacity` (`src/bridge/server.zig:1232`); a message is at most 64 KiB, so what it keeps is bounded, and the parsed message is not used after the reset. The theme and the tree's key set are replaced whole. No fixed-buffer allocators. | |
@@ -128,8 +128,8 @@ Tally: 20 pass, 16 fix needed, 1 not applicable, 1 needs a run.
 | 28 | Data layout | pass | No `packed`. Two `extern struct`, both for a system call. Nothing here is numerous enough for `MultiArrayList` to matter: tens of terminals and viewers. 21 `create` calls, one per long-lived object. | |
 | 29 | `undefined` and output bytes | pass | 309 `undefined`, nearly all buffers. What is written out is a slice of what was filled (`hdr[0..n]` at `src/rex/ws.zig:493`, `w.buffered()`), and whole arrays are sent only after every byte is set (`src/rex/transfer.zig:54-57`, `src/rex/data.zig:115-117`, the 25-byte resume record). | |
 | 30 | Leak and OOM tests | **done in Phase B step 4** (2026-11-26) | `testing.allocator` 470 times; no test uses the page allocator. `FailingAllocator` in 5 tests (`src/rex/control.zig:940`, `src/rex/mirror.zig:986`, `:1408`, `:1481`, and the hub's counting allocator). **`checkAllAllocationFailures`: 0 uses.** No owning type has each of its allocations failed in turn; item 12's leak is what that leaves. | Phase B 4. |
-| 31 | Fuzzing and negative tests | fix needed | 10 fuzz targets in `src/fuzz.zig` (frame header, handshake, welcome, message body, the splitter against a reference with arbitrary cuts, snapshot framing in pieces, message reassembly, the browser protocol, the access decision, origin matching); 3 carry a corpus; 247 `expectError`. Not fuzzed: the mirror (the fuzz build leaves Ghostty out), `cleanPaste`, `escCut`, `parseMountInfoLine`, `checkPosixAcl`. A long fuzz run was not done here. | Fuzz targets for the four pure functions named; a mirror target that runs as an ordinary test if it cannot be instrumented. |
-| 32 | Test control | fix needed | `-Dtest-filter` exists (`build.zig:60`); tests use `std.testing.io` (501 uses); live tests skip without `REX_SOCKET` (25 `SkipZigTest`). But about 40 waits in tests are sleeps and polls with wall-clock limits, no `--test-timeout` is set anywhere, and there is no CI. | Phase B 5 (events to wait on); `--test-timeout` in `tools/release.sh`. |
+| 31 | Fuzzing and negative tests | **done in Phase B step 7** (2026-11-26) | 10 fuzz targets in `src/fuzz.zig` (frame header, handshake, welcome, message body, the splitter against a reference with arbitrary cuts, snapshot framing in pieces, message reassembly, the browser protocol, the access decision, origin matching); 3 carry a corpus; 247 `expectError`. Not fuzzed: the mirror (the fuzz build leaves Ghostty out), `cleanPaste`, `escCut`, `parseMountInfoLine`, `checkPosixAcl`. A long fuzz run was not done here. | Fuzz targets for the four pure functions named; a mirror target that runs as an ordinary test if it cannot be instrumented. |
+| 32 | Test control | **done in Phase B step 7** (2026-11-26) | `-Dtest-filter` exists (`build.zig:60`); tests use `std.testing.io` (501 uses); live tests skip without `REX_SOCKET` (25 `SkipZigTest`). But about 40 waits in tests are sleeps and polls with wall-clock limits, no `--test-timeout` is set anywhere, and there is no CI. | Phase B 5 (events to wait on); `--test-timeout` in `tools/release.sh`. |
 | 33 | Build hygiene | pass | No `findProgram`. The two script steps run at make time and are marked `has_side_effects` (`build.zig:16`, `:95`); the commit is deliberately not read while configuring. Two options (`test-filter`, `commit`). `zig-pkg/` is ignored. `dependencyLazy` is used for a dependency the manifest does not mark lazy, where `b.dependency` would say the same with less (`build.zig:22`, `:51`). | |
 | 34 | Release artifact | pass | The Linux archive's binary, built from this tree and read with `readelf -lW` and `readelf -d` on Linux: type `DYN` (position-independent executable), no `INTERP`, no `NEEDED` entries, `GNU_STACK` not executable, `GNU_RELRO` present, `BIND_NOW`; it runs (`--version`). Not done: a load run of that artifact, LTO or CPU-baseline comparison. |
 | 35 | `single_threaded` | not applicable | Not set anywhere; the server needs real concurrency. | |
@@ -457,3 +457,60 @@ Rex, in ReleaseSafe.
    - `preferred_optimize_mode`, one function that builds the bridge's modules, `b.dependency`
      (items 6, 33, F21).
    - The rest of F14, F17, F18, F19 and F22 as the files are next touched.
+
+   **Progress 2026-11-26 (first commit of step 7).** Done:
+   - **Build (items 6, 33, F21).** One function, `bridgeModules`, makes the Rex library and the bridge
+     for any target; the host build, its tests and both release targets use it (before, the module graph
+     was written twice). Ghostty is `b.dependency`. `-Doptimize` is rweb's own option now, with help that
+     says a plain build is Debug (Ghostty about 400 times slower, for tests) and ReleaseSafe is what
+     releases ship; `--release` alone means ReleaseSafe. Not `preferred_optimize_mode`: std's
+     `standardOptimizeOption` then drops `-Doptimize`, which the README, `tools/release.sh` and every
+     deployment pass.
+   - **`--test-timeout 60s` in `tools/release.sh`** (item 32): the ReleaseSafe suite takes about 25 s in
+     all, so a hung test fails the release instead of stopping it.
+   - **The cause behind `ReadFailed` and `WriteFailed`** (item 11): `ws.Conn.socketError` returns the
+     socket's own error when frames go through the connection's own reader and writer; the Rex control
+     reader and data stream log it where they end, and a browser connection logs its reader's or
+     writer's error where the HTTP connection ends (the WebSocket session reads through those). Test: a
+     write on a socket shut for sending gives `WriteFailed` and a cause.
+   - **Fuzz targets (item 31)** for `cleanPaste`, `escCut`, `parseMountInfoLine` with `findMountInfo`, and
+     `checkPosixAcl`, each with properties, not only "no crash": a clean paste is the input minus ESC and
+     C1, code point by code point; a cut is where asked or at an ESC, never at 0; parsed mount fields are
+     pieces of the line and the line is found by its id; an ACL refusal names whom it refuses, and the
+     same list with every write bit cleared is as readable and never refused. To reach them the fuzz
+     build (no Ghostty, no libc) needed them in std-only files: `escCut` moved to `src/rex/escape.zig`,
+     `cleanPaste` to `src/bridge/protocol.zig` (what a browser's paste may send), the mount and ACL
+     parsers to `src/bridge/fsparse.zig`; `xfer.zig` keeps their names as aliases. The `fuzz` step takes
+     `-Dtest-filter`, so one target can be fuzzed alone. Run on macOS: 2 million inputs each
+     (`zig build fuzz -Dtest-filter='fuzz escCut' --fuzz=2M`, and so on; `escCut` 4.2 million over two runs),
+     no failure. The whole set at 200K each was stopped after 35 minutes inside the older splitter
+     target, which is slow per input; a long run of every target is still not done.
+   - **The mirror** (needs Ghostty, so not instrumented): an ordinary test feeds 300 seeded random outputs
+     (4 in Debug) built from pieces programs send (CSI with random parameters, the alternate screen, OSC and
+     DCS cut short, kitty graphics, broken UTF-8, Rex resize messages, some over the limits or for another
+     stream, raw bytes) in random pieces, sometimes in place of the snapshot, through the sink as Rex's
+     stream reaches it. It checks that a failure is final and said once, and that a live mirror keeps an
+     allowed size, gives its text and a redraw that replays. No fault found.
+   - **A guard for the hand-declared Linux `struct ucred`** in `ws.zig` (part of item 25).
+
+   Found on the way:
+   - **A separately built unstripped binary cannot map the shipped one's addresses.** With `strip`, Zig
+     leaves out the stack-trace code: `__text` is 1.58 MB stripped and 1.70 MB not (macOS; Linux `.text`
+     2.31 against 2.62 MB), so every address moves. Keeping symbols needs one build stripped after linking:
+     Apple's `strip` does Mach-O, but Zig 0.17.1's `objcopy` cannot strip this ELF ("unimplemented") and
+     the release Macs have no ELF strip tool. Open; the owner decides how (below, item 36 left open).
+   - **Ghostty's parser logs into rweb's log.** Output a program prints can make Ghostty log warnings
+     ("unimplemented CSI action", "invalid C0 character") and one error ("ignoring CSI t with no
+     parameters") under its `stream` scope, and the bridge sets no log filter, so they reach its log. The
+     messages seen here quote only a sequence's parameters, but a program can fill the log with them.
+     The mirror test leaves `t` out of its output for this reason: the test runner fails a test that logs
+     an error. Open.
+
+   Checks: macOS ReleaseSafe with the live Rex (0.1.0-preview.25, **revision 24**, after the machine
+   rebooted onto it) 366 passed, 5 skipped; Debug without Rex 358 passed, 13 skipped; fuzz module 85;
+   linux-box (Rex 0.1.0-preview.25) ReleaseSafe with its live Rex 450 passed, 6 skipped; `zig fmt --check`
+   clean; `zig build dist` builds both archives. `rex ls` unchanged on both machines.
+
+   Left in step 7: one `sys.zig` for the raw calls and a Valgrind run (item 25); unstripped binaries and
+   `error_tracing` (item 36, the strip decision first); the Ghostty log filter; the rest of F14, F17, F18,
+   F19 and F22.
