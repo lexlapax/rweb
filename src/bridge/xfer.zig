@@ -14,6 +14,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fsparse = @import("fsparse.zig");
+const sys = @import("sys.zig");
 const Io = std.Io;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
@@ -293,7 +294,7 @@ fn unreserved(c: u8) bool {
 // was found in a `Problem`, and `explain` turns it into a sentence and the command that fixes it.
 
 /// The owner, group and mode (file type bits included) of an open descriptor.
-pub const OwnerMode = struct { uid: u32, gid: u32 = 0, mode: u32 };
+pub const OwnerMode = sys.OwnerMode;
 
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
@@ -446,22 +447,10 @@ pub const CheckError = error{
     ReadFailed,
 };
 
-pub fn fdOwnerMode(fd: posix.fd_t) error{StatFailed}!OwnerMode {
-    if (builtin.os.tag == .linux) {
-        const linux = std.os.linux;
-        var stx: linux.Statx = undefined;
-        const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .MODE = true, .UID = true, .GID = true }, &stx);
-        if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
-        return .{ .uid = stx.uid, .gid = stx.gid, .mode = stx.mode };
-    } else {
-        var sb: std.c.Stat = undefined;
-        if (std.c.fstat(fd, &sb) != 0) return error.StatFailed;
-        return .{ .uid = @intCast(sb.uid), .gid = @intCast(sb.gid), .mode = @intCast(sb.mode) };
-    }
-}
+pub const fdOwnerMode = sys.fdOwnerMode;
 
 /// What a folder entry is, looked at without following a link.
-pub const Node = struct { dev: u64, ino: u64, uid: u32, gid: u32, mode: u32 };
+pub const Node = sys.Node;
 
 pub fn isSocket(n: Node) bool {
     return n.mode & S_IFMT == S_IFSOCK;
@@ -477,46 +466,17 @@ fn zName(buf: *[1024]u8, name: []const u8) error{NameTooLong}![*:0]const u8 {
 /// The entry `name` in folder `dir_fd`, never following a link.
 pub fn statAt(dir_fd: posix.fd_t, name: []const u8) error{ FileNotFound, NameTooLong, StatFailed }!Node {
     var zbuf: [1024]u8 = undefined;
-    const z = try zName(&zbuf, name);
-    if (builtin.os.tag == .linux) {
-        const linux = std.os.linux;
-        var stx: linux.Statx = undefined;
-        const rc = linux.statx(dir_fd, z, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true, .MODE = true, .UID = true, .GID = true, .INO = true }, &stx);
-        switch (linux.errno(rc)) {
-            .SUCCESS => {},
-            .NOENT => return error.FileNotFound,
-            else => return error.StatFailed,
-        }
-        return .{ .dev = (@as(u64, stx.dev_major) << 32) | stx.dev_minor, .ino = stx.ino, .uid = stx.uid, .gid = stx.gid, .mode = stx.mode };
-    } else {
-        var sb: std.c.Stat = undefined;
-        const rc = std.c.fstatat(dir_fd, z, &sb, std.c.AT.SYMLINK_NOFOLLOW);
-        switch (std.c.errno(rc)) {
-            .SUCCESS => {},
-            .NOENT => return error.FileNotFound,
-            else => return error.StatFailed,
-        }
-        const dev: u64 = switch (@typeInfo(@TypeOf(sb.dev)).int.bits) {
-            32 => @as(u32, @bitCast(sb.dev)),
-            else => @bitCast(sb.dev),
-        };
-        return .{ .dev = dev, .ino = @intCast(sb.ino), .uid = @intCast(sb.uid), .gid = @intCast(sb.gid), .mode = @intCast(sb.mode) };
-    }
+    return sys.statAt(dir_fd, try zName(&zbuf, name));
 }
 
 /// The target of the link `name` in folder `dir_fd`, in `buf`.
 fn readLinkAt(dir_fd: posix.fd_t, name: []const u8, buf: []u8) error{ NameTooLong, ReadFailed }![]const u8 {
     var zbuf: [1024]u8 = undefined;
-    const z = try zName(&zbuf, name);
-    const n = std.c.readlinkat(dir_fd, z, buf.ptr, buf.len);
-    if (n < 0) return error.ReadFailed;
-    const len: usize = @intCast(n);
-    if (len >= buf.len) return error.NameTooLong;
-    return buf[0..len];
+    return sys.readLinkAt(dir_fd, try zName(&zbuf, name), buf);
 }
 
 fn myUid() u32 {
-    return @intCast(std.c.getuid());
+    return sys.uid();
 }
 
 /// A folder on the way to a private file: a directory that only root or we can change. A folder its
@@ -589,21 +549,7 @@ fn groupDecides(om: OwnerMode) bool {
 // ---- filesystems ----
 
 /// What a descriptor's filesystem says about who controls it.
-pub const Mount = struct {
-    /// Linux: the filesystem's magic number (`statfs.f_type`).
-    linux_type: ?u64 = null,
-    /// Linux: the mount's ID (`statx` `STATX_MNT_ID`), as in `/proc/self/mountinfo`.
-    mnt_id: ?u64 = null,
-    /// macOS: the user who mounted it (`statfs.f_owner`).
-    owner: ?u32 = null,
-    /// macOS: mounted with ownership ignored (`MNT_IGNORE_OWNERSHIP`, "Ignore ownership on this
-    /// volume"), so every file looks like the looker's own.
-    ignores_ownership: bool = false,
-    /// macOS: on a local disk (`MNT_LOCAL`).
-    local: ?bool = null,
-    /// macOS: the filesystem's name (`f_fstypename`), for the message.
-    type_name: [16]u8 = @splat(0),
-};
+pub const Mount = sys.Mount;
 
 /// Linux filesystem magic numbers (`statfs.f_type`).
 pub const linux_fs = struct {
@@ -676,9 +622,6 @@ pub fn linuxFsName(t: u32) []const u8 {
     };
 }
 
-const darwin_mnt_local: u32 = 0x00001000;
-const darwin_mnt_ignore_ownership: u32 = 0x00200000;
-
 /// A filesystem whose owners and modes mean what they say: on Linux one of the local filesystems
 /// `linuxFsIsLocal` lists (not FUSE, whose server reports whatever it likes; not a network
 /// filesystem, whose server decides who may write by rules that cannot be seen from here; nothing
@@ -734,58 +677,7 @@ pub fn checkMountOrigin(mi: ?MountInfo, utab: ?[]const u8) CheckError!void {
     if (utab) |u| if (utabLists(u, m)) return error.UserMount;
 }
 
-/// macOS's `struct statfs` (64-bit inodes, the only layout on ARM64).
-const DarwinStatfs = extern struct {
-    f_bsize: u32,
-    f_iosize: i32,
-    f_blocks: u64,
-    f_bfree: u64,
-    f_bavail: u64,
-    f_files: u64,
-    f_ffree: u64,
-    f_fsid: [2]i32,
-    f_owner: u32,
-    f_type: u32,
-    f_flags: u32,
-    f_fssubtype: u32,
-    f_fstypename: [16]u8,
-    f_mntonname: [1024]u8,
-    f_mntfromname: [1024]u8,
-    f_flags_ext: u32,
-    f_reserved: [7]u32,
-};
-
-comptime {
-    std.debug.assert(@offsetOf(DarwinStatfs, "f_owner") == 56 and @sizeOf(DarwinStatfs) == 2168);
-}
-
-fn fdMount(fd: posix.fd_t) error{StatFailed}!Mount {
-    if (builtin.os.tag == .linux) {
-        const linux = std.os.linux;
-        // `struct statfs` starts with `f_type`, a word (`__fsword_t`): 8 bytes on the 64-bit systems
-        // this is built for, read here as the first `usize`. Another word size needs another reading.
-        if (@sizeOf(usize) != 8) @compileError("fdMount reads statfs.f_type as a 64-bit word; check struct statfs for this target");
-        var buf: [64]usize = undefined;
-        const rc = linux.syscall2(.fstatfs, @as(usize, @bitCast(@as(isize, fd))), @intFromPtr(&buf));
-        if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
-        var stx: linux.Statx = undefined;
-        const rc2 = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .MNT_ID = true }, &stx);
-        const id: ?u64 = if (linux.errno(rc2) == .SUCCESS and stx.mask.MNT_ID) stx.mnt_id else null;
-        return .{ .linux_type = buf[0], .mnt_id = id };
-    } else if (builtin.os.tag.isDarwin()) {
-        // `DarwinStatfs` is the 64-bit layout (its size and offsets are checked above).
-        if (@sizeOf(usize) != 8) @compileError("DarwinStatfs is the 64-bit macOS struct statfs");
-        const fstatfs = @extern(*const fn (c_int, *DarwinStatfs) callconv(.c) c_int, .{ .name = if (builtin.cpu.arch == .x86_64) "fstatfs$INODE64" else "fstatfs" });
-        var sb: DarwinStatfs = undefined;
-        if (fstatfs(fd, &sb) != 0) return error.StatFailed;
-        return .{
-            .owner = sb.f_owner,
-            .ignores_ownership = sb.f_flags & darwin_mnt_ignore_ownership != 0,
-            .local = sb.f_flags & darwin_mnt_local != 0,
-            .type_name = sb.f_fstypename,
-        };
-    } else @compileError("rweb checks filesystems on Linux and macOS only");
-}
+const fdMount = sys.fdMount;
 
 /// A small file's contents, or null when it does not exist. More than `limit` bytes is an error.
 fn readSmallFile(arena: Allocator, io: Io, path: []const u8, limit: usize) error{ ReadFailed, TooLong, OutOfMemory }!?[]u8 {
@@ -818,26 +710,11 @@ pub const checkPosixAcl = fsparse.checkPosixAcl;
 
 /// Linux: the access ACL of `fd`, in `buf`, or null when it has none (or the filesystem has no ACLs).
 fn readPosixAcl(fd: posix.fd_t, buf: []u8) CheckError!?[]const u8 {
-    const linux = std.os.linux;
-    const rc = linux.fgetxattr(fd, "system.posix_acl_access", buf.ptr, buf.len);
-    return switch (linux.errno(rc)) {
-        .SUCCESS => buf[0..rc],
-        .NODATA, .OPNOTSUPP => null,
-        else => error.AclUnreadable, // too long (ERANGE) included
-    };
+    return sys.posixAccessAcl(fd, buf);
 }
 
 /// One macOS ACL entry, as `checkDarwinAcl` needs it.
-pub const DarwinAce = struct {
-    allow: bool,
-    /// Applies only to what is created inside (`only_inherit`), not to this file or folder.
-    only_inherit: bool = false,
-    /// The `ACL_*` permission bits.
-    perms: u64,
-    who: Who,
-
-    pub const Who = union(enum) { user: u32, group: u32, unknown };
-};
+pub const DarwinAce = sys.DarwinAce;
 
 pub const darwin_acl = struct {
     pub const read_data: u64 = 1 << 1;
@@ -891,70 +768,12 @@ pub fn checkDarwinAcl(entries: []const DarwinAce, uid: u32, use: AclUse, ctx: an
     }
 }
 
-extern "c" fn acl_get_fd_np(fd: c_int, ty: c_int) ?*anyopaque;
-extern "c" fn acl_set_fd_np(fd: c_int, acl: ?*anyopaque, ty: c_int) c_int;
-extern "c" fn acl_init(count: c_int) ?*anyopaque;
-extern "c" fn acl_free(obj: ?*anyopaque) c_int;
-extern "c" fn acl_get_entry(acl: ?*anyopaque, entry_id: c_int, entry: *?*anyopaque) c_int;
-extern "c" fn acl_get_tag_type(entry: ?*anyopaque, tag: *c_int) c_int;
-extern "c" fn acl_get_permset_mask_np(entry: ?*anyopaque, mask: *u64) c_int;
-extern "c" fn acl_get_flagset_np(obj: ?*anyopaque, flagset: *?*anyopaque) c_int;
-extern "c" fn acl_get_flag_np(flagset: ?*anyopaque, flag: c_int) c_int;
-extern "c" fn acl_get_qualifier(entry: ?*anyopaque) ?*anyopaque;
-extern "c" fn mbr_uuid_to_id(uu: *const [16]u8, id: *u32, id_type: *c_int) c_int;
-
-const ACL_TYPE_EXTENDED: c_int = 0x100;
-const ACL_FIRST_ENTRY: c_int = 0;
-const ACL_NEXT_ENTRY: c_int = -1;
-const ACL_EXTENDED_ALLOW: c_int = 1;
-const ACL_EXTENDED_DENY: c_int = 2;
-const ACL_ENTRY_ONLY_INHERIT: c_int = 1 << 8;
-const ID_TYPE_UID: c_int = 0;
-const ID_TYPE_GID: c_int = 1;
-
 /// macOS: the extended ACL entries of `fd`, in `out`; none when it has no ACL.
 fn readDarwinAcl(fd: posix.fd_t, out: []DarwinAce) CheckError![]const DarwinAce {
-    const acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) orelse {
-        const err = std.c._errno().*;
-        // ENOENT: no ACL; ENOTSUP (std's `OPNOTSUPP`, 45 on macOS) or EOPNOTSUPP (102, which std's
-        // `E` does not name): a filesystem without ACLs.
-        const darwin_eopnotsupp: c_int = 102;
-        return if (err == @backingInt(std.c.E.NOENT) or err == @backingInt(std.c.E.OPNOTSUPP) or err == darwin_eopnotsupp) out[0..0] else error.AclUnreadable;
-    };
-    defer _ = acl_free(acl);
-    var n: usize = 0;
-    var ace: ?*anyopaque = null;
-    var which = ACL_FIRST_ENTRY;
-    while (acl_get_entry(acl, which, &ace) == 0) : (which = ACL_NEXT_ENTRY) {
-        if (n == out.len) return error.AclUnreadable;
-        var tag: c_int = 0;
-        var perms: u64 = 0;
-        var flags: ?*anyopaque = null;
-        if (acl_get_tag_type(ace, &tag) != 0 or acl_get_permset_mask_np(ace, &perms) != 0 or acl_get_flagset_np(ace, &flags) != 0) return error.AclUnreadable;
-        if (tag != ACL_EXTENDED_ALLOW and tag != ACL_EXTENDED_DENY) return error.AclUnreadable;
-        var who: DarwinAce.Who = .unknown;
-        if (acl_get_qualifier(ace)) |q| {
-            defer _ = acl_free(q);
-            var id: u32 = 0;
-            var id_type: c_int = -1;
-            if (mbr_uuid_to_id(@ptrCast(q), &id, &id_type) == 0) {
-                if (id_type == ID_TYPE_UID) who = .{ .user = id } else if (id_type == ID_TYPE_GID) who = .{ .group = id };
-            }
-        }
-        out[n] = .{ .allow = tag == ACL_EXTENDED_ALLOW, .only_inherit = acl_get_flag_np(flags, ACL_ENTRY_ONLY_INHERIT) == 1, .perms = perms, .who = who };
-        n += 1;
-    }
-    return out[0..n];
+    return sys.darwinAcl(fd, out);
 }
 
-/// macOS: give a folder rweb just made an empty ACL, so it holds none of the inheritable entries of
-/// the folder it was made in. Best effort: the folder's check that follows refuses what is left.
-fn dropInheritedAcl(fd: posix.fd_t) void {
-    if (!builtin.os.tag.isDarwin()) return;
-    const empty = acl_init(0) orelse return;
-    defer _ = acl_free(empty);
-    _ = acl_set_fd_np(fd, empty, ACL_TYPE_EXTENDED);
-}
+const dropInheritedAcl = sys.dropInheritedAcl;
 
 // ---- checks on a descriptor ----
 
@@ -1543,7 +1362,7 @@ pub const Names = struct {
 
     pub fn system() Names {
         return .{
-            .home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null,
+            .home = sys.home(),
             .darwin = builtin.os.tag.isDarwin(),
             .uid = myUid(),
             .user = systemUser,
@@ -1554,20 +1373,12 @@ pub const Names = struct {
 
 /// A user's name, for a message only (never for a decision).
 fn systemUser(uid: u32, buf: []u8) ?[]const u8 {
-    const pw = std.c.getpwuid(@intCast(uid)) orelse return null;
-    const name = std.mem.span(pw.name orelse return null);
-    if (name.len == 0 or name.len > buf.len) return null;
-    @memcpy(buf[0..name.len], name);
-    return buf[0..name.len];
+    return sys.userName(uid, buf);
 }
 
 /// A group's name, for a message only (never for a decision).
 fn systemGroup(gid: u32, buf: []u8) ?[]const u8 {
-    const gr = std.c.getgrgid(@intCast(gid)) orelse return null;
-    const name = std.mem.span(gr.name orelse return null);
-    if (name.len == 0 or name.len > buf.len) return null;
-    @memcpy(buf[0..name.len], name);
-    return buf[0..name.len];
+    return sys.groupName(gid, buf);
 }
 
 /// The shortest secret (token or backend secret) rweb accepts from a file.
@@ -2066,7 +1877,7 @@ fn writeFileMode(io: Io, dir: Io.Dir, name: []const u8, mode: u32, text: []const
 
 fn chmodPath(arena: Allocator, path: []const u8, mode: std.c.mode_t) !void {
     const z = try arena.printSentinel("{s}", .{path}, 0);
-    if (std.c.chmod(z, mode) != 0) return error.ChmodFailed;
+    try sys.chmod(z, mode);
 }
 
 test "a private file is read only through a checked descriptor, in folders nobody else can change" {
@@ -2176,7 +1987,7 @@ test "a folder its group can write to passes only when the group is a safe one" 
 
 test "no group is safe but macOS's admin, not even the user's own" {
     try testing.expect(!groupIsSafe(0x7ffe_1234));
-    try testing.expect(!groupIsSafe(@intCast(std.c.getgid())));
+    try testing.expect(!groupIsSafe(sys.gid()));
     try testing.expect(!groupIsSafe(20)); // macOS's staff
     try testing.expectEqual(builtin.os.tag.isDarwin(), groupIsSafe(darwin_admin_gid));
 }
@@ -2405,12 +2216,10 @@ test "a program is opened inside its checked folder, never through a link, and r
     try testing.expectEqualStrings(want, try checkedProgram(arena, io, try arena.print("{s}/via/bin/ts", .{root}), &p));
     // A FIFO there is refused at once, not waited on; a folder is not a program.
     const fifo = try arena.printSentinel("{s}/real/bin/fifo", .{root}, 0);
-    try testing.expectEqual(@as(c_int, 0), mkfifo(fifo, 0o700));
+    try sys.mkfifo(fifo, 0o700);
     try testing.expectError(error.NotARegularFile, checkedProgram(arena, io, fifo, &p));
     try testing.expectError(error.NotARegularFile, checkedProgram(arena, io, try arena.print("{s}/real/bin", .{root}), &p));
 }
-
-extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
 fn runTool(arena: Allocator, io: Io, argv: []const []const u8) !void {
     const res = try std.process.run(arena, io, .{ .argv = argv });

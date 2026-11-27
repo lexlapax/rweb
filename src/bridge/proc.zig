@@ -6,6 +6,7 @@
 //! deadline is killed with SIGKILL, which it cannot refuse, and reaped.
 
 const std = @import("std");
+const sys = @import("sys.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -78,16 +79,13 @@ fn waitUntil(child: *std.process.Child, io: Io, end_ms: i64) error{ Timeout, Wai
     const pid = child.id.?;
     var pause_ms: i64 = 1;
     while (true) {
-        var status: c_int = undefined;
-        const got = std.c.waitpid(pid, &status, std.c.W.NOHANG);
-        if (got == pid) {
-            child.id = null;
-            return Io.Threaded.statusToTerm(@bitCast(status));
-        }
-        if (got < 0) {
-            if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
+        const got = sys.waitNoHang(pid) catch |e| {
             child.id = null; // not ours to wait for any more
-            return error.WaitFailed;
+            return e;
+        };
+        if (got) |status| {
+            child.id = null;
+            return Io.Threaded.statusToTerm(status);
         }
         const left = end_ms - nowMs(io);
         if (left <= 0) return error.Timeout;
@@ -101,10 +99,10 @@ fn waitUntil(child: *std.process.Child, io: Io, end_ms: i64) error{ Timeout, Wai
 fn end(child: *std.process.Child, io: Io) void {
     if (child.id) |pid| {
         // SIGKILL cannot be caught or ignored, so the wait that follows ends.
-        _ = std.c.kill(-pid, .KILL);
-        _ = std.c.kill(pid, .KILL);
-        var status: c_int = undefined;
-        while (std.c.waitpid(pid, &status, 0) < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) {}
+        // Either may find nothing there (the group or the child gone already): fine.
+        sys.kill(-pid, .KILL) catch {};
+        sys.kill(pid, .KILL) catch {};
+        sys.reap(pid);
         child.id = null;
     }
     inline for (.{ "stdin", "stdout", "stderr" }) |name| {
@@ -179,7 +177,7 @@ test "run: a wrapper script's hung grandchild is killed with its process group a
     // Give the kernel a brief moment to clear the killed grandchild from the process table.
     var dead = false;
     for (0..50) |_| {
-        if (std.c.kill(gpid, @fromBackingInt(@intCast(0))) != 0 and std.c._errno().* == @backingInt(std.c.E.SRCH)) {
+        if (sys.kill(gpid, @fromBackingInt(0)) == error.ProcessNotFound) {
             dead = true;
             break;
         }

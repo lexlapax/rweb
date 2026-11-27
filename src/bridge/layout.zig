@@ -3,6 +3,7 @@
 //! passed in) so they can be tested; only `ensureSecretFile` touches the system.
 
 const std = @import("std");
+const sys = @import("sys.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -243,7 +244,7 @@ test "a made secret is 32 random bytes in base64url, 0600, made once and never o
     try testing.expectEqualStrings(first, try xfer.readPrivateFile(arena, io, path, 4096, &p));
     // A folder others can enter is refused, with where.
     try tmp.dir.createDirPath(io, "open");
-    try testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/open", .{root}, 0), 0o755));
+    try sys.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/open", .{root}, 0), 0o755);
     try testing.expectError(error.TooOpen, ensureSecretFile(arena, io, try arena.print("{s}/open/token", .{root}), &p));
 }
 

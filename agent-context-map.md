@@ -60,8 +60,9 @@ a 4-second `echo` loop, upright again after it.
   the owner installed it). 2026-11-27: the bridge filters its log (Ghostty's output parsers silent, its
   other scopes errors only); the suite ran under Valgrind on linux-box (static musl at x86_64_v3, since
   AVX-512 and Arch's loader stop it otherwise): all tests pass, the only reports are a futex wake inside
-  std's `Io.Threaded`. **Open in step 7:** `sys.zig` (item 25); `error_tracing` measured (item 36);
-  F14, F17, F18, F19, F22.
+  std's `Io.Threaded`. `src/bridge/sys.zig` holds every raw call of the bridge, each
+  returning a Zig error set (macOS live 370/5 skip, linux-box live 454/6 skip). **Open in step 7:**
+  `error_tracing` measured (item 36); F14, F17, F18, F19, F22.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

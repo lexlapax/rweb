@@ -14,6 +14,7 @@ pub const server = @import("server.zig");
 pub const cli = @import("cli.zig");
 pub const layout = @import("layout.zig");
 pub const proc = @import("proc.zig");
+pub const sys = @import("sys.zig");
 const build_options = @import("build_options");
 
 comptime {
@@ -161,7 +162,7 @@ fn removeStopSocket() void {
     if (StopSocket.dir_fd < 0) return;
     const name = std.mem.sliceTo(&StopSocket.name, 0);
     if (xfer.statAt(StopSocket.dir_fd, name)) |n| {
-        if (n.dev == StopSocket.dev and n.ino == StopSocket.ino) _ = std.c.unlinkat(StopSocket.dir_fd, &StopSocket.name, 0);
+        if (n.dev == StopSocket.dev and n.ino == StopSocket.ino) sys.unlinkAtBestEffort(StopSocket.dir_fd, &StopSocket.name);
     } else |_| {}
 }
 
@@ -169,7 +170,7 @@ fn removeStopSocket() void {
 /// and end at once with `_exit`. The kernel closes the listeners and every connection, Rex's included.
 fn onStopSignal(sig: std.posix.SIG) callconv(.c) void {
     removeStopSocket();
-    std.c._exit(if (sig == .INT) 130 else 0);
+    sys.exitNow(if (sig == .INT) 130 else 0);
 }
 
 /// Remember the unix socket `b` bound, for `removeStopSocket`.
@@ -216,7 +217,7 @@ pub fn main(init: std.process.Init) !void {
         .home = env_map.get("HOME"),
         .xdg_config_home = env_map.get("XDG_CONFIG_HOME"),
         .xdg_runtime_dir = env_map.get("XDG_RUNTIME_DIR"),
-        .uid = @intCast(std.c.getuid()),
+        .uid = sys.uid(),
     };
     var diag: cli.Diag = .{};
     const parsed = cli.parseEnv(arena, argv.items, env, &diag) catch |e| {
@@ -289,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
     var uids: std.ArrayList(u32) = .empty;
     if (parsed.peer_uids) |list| for (list) |u| try uids.append(arena, switch (u) {
         .uid => |n| n,
-        .self => @intCast(std.c.getuid()),
+        .self => sys.uid(),
     });
 
     // File transfer: off unless asked for; uploads only into a folder that is ours alone.
@@ -567,11 +568,7 @@ fn socketPathFix(args: []const []const u8) []const u8 {
 
 /// The name of the account this process runs as, from the system's user database (in `buf`).
 fn accountName(buf: []u8) ?[]const u8 {
-    const pw = std.c.getpwuid(std.c.getuid()) orelse return null;
-    const name = std.mem.span(pw.name orelse return null);
-    if (name.len == 0 or name.len > buf.len) return null;
-    @memcpy(buf[0..name.len], name);
-    return buf[0..name.len];
+    return sys.userName(sys.uid(), buf);
 }
 
 /// Waiting for Tailscale or Rex at startup: the delay doubles to a cap, and a failure is reported
@@ -724,7 +721,7 @@ fn rexSocketPlaces(arena: std.mem.Allocator, env: *std.process.Environ.Map) ![]c
         try out.append(arena, try arena.print("{s}/Library/Application Support/Rex/server.sock", .{home}));
     };
     if (env.get("XDG_RUNTIME_DIR")) |dir| try out.append(arena, try arena.print("{s}/rex/server.sock", .{dir}));
-    try out.append(arena, try arena.print("/run/user/{d}/rex/server.sock", .{std.c.getuid()}));
+    try out.append(arena, try arena.print("/run/user/{d}/rex/server.sock", .{sys.uid()}));
     return out.items;
 }
 
@@ -940,7 +937,7 @@ test "a refused tailscale past a link keeps where and what the check found, for 
     // walk holds in the Problem's own buffer, and the Problem is returned by value.
     try tmp.dir.createDirPath(io, "open");
     var z: [512:0]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/open", .{root}, 0), 0o777));
+    try sys.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/open", .{root}, 0), 0o777);
     try writeTmp(io, tmp.dir, "open/tailscale", 0o755, "#!/bin/sh\n");
     try tmp.dir.symLink(io, "open", "bin", .{});
     const given = try arena.print("{s}/bin/tailscale", .{root});
@@ -996,8 +993,9 @@ test "a socket path too long is refused before its folders are made" {
 test "the ssh line's user is the account's, from the user database" {
     var ub: [256]u8 = undefined;
     const name = accountName(&ub).?;
-    const pw = std.c.getpwuid(std.c.getuid()).?;
-    try std.testing.expectEqualStrings(std.mem.span(pw.name.?), name);
+    try std.testing.expect(name.len > 0 and std.mem.indexOfAny(u8, name, " /:") == null);
+    // Too small a buffer is no name, never a cut one.
+    try std.testing.expect(accountName(ub[0 .. name.len - 1]) == null);
 }
 
 test "a stop signal removes this process's own socket, and nothing put in its place" {
@@ -1083,7 +1081,7 @@ test "the real probe refuses a program others can change and finds a missing one
     try writeTmp(io, tmp.dir, "ts", 0o755, "#!/bin/sh\n");
     try writeTmp(io, tmp.dir, "wide", 0o755, "#!/bin/sh\n");
     var z: [512:0]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/wide", .{root}, 0), 0o757));
+    try sys.chmod(try std.fmt.bufPrintSentinel(&z, "{s}/wide", .{root}, 0), 0o757);
     const p: SystemProbe = .{ .arena = arena, .io = io };
     const ok = try arena.print("{s}/ts", .{root});
     try std.testing.expectEqualStrings(ok, systemProbe(p, ok).ok);
@@ -1232,6 +1230,7 @@ test {
     _ = server;
     _ = cli;
     _ = layout;
+    _ = sys;
     _ = proc;
     _ = @import("bench.zig");
 }

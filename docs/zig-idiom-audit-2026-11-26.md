@@ -122,7 +122,7 @@ Tally: 20 pass, 16 fix needed, 1 not applicable, 1 needs a run.
 | 22 | Stream per session | pass | One VT stream per mirror, made once when the snapshot is decoded (`src/rex/mirror.zig:253`) and freed before its terminal (`:154-157`). A test feeds the snapshot and the output one byte at a time (`:673`), and another splits OSC and DCS strings anywhere (`:1477`). | |
 | 23 | libghostty limits and effects | pass | Size is checked before the snapshot is decoded, after it, and on every resize (`resizeAllowed`: 4096 a side, 1,048,576 cells; `src/rex/mirror.zig:54-55`, `:232-250`, `:304`). Scrollback is capped at 10,000 lines and 32 MiB or Rex's smaller limits (`:272-279`). Kitty graphics and glyph commands are off and their storage limit is 0 (`:240`, `:284-285`); OSC and DCS strings are held to 64 KiB (`:287-289`). `vtStream` applies state only, so the mirror answers nothing a program asks. | |
 | 24 | libghostty lifetime and reentry | pass | Every access to a terminal is under its mirror's lock. Callbacks run under that lock with borrowed bytes; the hub copies them before the call returns (`src/bridge/hub.zig:229-250`, `:382-388`) and never calls back into the mirror (the rule on `deliver`, `src/rex/mirror.zig:417`). The data stream is closed before its mirror is freed, on close and on restart (`src/bridge/hub.zig` `destroyTerminal`, `restartTerminal`). | |
-| 25 | C boundary | fix needed | No `@cImport`, no `[*c]`. But the calls are not behind one wrapper: `std.c.` or `extern "c"` appears in `xfer.zig` (27), `server.zig` (17), `main.zig` (9), `ws.zig` (4), `layout.zig` (1). 12 hand-written declarations (11 macOS ACL functions and `getpeereid`) are checked against no header; `DarwinStatfs` has a size and offset assert (`src/bridge/xfer.zig:772-774`), the peer-credentials struct does not (its returned length is checked, `src/rex/ws.zig:215`). Status codes are checked except `fcntl` (item 9). A leak run under Valgrind, for Ghostty's C++ side, was not done. | One `sys.zig` that owns every raw call and turns status codes into error sets; a comptime size assert beside each hand-written struct; a Valgrind run on Linux. |
+| 25 | C boundary | **done in Phase B step 7** (2026-11-27) | No `@cImport`, no `[*c]`. But the calls are not behind one wrapper: `std.c.` or `extern "c"` appears in `xfer.zig` (27), `server.zig` (17), `main.zig` (9), `ws.zig` (4), `layout.zig` (1). 12 hand-written declarations (11 macOS ACL functions and `getpeereid`) are checked against no header; `DarwinStatfs` has a size and offset assert (`src/bridge/xfer.zig:772-774`), the peer-credentials struct does not (its returned length is checked, `src/rex/ws.zig:215`). Status codes are checked except `fcntl` (item 9). A leak run under Valgrind, for Ghostty's C++ side, was not done. | One `sys.zig` that owns every raw call and turns status codes into error sets; a comptime size assert beside each hand-written struct; a Valgrind run on Linux. |
 | 26 | Comptime value and cost | pass | 16 `comptime`, 17 `anytype`, 2 `inline for` (both in tests), 4 `@typeInfo`, 0 raised quotas, 21 `std.meta` uses. Generics have real uses (`Owned(T)`); `anytype` is used to pass a test double (`chooseTailscale`, the ACL rules, the splitter's sink). Nothing generates code that is hard to follow. `zig build --time-report` was not run. | |
 | 27 | Tables and embeds | pass | Message types and terminal actions go through `stringToEnum` (`src/bridge/protocol.zig:91`, `:114`). Header names are compared without case (14 `eqlIgnoreCase`). 29 embedded files, all public page assets. The command line is a chain of about 40 `eql`, which reads well enough as it is; the asset table is scanned (F19). | |
 | 28 | Data layout | pass | No `packed`. Two `extern struct`, both for a system call. Nothing here is numerous enough for `MultiArrayList` to matter: tens of terminals and viewers. 21 `create` calls, one per long-lived object. | |
@@ -533,5 +533,20 @@ Rex, in ReleaseSafe.
      uninitialised stack values, not heap blocks; leaks and use-after-free are the testing and safe
      allocators' work, which the suite already does.
 
-   Left in step 7: one `sys.zig` for the raw calls (item 25); `error_tracing` measured (item 36); the rest
-   of F14, F17, F18, F19 and F22.
+   - **`src/bridge/sys.zig` (item 25).** Every raw system and C library call of the bridge is there now:
+     who we are (`getuid`, `getpwuid`, `getgrgid`, `HOME`), the stop signal's `_exit` and `unlinkat`,
+     `umask` and `chmod`, file metadata (`statx` or `fstat`/`fstatat`, `readlinkat`, `linkat`, macOS
+     `F_FULLFSYNC`), the filesystem (`fstatfs`, the mount ID), both kinds of ACL (Linux
+     `system.posix_acl_access`, the macOS `acl_*` and `mbr_uuid_to_id` declarations), the child process
+     calls (`waitpid`, `kill`) and the loopback listener (`socket`, `fcntl`, `setsockopt`, `bind`, `listen`,
+     `getsockname`). Each returns a Zig error set: no status code or `errno` leaves the file, and the
+     upload log names the error instead of an errno number. Hand-declared structs carry guards
+     (`DarwinStatfs` now on four offsets and its size; the ACL declarations on `int` and pointer size; the
+     listener on `sin_port` and `sin6_port` sharing an offset). `xfer.zig` keeps the names it had
+     (`Node`, `OwnerMode`, `Mount`, `DarwinAce`, `fdOwnerMode`) as aliases. New tests: names and ids, a
+     refused kill and wait, a port-0 listener and its port refused again, stat, link and readlink with
+     their errors. Outside it: `rex.ws.peerUid` (the Rex library cannot import the bridge; one function,
+     guarded) and `std.c.mode_t` as a type. Checks: macOS live (revision 24) ReleaseSafe 370 passed,
+     5 skipped; linux-box live 454 passed, 6 skipped; `zig build dist` builds both archives.
+
+   Left in step 7: `error_tracing` measured (item 36); the rest of F14, F17, F18, F19 and F22.

@@ -11,6 +11,7 @@ const access = @import("access.zig");
 const protocol = @import("protocol.zig");
 const hub_mod = @import("hub.zig");
 const xfer = @import("xfer.zig");
+const sys = @import("sys.zig");
 const assets = @import("assets.zig");
 const layout = @import("layout.zig");
 const Hub = hub_mod.Hub;
@@ -92,8 +93,8 @@ pub fn bind(gpa: Allocator, io: Io, listen: Listen, problem: ?*xfer.Problem) !Bo
             try clearStaleSocket(io, dir.fd, dir.name, path);
             var b: Bound = .{ .listen = listen, .listener = undefined, .sock_dir = dir.fd, .sock_name = dir.name };
             {
-                const old = std.c.umask(0o177); // the socket is created 0600
-                defer _ = std.c.umask(old);
+                const old = sys.umask(0o177); // the socket is created 0600
+                defer _ = sys.umask(old);
                 // Bound by path: every folder on it was just checked (only we or root can change
                 // them), so the path leads into the folder that is held open.
                 const addr = try Io.net.UnixAddress.init(path);
@@ -135,57 +136,16 @@ pub fn bind(gpa: Allocator, io: Io, listen: Listen, problem: ?*xfer.Problem) !Bo
     }
 }
 
-const Family = enum { v4, v6 };
+const Family = sys.Family;
 
-/// A listening loopback TCP socket on `port`: `SO_REUSEADDR` (a restart is not held up by old
-/// connections in TIME_WAIT) and never `SO_REUSEPORT`; IPv6 is `IPV6_V6ONLY`.
-fn listenLoopback(family: Family, port: u16) !Io.net.Server {
-    const posix = std.posix;
-    const af: c_uint = if (family == .v4) posix.AF.INET else posix.AF.INET6;
-    const fd = std.c.socket(af, posix.SOCK.STREAM, 0);
-    if (fd < 0) return switch (posix.errno(fd)) {
-        .AFNOSUPPORT => error.AddressFamilyUnsupported,
-        .MFILE => error.ProcessFdQuotaExceeded,
-        .NFILE => error.SystemFdQuotaExceeded,
-        else => error.SocketFailed,
+/// A listening loopback TCP socket on `port` (`sys.listenLoopback` says how it is made).
+fn listenLoopback(family: Family, port: u16) sys.ListenError!Io.net.Server {
+    const l = try sys.listenLoopback(family, port);
+    const address: Io.net.IpAddress = switch (family) {
+        .v4 => .{ .ip4 = Io.net.Ip4Address.loopback(l.port) },
+        .v6 => .{ .ip6 = Io.net.Ip6Address.loopback(l.port) },
     };
-    errdefer _ = std.c.close(fd);
-    // Without close-on-exec the `tailscale` child would inherit the listener.
-    if (std.c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC)) != 0) return error.SocketFailed;
-    const one: c_int = 1;
-    if (std.c.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &one, @sizeOf(c_int)) != 0) return error.SocketFailed;
-    var address: Io.net.IpAddress = undefined;
-    const rc = switch (family) {
-        .v4 => blk: {
-            var sa: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f00_0001) };
-            address = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-            break :blk std.c.bind(fd, @ptrCast(&sa), @sizeOf(posix.sockaddr.in));
-        },
-        .v6 => blk: {
-            if (std.c.setsockopt(fd, posix.IPPROTO.IPV6, posix.IPV6.V6ONLY, &one, @sizeOf(c_int)) != 0) return error.SocketFailed;
-            var sa: posix.sockaddr.in6 = .{ .port = std.mem.nativeToBig(u16, port), .flowinfo = 0, .addr = Io.net.Ip6Address.loopback(0).bytes, .scope_id = 0 };
-            address = .{ .ip6 = Io.net.Ip6Address.loopback(port) };
-            break :blk std.c.bind(fd, @ptrCast(&sa), @sizeOf(posix.sockaddr.in6));
-        },
-    };
-    if (rc != 0) return switch (posix.errno(rc)) {
-        .ADDRINUSE => error.AddressInUse,
-        .ADDRNOTAVAIL => error.AddressNotAvailable,
-        .AFNOSUPPORT => error.AddressFamilyUnsupported,
-        .ACCES => error.AccessDenied,
-        else => error.BindFailed,
-    };
-    if (std.c.listen(fd, 128) != 0) return switch (posix.errno(@as(c_int, -1))) {
-        .ADDRINUSE => error.AddressInUse,
-        else => error.ListenFailed,
-    };
-    if (port == 0) {
-        var got: posix.sockaddr.in = undefined;
-        var len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        if (std.c.getsockname(fd, @ptrCast(&got), &len) != 0) return error.SocketFailed;
-        address = .{ .ip4 = Io.net.Ip4Address.loopback(std.mem.bigToNative(u16, got.port)) };
-    }
-    return .{ .socket = .{ .handle = fd, .address = address }, .options = {} };
+    return .{ .socket = .{ .handle = l.fd, .address = address }, .options = {} };
 }
 
 pub const Options = struct {
@@ -270,27 +230,13 @@ pub const max_messages_per_second: u32 = 200;
 /// full flush is asked for first (only when the filesystem does not support it do we fall back to
 /// `fsync`; an I/O, space, quota or permission error fails at once).
 fn syncToDisk(io: Io, f: Io.File) Io.File.SyncError!void {
-    if (comptime builtin.os.tag.isDarwin()) {
-        while (true) {
-            if (std.c.fcntl(f.handle, std.c.F.FULLFSYNC, @as(c_int, 0)) == 0) return;
-            switch (std.c._errno().*) {
-                @backingInt(std.c.E.INTR) => continue,
-                @backingInt(std.c.E.OPNOTSUPP),
-                @backingInt(std.c.E.INVAL),
-                @backingInt(std.c.E.NOTTY),
-                @backingInt(std.c.E.NODEV),
-                @backingInt(std.c.E.NOSYS),
-                => break,
-                @backingInt(std.c.E.IO) => return error.InputOutput,
-                @backingInt(std.c.E.NOSPC) => return error.NoSpaceLeft,
-                @backingInt(std.c.E.DQUOT) => return error.DiskQuota,
-                @backingInt(std.c.E.ACCES), @backingInt(std.c.E.PERM), @backingInt(std.c.E.ROFS) => return error.AccessDenied,
-                // Any other answer is taken as "no full flush here": `fsync` below still reports a
-                // real failure, and an errno nobody listed must not make every upload fail.
-                else => break,
-            }
-        }
-    }
+    sys.fullFsync(f.handle) catch |e| switch (e) {
+        error.Unsupported => {}, // `fsync` below, which reports a real failure
+        error.InputOutput => return error.InputOutput,
+        error.NoSpaceLeft => return error.NoSpaceLeft,
+        error.DiskQuota => return error.DiskQuota,
+        error.AccessDenied => return error.AccessDenied,
+    };
     return f.sync(io);
 }
 
@@ -1219,13 +1165,11 @@ pub const Server = struct {
                 std.fmt.bufPrintSentinel(&name_buf, "{s}", .{safe}, 0)
             else
                 std.fmt.bufPrintSentinel(&name_buf, "{s} ({d}){s}", .{ stem, attempt, ext }, 0)) catch return refuseXfer(req, .internal_server_error, "name\n");
-            if (std.c.linkat(parts.handle, part.name(), dir.handle, final, 0) == 0) {
+            if (sys.linkAt(parts.handle, part.name(), dir.handle, final)) |_| {
                 named = true;
                 break;
-            }
-            const errno = std.c._errno().*;
-            if (errno != @backingInt(std.c.E.EXIST)) {
-                log.info("upload: the finished file could not be named in the upload folder (errno {d})", .{errno});
+            } else |e| if (e != error.PathAlreadyExists) {
+                log.info("upload: the finished file could not be named in the upload folder: {t}", .{e});
                 return refuseXfer(req, .internal_server_error, "cannot create the file\n");
             }
         }
@@ -2074,7 +2018,7 @@ fn unixGet(rig: Rig, path: []const u8) !Http {
 test "server: a unix socket is private, and only the allowed peers get in" {
     var pb: [96]u8 = undefined;
     const path = try tmpSocketPath(&pb, testing.io);
-    const my_uid: u32 = @intCast(std.c.getuid());
+    const my_uid: u32 = sys.uid();
     const dir = std.fs.path.dirname(path).?;
     defer Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
 
@@ -2129,11 +2073,11 @@ test "server: refuses to start without any access rule, and in a directory other
     {
         var z: [128:0]u8 = undefined;
         const dz = try std.fmt.bufPrintSentinel(&z, "{s}", .{dir}, 0);
-        try testing.expectEqual(@as(c_int, 0), std.c.chmod(dz, 0o755));
+        try sys.chmod(dz, 0o755);
     }
     try testing.expectError(error.SocketDirNotPrivate, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = owner_cfg }));
     // A folder that is not ours (here root's /tmp) is refused too: its owner could replace the socket.
-    if (std.c.getuid() != 0) try testing.expectError(error.SocketDirNotOurs, Server.start(a, testing.io, h, .{ .listen = .{ .unix = tmp_root ++ "/rweb-test-not-ours.sock" }, .access = owner_cfg }));
+    if (sys.uid() != 0) try testing.expectError(error.SocketDirNotOurs, Server.start(a, testing.io, h, .{ .listen = .{ .unix = tmp_root ++ "/rweb-test-not-ours.sock" }, .access = owner_cfg }));
 }
 
 test "live: a browser socket drives a throwaway terminal on a real Rex (needs REX_SOCKET)" {
@@ -2392,7 +2336,7 @@ test "server: the unix socket's folders are checked to the root, and only our ow
         const open = try std.fmt.bufPrint(&ob, "{s}/open", .{base});
         try Io.Dir.cwd().createDirPath(testing.io, open);
         var z: [128:0]u8 = undefined;
-        try testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}", .{open}, 0), 0o777));
+        try sys.chmod(try std.fmt.bufPrintSentinel(&z, "{s}", .{open}, 0), 0o777);
         _ = try Io.Dir.cwd().createDirPathStatus(testing.io, try std.fmt.bufPrint(&pb, "{s}/priv", .{open}), @fromBackingInt(@intCast(0o700)));
         const path = try std.fmt.bufPrint(&pb, "{s}/priv/bridge.sock", .{open});
         try testing.expectError(error.FolderWritableByOthers, Server.start(a, testing.io, h, .{ .listen = .{ .unix = path }, .access = acc, .problem = &problem }));
@@ -2413,7 +2357,7 @@ test "server: the unix socket's folders are checked to the root, and only our ow
         const open = try std.fmt.bufPrint(&ob, "{s}/open2", .{base});
         try Io.Dir.cwd().createDirPath(testing.io, open);
         var z: [128:0]u8 = undefined;
-        try testing.expectEqual(@as(c_int, 0), std.c.chmod(try std.fmt.bufPrintSentinel(&z, "{s}", .{open}, 0), 0o777));
+        try sys.chmod(try std.fmt.bufPrintSentinel(&z, "{s}", .{open}, 0), 0o777);
         var lb: [128]u8 = undefined;
         try Io.Dir.cwd().symLink(testing.io, try std.fmt.bufPrint(&lb, "{s}/real", .{base}), try std.fmt.bufPrint(&pb, "{s}/lnk", .{open}), .{});
         const path = try std.fmt.bufPrint(&pb, "{s}/lnk/sock/bridge.sock", .{open});
@@ -3395,7 +3339,7 @@ test "server: token mode with the default hosts serves 127.0.0.1 and localhost o
         var pb: [96]u8 = undefined;
         const path = try tmpSocketPath(&pb, testing.io);
         defer Io.Dir.cwd().deleteTree(testing.io, std.fs.path.dirname(path).?) catch {};
-        const uids = [_]u32{@intCast(std.c.getuid())};
+        const uids = [_]u32{sys.uid()};
         var cfg = token_cfg;
         cfg.allowed_peer_uids = &uids;
         cfg.allowed_hosts = try layout.tokenHosts(arena, null);
