@@ -28,17 +28,22 @@ Contents: [1 What you need](#1-what-you-need) · [2 Install](#2-install) ·
 
 ## 2. Install
 
-Download the archive for your platform and `SHA256SUMS` from the release, then:
+Download the archive for your platform, `SHA256SUMS` and `SHA256SUMS.sig` from the release, then:
 
 ```sh
+echo 'rweb-release namespaces="file" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB0wc9eAtN/xCGWv2pru3OpgCrJd6mUNNxhHU7ht0RdW' > rweb-release-signers
+ssh-keygen -Y verify -f rweb-release-signers -I rweb-release -n file -s SHA256SUMS.sig < SHA256SUMS
 shasum -a 256 -c SHA256SUMS --ignore-missing     # Linux: sha256sum -c SHA256SUMS --ignore-missing
 tar -xzf rweb-<version>-<platform>.tar.gz
 mkdir -p ~/.local/bin && install -m 0755 rweb-<version>-<platform>/rweb ~/.local/bin/rweb
 rweb --version
 ```
 
-The checksums catch a damaged or incomplete download. They do not prove that nobody changed the release:
-`SHA256SUMS` comes from the same place as the archives, so whoever could change one could change both.
+The first two lines check that `SHA256SUMS` was signed with rweb's release key (`ssh-keygen` is part of
+OpenSSH; it should say `Good "file" signature for rweb-release`); the third that the archive is the one
+`SHA256SUMS` names. Take the key from this guide or the README (also `tools/release-signers` in the source
+repository), not from the release page, so that someone who could change the release could not also
+change the key. Releases signed so: from the one after 0.2.0.
 
 The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README and its logo
 (`assets/logo/`), the changelog, the licence (MIT) and the third-party notices. `rweb --version` shows the

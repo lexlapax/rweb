@@ -73,13 +73,16 @@ You need Rex running, [Tailscale](https://tailscale.com/download) on the Rex mac
 (same account, with MagicDNS and HTTPS certificates turned on for the tailnet), and a release archive.
 
 ```sh
+echo 'rweb-release namespaces="file" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB0wc9eAtN/xCGWv2pru3OpgCrJd6mUNNxhHU7ht0RdW' > rweb-release-signers
+ssh-keygen -Y verify -f rweb-release-signers -I rweb-release -n file -s SHA256SUMS.sig < SHA256SUMS
 shasum -a 256 -c SHA256SUMS --ignore-missing     # Linux: sha256sum -c SHA256SUMS --ignore-missing
 tar -xzf rweb-<version>-<platform>.tar.gz
 mkdir -p ~/.local/bin && install -m 0755 rweb-<version>-<platform>/rweb ~/.local/bin/rweb
 ```
 
-The checksums catch a damaged download, not a changed release: they come from the same place as the
-archives.
+`SHA256SUMS` is signed with rweb's release key, above (`ssh-keygen` is part of OpenSSH): the first two
+lines check the signature (`Good "file" signature for rweb-release`), the third the archive. Releases after
+0.2.0 are signed.
 
 Then, on the Rex machine:
 

@@ -1,0 +1,4 @@
+# The keys that sign rweb's releases, as OpenSSH allowed_signers. tools/release.sh signs SHA256SUMS with the
+# rweb-release key and checks the signature against this file; users check a download the same way:
+#   ssh-keygen -Y verify -f release-signers -I rweb-release -n file -s SHA256SUMS.sig < SHA256SUMS
+rweb-release namespaces="file" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB0wc9eAtN/xCGWv2pru3OpgCrJd6mUNNxhHU7ht0RdW

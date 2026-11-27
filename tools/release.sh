@@ -10,7 +10,8 @@
 # Usage: tools/release.sh [COMMIT]   (default: HEAD; run inside the repository)
 # It runs the tests on the exported commit first and packs nothing if they fail. It is the only way to
 # make release archives: `zig build dist` alone packs the working tree, uncommitted edits included.
-# Result: the archives, SHA256SUMS and BUILDINFO in zig-out/release/<version>/ of the current checkout. A version
+# Result: the archives, SHA256SUMS, its signature SHA256SUMS.sig and BUILDINFO in zig-out/release/<version>/ of the
+# current checkout. A version
 # that has a folder there already is not built again; remove the folder on purpose to rebuild it.
 #
 # The fixed path is in a shared /tmp, so the base folder must be ours alone before anything is put in
@@ -103,5 +104,27 @@ cp "$build"/zig-out/dist/rweb-*.tar.gz "$build/zig-out/dist/SHA256SUMS" "$out/"
   echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$out/BUILDINFO"
 rm -rf "$build" "$cache"
+
+# The signature: SHA256SUMS signed with the release key (`ssh-keygen -Y sign`, namespace "file"), through
+# an SSH agent that holds the key (RWEB_SIGN_AGENT names its socket; else SSH_AUTH_SOCK), then checked
+# against tools/release-signers of this checkout. The key's public half is in that file and the README.
+# RWEB_RELEASE_UNSIGNED=1 leaves a trial build unsigned; such archives are not for a release.
+signers=$top/tools/release-signers
+if [ "${RWEB_RELEASE_UNSIGNED:-}" = 1 ]; then
+  echo "warning: SHA256SUMS is not signed (RWEB_RELEASE_UNSIGNED=1); these archives are not for a release" >&2
+else
+  pub=$(awk '!/^#/ && NF >= 4 && $1 == "rweb-release" { print $3 " " $4; exit }' "$signers" 2>/dev/null)
+  [ -n "$pub" ] || die "no rweb-release key in $signers, so SHA256SUMS cannot be signed (nothing else was changed:
+the archives are in $out). Add the key, or set RWEB_RELEASE_UNSIGNED=1 for a trial build"
+  keyfile=$base/release-key.pub
+  printf '%s\n' "$pub" > "$keyfile"
+  echo "signing SHA256SUMS with the rweb-release key (approve it in your SSH agent)"
+  SSH_AUTH_SOCK=${RWEB_SIGN_AGENT:-${SSH_AUTH_SOCK:-}} ssh-keygen -q -Y sign -f "$keyfile" -n file "$out/SHA256SUMS" ||
+    die "signing failed: is the agent running and holding the rweb-release key? The archives are in $out, unsigned"
+  rm -f "$keyfile"
+  ssh-keygen -q -Y verify -f "$signers" -I rweb-release -n file -s "$out/SHA256SUMS.sig" < "$out/SHA256SUMS" >/dev/null ||
+    die "the signature does not verify against $signers"
+  echo "signed: SHA256SUMS.sig verifies against $signers"
+fi
 echo "rweb $version from $commit, built with $zig $("$zig" version):"
 cat "$out/SHA256SUMS"

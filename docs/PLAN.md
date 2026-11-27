@@ -312,7 +312,9 @@ Where the steps below stand (2026-11-26):
   procedures). Done for now; repeat when step 1 or 3 changes much.
 - Step 3: no channel yet (no Homebrew tap, Linux unit or AUR package).
 - Step 4: tagged releases with checksums and notes, and the Rex revisions in `rweb --version`: done.
-  Signed checksums: not yet.
+  Signed checksums: since 2026-11-27, `SHA256SUMS.sig` (`ssh-keygen -Y sign`, namespace `file`, key
+  `rweb-release` in `tools/release-signers`, the README and the user guide; held in the owner's 1Password
+  and used through its SSH agent).
 - Step 5: done 2026-11-27 (`tools/vendor/rebuild.sh`, [vendored-browser-code.md](vendored-browser-code.md)):
   every vendored file rebuilt byte-identical from integrity-checked npm packages, the wterm bundle by the
   pinned esbuild. `ghostty-vt.wasm` is checked against its published package, not rebuilt from source:

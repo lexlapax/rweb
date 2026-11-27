@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-27 (0.2.0 released; Phase 6: `rweb doctor` and rebuildable browser code done; signed checksums next).
+Last updated: 2026-11-27 (0.2.0 released; Phase 6: `rweb doctor`, rebuildable browser code and signed checksums done; channels next).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -92,8 +92,13 @@ a 4-second `echo` loop, upright again after it.
   wterm's own module (69 exports of its own; the pinned Ghostty's wasm build exports its C API), so it is
   checked against its package, not built (the owner asked to try; stopped and reported as agreed). Run
   in this session at the owner's word after assistant-sandbox's rules declined network work.
-  **Next:** signed checksums, owner's choice 2026-11-27: `ssh-keygen -Y sign` with a dedicated Ed25519 key
-  in 1Password (the owner makes the key); then channels.
+  Signed checksums done: `tools/release.sh` signs `SHA256SUMS` as `SHA256SUMS.sig` (`ssh-keygen -Y sign`,
+  namespace `file`) and verifies against `tools/release-signers` (key `rweb-release`, Ed25519, made by the
+  owner in 1Password, Private vault, "rweb release signing"); it refuses to finish unsigned unless
+  `RWEB_RELEASE_UNSIGNED=1`. On the owner's Macs run it with `RWEB_SIGN_AGENT` set to the 1Password agent
+  socket (`~/Library/Group Containers/<team>.com.1password/t/agent.sock`); the owner approves each
+  signature. Checked end to end: a trial `tools/release.sh` signed through 1Password and verified.
+  **Next:** channels (PLAN Phase 6 step 3).
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
