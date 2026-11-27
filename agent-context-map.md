@@ -1,10 +1,16 @@
 # Agent context map
 
-Last updated: 2026-11-26 (screenshots for the README in `assets/screenshots/`; the repository is public).
+Last updated: 2026-11-26 (GitHub: pull requests and projects off, issues for bug reports through a form; the owner's choice).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
 
+
+## 2026-11-26: GitHub settings (owner)
+
+Pull requests and projects are turned off on the repository (wiki and discussions were off already);
+forks are allowed (always, for a public repository). Issues stay on, for bug reports only: a form in
+`.github/ISSUE_TEMPLATE/bug_report.yml`, blank issues off. README and CONTRIBUTING.md say so.
 ## 2026-11-26: screenshots
 
 `assets/screenshots/desktop.png` and `phone.png`, shown at the top of the README; how they were made and

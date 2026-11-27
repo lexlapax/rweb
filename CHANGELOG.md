@@ -7,6 +7,7 @@ the Rex API revisions it speaks.
 ## Unreleased
 
 - README: screenshots of the page on a desktop and on a phone (`assets/screenshots/`).
+- Issues are for bug reports, through a bug report form; pull requests are turned off on GitHub.
 
 ## 0.1.1 (2026-11-26)
 

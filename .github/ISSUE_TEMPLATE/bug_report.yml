@@ -1,0 +1,73 @@
+name: Bug report
+description: Something in rweb does not work as its documentation says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are for bug reports only. Pull requests are not taken and feature requests are not tracked;
+        you are free to fork rweb (see CONTRIBUTING.md).
+
+        **Before you paste anything:** remove tokens, backend secrets, `?token=` addresses, your tailnet and
+        machine names, and terminal output you would not publish. This page is public.
+  - type: textarea
+    id: version
+    attributes:
+      label: rweb version
+      description: The output of `rweb --version`.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: rex
+    attributes:
+      label: Rex version
+      description: The output of `rex version` (first line), or the Rex app's version.
+    validations:
+      required: true
+  - type: dropdown
+    id: setup
+    attributes:
+      label: How rweb is reached
+      options:
+        - Tailscale Serve (rweb tailscale)
+        - SSH tunnel (rweb ssh)
+        - Advanced options
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Machine running rweb
+      description: Operating system and version, and CPU (for example macOS 26.2 on Apple silicon, Arch Linux x86-64).
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and device
+      description: For example Chrome 157 on a Pixel 8, Safari on iPhone 16, Firefox on Linux.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: rweb's log lines around it (optional)
+      description: "Linux: `journalctl --user -u rweb -n 50`; macOS: the log file your service writes. Remove anything private first."
+      render: text

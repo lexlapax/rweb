@@ -189,6 +189,8 @@ rweb is a one-person project, so please do not expect me to take pull requests. 
 and improve it. When I see changes elsewhere that would help, I will try to merge them, rework them or
 bring them in some other way.
 
+To report a bug, open an issue with the bug report form; issues are for bug reports only.
+
 Thank you to Superlogical for Rex. rweb does not use Rex's logo, by Superlogical's request.
 
 Maintainer: Sandeep Puri <lexlapax@gmail.com>.
