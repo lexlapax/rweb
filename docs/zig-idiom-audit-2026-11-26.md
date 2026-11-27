@@ -498,7 +498,8 @@ Rex, in ReleaseSafe.
      leaves out the stack-trace code: `__text` is 1.58 MB stripped and 1.70 MB not (macOS; Linux `.text`
      2.31 against 2.62 MB), so every address moves. Keeping symbols needs one build stripped after linking:
      Apple's `strip` does Mach-O, but Zig 0.17.1's `objcopy` cannot strip this ELF ("unimplemented") and
-     the release Macs have no ELF strip tool. Open; the owner decides how (below, item 36 left open).
+     the release Macs have no ELF strip tool. **Owner's decision (2026-11-27): kept as
+     it is**, stripped at compile time with no symbols kept; this part of item 36 is closed.
    - **Ghostty's parser logs into rweb's log.** Output a program prints can make Ghostty log warnings
      ("unimplemented CSI action", "invalid C0 character") and one error ("ignoring CSI t with no
      parameters") under its `stream` scope, and the bridge sets no log filter, so they reach its log. The
@@ -511,6 +512,7 @@ Rex, in ReleaseSafe.
    linux-box (Rex 0.1.0-preview.25) ReleaseSafe with its live Rex 450 passed, 6 skipped; `zig fmt --check`
    clean; `zig build dist` builds both archives. `rex ls` unchanged on both machines.
 
-   Left in step 7: one `sys.zig` for the raw calls and a Valgrind run (item 25); unstripped binaries and
-   `error_tracing` (item 36, the strip decision first); the Ghostty log filter; the rest of F14, F17, F18,
-   F19 and F22.
+   Left in step 7: one `sys.zig` for the raw calls and a Valgrind run (item 25; the owner approved valgrind
+   on linux-box through setup-repo, 2026-11-27: added to its `dev` module, installed when the owner applies
+   it there); `error_tracing` measured (item 36); the Ghostty log filter; the rest of F14, F17, F18, F19
+   and F22.

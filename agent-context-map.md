@@ -55,10 +55,11 @@ a 4-second `echo` loop, upright again after it.
   `escCut`, the mountinfo and POSIX ACL parsers (moved to std-only `rex/escape.zig`, `bridge/protocol.zig`,
   `bridge/fsparse.zig`) and a seeded random-output test for the mirror; `zig build fuzz -Dtest-filter=`.
   Checked: macOS live against revision 24 (ReleaseSafe 366 pass, 5 skip), Debug 358/13 skip, linux-box
-  live 450/6 skip, 2M fuzz inputs per new target. **Open in step 7:** `sys.zig` and Valgrind (item 25);
-  unstripped binaries, which need a post-link strip because Zig's `strip` changes the code and no ELF
-  strip tool is on the release Macs (the owner's choice), then `error_tracing` (item 36); Ghostty's
-  `stream` warnings and errors reach rweb's log unfiltered; F14, F17, F18, F19, F22.
+  live 450/6 skip, 2M fuzz inputs per new target. Owner (2026-11-27): no unstripped binaries (releases
+  stay stripped at compile time); valgrind on linux-box through setup-repo (its `dev` module, committed
+  there, not yet pushed or applied). **Open in step 7:** `sys.zig` and the Valgrind run (item 25);
+  `error_tracing` measured (item 36); Ghostty's `stream` warnings and errors reach rweb's log
+  unfiltered; F14, F17, F18, F19, F22.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
