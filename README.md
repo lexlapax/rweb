@@ -123,7 +123,9 @@ it on devices only you use. Behind an SSH tunnel it requires a long token and li
 a private folder, so no other account can take its place while it is down; the tunnel's local end is plain
 HTTP on loopback, which cannot prove who is answering, so use it only on devices nobody else uses. It never
 starts or asks
-for an open Rex listener, and file transfer is off unless you turn it on. It reads its secrets only from
+for an open Rex listener, and file transfer is off unless you turn it on. Its one connection out is a
+daily check of GitHub's latest-release API, which tells you of a new version and downloads nothing
+(`--no-update-check` turns it off). It reads its secrets only from
 files that are yours and closed to others, on a local disk, in folders no other user or group can
 change, and it bounds what every browser and Rex can make it hold in memory. Design:
 [docs/security-hardening-2026-11-23.md](docs/security-hardening-2026-11-23.md) (in the source repository).

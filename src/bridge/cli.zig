@@ -74,6 +74,7 @@ pub const usage =
     \\                            install locations that exists, never PATH). It and its folders
     \\                            must be root's or yours, and no ACL may let another user change them
     \\  --observe-only            never write, resize or change anything in Rex
+    \\  --no-update-check         do not ask GitHub, once a day, whether a newer rweb is released
     \\  --history-lines N         scrollback rows sent when a terminal opens (default 1000)
     \\  --enable-file-transfer    let the page download any file the terminal's user can read (through
     \\                            Rex) and, with --upload-dir, upload into one folder. Off by default
@@ -131,6 +132,9 @@ pub const Parsed = struct {
     /// Null for a TCP listener (no peer check); `self` is replaced by the caller's uid.
     peer_uids: ?[]const PeerUid = null,
     observe_only: bool = false,
+    /// Ask GitHub, once a day, whether a newer release exists (`update.zig`); off with
+    /// `--no-update-check`.
+    update_check: bool = true,
     history_lines: u32 = 1000,
     debug_input: bool = false,
 };
@@ -258,7 +262,13 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Action {
 pub fn parseEnv(arena: Allocator, args: []const []const u8, env: layout.Env, diag: *Diag) Error!Action {
     // `rweb doctor [tailscale|ssh] [options]`: the rest is parsed as the command it checks would be.
     const doctor = args.len > 0 and std.mem.eql(u8, args[0], "doctor");
-    const rest = if (!doctor) args else if (args.len > 1) args[1..] else &[_][]const u8{"tailscale"};
+    // With no command named (nothing, or options only), it checks `rweb tailscale`.
+    const rest = if (!doctor) args else if (args.len > 1 and !std.mem.startsWith(u8, args[1], "-")) args[1..] else blk: {
+        const r = try arena.alloc([]const u8, args.len);
+        r[0] = "tailscale";
+        @memcpy(r[1..], args[1..]);
+        break :blk r;
+    };
     const p = parseOptions(arena, rest, env, diag) catch |e| {
         if (e == error.ShortHelp) return .{ .help = .short };
         if (e == error.FullHelp) return .{ .help = .full };
@@ -354,6 +364,8 @@ fn parseOptions(arena: Allocator, args: []const []const u8, env: layout.Env, dia
             if (!isAbsolute(p.tailscale.?)) return error.NotAbsolute;
         } else if (eql(u8, a, "--observe-only")) {
             p.observe_only = true;
+        } else if (eql(u8, a, "--no-update-check")) {
+            p.update_check = false;
         } else if (eql(u8, a, "--debug-input")) {
             p.debug_input = true;
         } else if (eql(u8, a, "--history-lines")) {
@@ -485,6 +497,7 @@ fn parseT(args: []const []const u8) (Error || error{TestExpectedRun})!Parsed {
         .allow_forgeable_loopback_identity = p.allow_forgeable_loopback_identity,
         .detect_own_addresses = p.detect_own_addresses,
         .observe_only = p.observe_only,
+        .update_check = p.update_check,
         .history_lines = p.history_lines,
         .tailscale = p.tailscale,
         .peer_uids = if (p.peer_uids) |u| (if (u.len == 1 and u[0] == .uid and u[0].uid == 0) &[_]PeerUid{.{ .uid = 0 }} else &[_]PeerUid{.self}) else null,
@@ -625,6 +638,9 @@ test "doctor checks what the command after it would use, `rweb tailscale` when n
     const ssh = (try parseEnv(a, &.{ "doctor", "ssh", "--config-dir", "/srv/rweb" }, linux_env, &d)).doctor;
     try testing.expectEqual(Command.ssh, ssh.command);
     try testing.expectEqualStrings("/srv/rweb/token", ssh.token_file.?);
+    // Options alone check `rweb tailscale` with them.
+    const opts = (try parseEnv(a, &.{ "doctor", "--no-update-check" }, linux_env, &d)).doctor;
+    try testing.expect(opts.command == .tailscale and !opts.update_check);
     // Its options are checked as the command's are.
     try testing.expectError(error.UnknownOption, parseEnv(a, &.{ "doctor", "ssh", "--nope" }, linux_env, &d));
     try testing.expectEqual(Help.version, (try parseEnv(a, &.{ "doctor", "--version" }, linux_env, &d)).help);

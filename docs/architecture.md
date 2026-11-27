@@ -13,6 +13,11 @@ on Linux, loopback behind a secret path on macOS, the owner taken from the machi
 `rweb ssh` (a unix socket only the same user can connect to, and a token). Each makes the files it needs
 and prints the one step left; `layout.zig` holds their defaults.
 
+Its one connection out is the update check (`update.zig`): once a day, starting 10 minutes after it
+starts, it asks GitHub's API for rweb's latest release (HTTPS, a fixed address, 10 s, at most 64 KiB, only
+the version read) and tells a newer version in its log and on the page; it downloads nothing.
+`--no-update-check` turns it off. `rweb doctor` (`doctor.zig`) asks once, when run.
+
 ```mermaid
 flowchart LR
   subgraph Devices["Your devices"]
@@ -270,12 +275,13 @@ is bounded and validated; the full list is at the top of `src/bridge/protocol.zi
 | Path | What it is |
 | --- | --- |
 | `src/rex/` | Rex client library: `ws.zig` (WebSocket over a unix socket), `control.zig` (hello, revisions, calls, events, reconnect), `api.zig` (typed calls), `data.zig` and `rex1.zig` (output streams), `mirror.zig` (libghostty-vt terminal), `input.zig` (ordered input), `transfer.zig` (downloads), `wire.zig` (handshake parsers), `fake.zig` (a fake Rex for tests) |
-| `src/bridge/` | The program: `main.zig` (start-up, `--version`), `cli.zig` (commands and options), `layout.zig` (the two commands' defaults, the files they make, the next step they print), `access.zig` (who may talk to it), `server.zig` (HTTP and WebSocket), `protocol.zig` (browser protocol), `hub.zig` (sessions, terminals, viewers), `xfer.zig` (file transfer, and the checks and explanations for files and folders), `proc.zig` (bounded child-process runner for `tailscale`), `assets.zig` (embedded page) |
+| `src/bridge/` | The program: `main.zig` (start-up, `--version`), `cli.zig` (commands and options), `layout.zig` (the two commands' defaults, the files they make, the next step they print), `access.zig` (who may talk to it), `server.zig` (HTTP and WebSocket), `protocol.zig` (browser protocol), `hub.zig` (sessions, terminals, viewers), `xfer.zig` (file transfer, and the checks and explanations for files and folders), `proc.zig` (bounded child-process runner for `tailscale`), `sys.zig` (every raw system call), `doctor.zig` (`rweb doctor`), `update.zig` (the update check), `assets.zig` (embedded page; `asset_table.zig` lists it, `tools/assetgen.zig` makes its ETags and gzip bodies at build time) |
 | `src/bridge/web/` | The page: `index.html`, `app.js`, `app.css`, `keys.js` (pure key and touch logic, tested with Node), `wterm-shim.js`, `diag.js`, `manifest.webmanifest`; `login.html`, `login.js`, `login.css` (the token form); `icons/` holds the favicons and app icons; `vendor/` holds xterm.js and wterm with their licences and checksums |
 | `src/fuzz.zig` | Fuzz targets for every parser that reads outside bytes (`zig build fuzz --fuzz`) |
 | `tests/web/` | Tests for the page's logic (`zig build web-test`) |
 | `assets/logo/` | The logo's SVG sources, the social preview and `build.sh`, which exports the rasters (the page's icons are in `src/bridge/web/icons/`) |
-| `tools/` | `dist.sh` and `release.sh` (release archives; `release-base.test.sh` checks its folder rules), `notices.py` (third-party notices) |
+| `tools/` | `dist.sh` and `release.sh` (release archives, signed; `release-base.test.sh` checks its folder rules; `release-signers` holds the release key), `packaging.sh` (the Homebrew formula and AUR package from a release), `vendor/` (rebuilds the vendored browser code), `notices.py` (third-party notices) |
+| `packaging/`, `contrib/` | The Homebrew formula and AUR templates; the systemd unit and LaunchAgent shipped in the archive |
 
 ## Pinned dependencies
 

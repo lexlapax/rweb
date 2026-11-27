@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-27 (0.2.0 released; Phase 6: doctor, rebuildable browser code, signed checksums and channels done; the update checker next).
+Last updated: 2026-11-27 (0.2.0 released; Phase 6 work and the update checker done; next: the owner's review round 7, then the release).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -102,10 +102,13 @@ a 4-second `echo` loop, upright again after it.
   Homebrew on Linux): `packaging/` templates, `tools/packaging.sh VERSION` (refuses an unsigned release),
   `contrib/` services in the archive. Checked: brew style/audit/fetch in a temporary trusted tap (removed),
   makepkg on linux-box. To publish at the release: create `lexlapax/homebrew-rweb` (owner's word), the AUR
-  package (owner's account). **Next: the update checker** (owner 2026-11-27: on by default,
-  `--no-update-check` turns it off; the bridge asks GitHub's latest-release API 10 min after start, then
-  daily with up to an hour's spread; tells the log, the page's ⋯ menu and `rweb doctor`; downloads
-  nothing). **Then, per the owner:** everything release-ready, the owner's review round 7, fixes, release.
+  package (owner's account). Update checker done (owner 2026-11-27: on by default,
+  `--no-update-check` turns it off): `src/bridge/update.zig` (GitHub latest-release API, 10 min after start
+  then daily + up to 1 h spread, `Io.Select` 10 s deadline, 64 KiB cap, tag/draft/prerelease only), the hub's
+  `mode` frame carries `update`, the page shows a dot on ⋯ and an item (link built by the page from
+  `crumb-home`), `rweb doctor` checks once and prints the upgrade command by install path. Checked: unit
+  tests with a local HTTP server (answer, 404, too big, never answering), hub test, web test, real HTTPS to
+  GitHub from macOS and from the static Linux build, the dot and menu item in desktop Chrome. **Then, per the owner:** everything release-ready, the owner's review round 7, fixes, release.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

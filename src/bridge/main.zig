@@ -16,6 +16,7 @@ pub const layout = @import("layout.zig");
 pub const proc = @import("proc.zig");
 pub const sys = @import("sys.zig");
 pub const doctor = @import("doctor.zig");
+pub const update = @import("update.zig");
 const build_options = @import("build_options");
 
 comptime {
@@ -237,8 +238,22 @@ pub fn main(init: std.process.Init) !void {
     defer srv.stop();
     say("rweb: serving (Rex at {s})\n", .{link.socket});
 
+    // Ask GitHub once a day whether a newer rweb is out (`update.zig`); told in the log and to every page.
+    var checker: update.Checker = .{ .gpa = gpa, .io = io, .current = this_version, .ctx = link.hub, .found = updateFound };
+    var check_task: ?Io.Future(void) = if (parsed.update_check) io.concurrent(update.Checker.run, .{&checker}) catch null else null;
+    defer if (check_task) |*t| t.cancel(io);
+
     // Serve until the process is stopped, keeping this node's own addresses current meanwhile.
     if (parsed.detect_own_addresses) keepOwnAddresses(gpa, io, srv, ts) else while (true) io.sleep(.fromSeconds(3600), .awake) catch return;
+}
+
+/// This build's version, for the update check: `build.zig.zon`'s, which must be a plain release version.
+const this_version = update.Version.parse(build_options.version) orelse @compileError("build.zig.zon's version is not MAJOR.MINOR.PATCH");
+
+fn updateFound(ctx: *anyopaque, v: update.Version) void {
+    const h: *hub.Hub = @ptrCast(@alignCast(ctx));
+    var buf: [40]u8 = undefined;
+    h.setUpdate(std.fmt.bufPrint(&buf, "{f}", .{v}) catch return); // 32 bytes at most
 }
 
 /// The command line, read and checked: the options to run with. Help and the version are printed and
@@ -1296,6 +1311,7 @@ test {
     _ = server;
     _ = cli;
     _ = layout;
+    _ = update;
     _ = doctor;
     _ = sys;
     _ = proc;

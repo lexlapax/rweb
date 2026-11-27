@@ -6,6 +6,10 @@ the Rex API revisions it speaks.
 
 ## Unreleased
 
+- rweb tells you when a newer version is released: once a day (first 10 minutes after it starts) it asks
+  GitHub's latest-release API and, for a newer version, logs it once, puts a dot on the page's ⋯ button with
+  an item that opens the release notes, and `rweb doctor` reports it with the upgrade command. It downloads
+  nothing; GitHub learns the machine's address and rweb's version. `--no-update-check` turns it off.
 - `rweb doctor [tailscale|ssh] [options]` checks a setup and says what to fix: Rex (running, answering,
   a revision rweb speaks), the secret, token and upload folder (as at startup), whether a bridge is
   listening, and for Tailscale its sign-in, HTTPS certificates and a Serve entry that forwards to this

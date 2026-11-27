@@ -16,6 +16,7 @@ const xfer = @import("xfer.zig");
 const sys = @import("sys.zig");
 const main = @import("main.zig");
 const build_options = @import("build_options");
+const update = @import("update.zig");
 
 /// The checks' results, written as they are made.
 const Report = struct {
@@ -72,6 +73,7 @@ pub fn run(gpa: Allocator, arena: Allocator, io: Io, parsed: cli.Parsed, env_map
     try checkBridge(gpa, arena, io, parsed, &r);
     if (parsed.command == .tailscale or parsed.owner_from_tailscale or parsed.detect_own_addresses)
         try checkTailscale(arena, io, parsed, secret, &r);
+    if (parsed.update_check) try checkRelease(gpa, io, &r);
     if (parsed.command == .ssh) if (parsed.listen == .unix) {
         var ub: [256]u8 = undefined;
         var hb: [std.posix.HOST_NAME_MAX]u8 = undefined;
@@ -247,6 +249,30 @@ fn checkTailscale(arena: Allocator, io: Io, parsed: cli.Parsed, secret: ?[]const
     }
 }
 
+/// Whether a newer rweb is released, asked once (`update.checkOnce`), and how to upgrade this one.
+fn checkRelease(gpa: Allocator, io: Io, r: *Report) !void {
+    const current = update.Version.parse(build_options.version) orelse return;
+    const latest = update.checkOnce(gpa, io, update.latest_url, current) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        return r.warn("could not ask GitHub for rweb's latest release ({t}); it is asked again next time", .{e});
+    } orelse return r.warn("GitHub names no released version of rweb", .{});
+    if (!latest.newerThan(current)) return r.ok("rweb {f} is the latest release", .{current});
+    var pbuf: [4096]u8 = undefined;
+    const path = if (std.process.executablePath(io, &pbuf)) |n| pbuf[0..n] else |_| "";
+    r.warn("rweb {f} is available (this is {f}): {s}{f}", .{ latest, current, update.release_page, latest });
+    r.detail(upgradeHow(path));
+}
+
+/// How to upgrade an rweb installed at `path`.
+pub fn upgradeHow(path: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, path, "/Cellar/rweb/") != null or std.mem.startsWith(u8, path, "/opt/homebrew/") or
+        std.mem.startsWith(u8, path, "/home/linuxbrew/.linuxbrew/") or std.mem.startsWith(u8, path, "/usr/local/Cellar/"))
+        return "upgrade with Homebrew: brew upgrade rweb, then brew services restart rweb";
+    if (std.mem.eql(u8, path, "/usr/bin/rweb"))
+        return "upgrade the package (Arch: your AUR helper, such as yay -Syu rweb-bin), then systemctl --user restart rweb";
+    return "download the release's archive, check its signature, and install it over this one (the user guide, section 11)";
+}
+
 fn portOf(host_port: []const u8) []const u8 {
     const c = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return "443";
     return host_port[c + 1 ..];
@@ -406,4 +432,11 @@ test "doctor finds the Serve handler that forwards to the bridge, and Funnel on 
     try testing.expect(try findServe(a, "{}", .{ .unix = "/x" }) == .none);
     try testing.expectError(error.BadServe, findServe(a, "{\"Web\":[]}", .{ .unix = "/x" }));
     try testing.expectEqualStrings("12443", portOf("mac.example.ts.net:12443"));
+}
+
+test "doctor says how to upgrade by where rweb is installed" {
+    try testing.expect(std.mem.indexOf(u8, upgradeHow("/opt/homebrew/Cellar/rweb/0.2.0/bin/rweb"), "brew upgrade") != null);
+    try testing.expect(std.mem.indexOf(u8, upgradeHow("/home/linuxbrew/.linuxbrew/Cellar/rweb/0.2.0/bin/rweb"), "brew upgrade") != null);
+    try testing.expect(std.mem.indexOf(u8, upgradeHow("/usr/bin/rweb"), "rweb-bin") != null);
+    try testing.expect(std.mem.indexOf(u8, upgradeHow("/home/me/.local/bin/rweb"), "archive") != null);
 }

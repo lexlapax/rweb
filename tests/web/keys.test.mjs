@@ -551,3 +551,11 @@ test('the logo keeps turning only while output keeps coming', () => {
   assert.equal(K.keepTurning(10_000, 10_000 - K.LOGO_IDLE_MS), false);
   assert.equal(K.keepTurning(10_000, 0), false); // never any output
 });
+
+test('a newer release in the mode frame is a plain version, or nothing', () => {
+  assert.equal(K.updateVersion({t: 'mode', update: '0.2.1'}), '0.2.1');
+  assert.equal(K.updateVersion({t: 'mode'}), null);
+  for (const bad of ['', 'v0.2.1', '0.2', '0.2.1-rc1', '0.2.1/../../x', '<b>1.0.0</b>', '01.0.0', 1, null, {}])
+    assert.equal(K.updateVersion({t: 'mode', update: bad}), null);
+  assert.equal(K.releaseUrl('https://github.com/lexlapax/rweb', '0.2.1'), 'https://github.com/lexlapax/rweb/releases/tag/v0.2.1');
+});

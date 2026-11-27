@@ -379,6 +379,15 @@ size (default 256). Turn it on only if you want the browser to have that reach. 
 
 ## 11. Upgrade, roll back, stop or remove
 
+**Knowing when to upgrade.** Once a day, starting 10 minutes after it starts, rweb asks GitHub's API for
+its latest release (one HTTPS request to `api.github.com`, answered within 10 seconds; only the version is
+read). When a newer version is out it says so once in its log, puts a dot on the page's ⋯ button with an
+item, "rweb X.Y.Z is available", that opens the release notes, and `rweb doctor` reports it with the
+upgrade command for how rweb was installed. It never downloads or installs anything. What GitHub learns
+from it: this machine's address, that it runs rweb, and which version. To turn it off, start rweb with
+`--no-update-check` (add it to `ExecStart`, the LaunchAgent's `ProgramArguments`, or, with Homebrew, run
+rweb from your own service instead of `brew services`).
+
 Read [CHANGELOG.md](../CHANGELOG.md), install the new archive over `~/.local/bin/rweb` (keep the old binary
 if you may want it back), then restart rweb: `systemctl --user restart rweb` on Linux,
 `launchctl kickstart -k "gui/$(id -u)/local.rweb"` on macOS. Restarting rweb does not touch your Rex

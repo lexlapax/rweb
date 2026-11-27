@@ -281,3 +281,7 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 .xf-ico { flex: none; width: 20px; text-align: center; }
 .xf-empty { padding: 20px 10px; }
 #xf-note { margin: 0; padding: 8px 12px; min-height: 18px; font-size: 12px; border-top: 1px solid var(--line); }
+/* A newer rweb is out: a small dot on the ⋯ button. */
+#more { position: relative; }
+#more.has-update::after { content: ""; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.pop-update { color: var(--accent); }

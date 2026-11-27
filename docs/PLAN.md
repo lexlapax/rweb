@@ -323,6 +323,8 @@ Where the steps below stand (2026-11-26):
   every vendored file rebuilt byte-identical from integrity-checked npm packages, the wterm bundle by the
   pinned esbuild. `ghostty-vt.wasm` is checked against its published package, not rebuilt from source:
   it is wterm's own module, which the pinned Ghostty does not produce.
+- Added by the owner, 2026-11-27: an update check. The bridge asks GitHub's latest-release API daily and
+  tells a newer version (log, page, `rweb doctor`); on by default, `--no-update-check` turns it off.
 - Exit: not met (nobody else has installed it from a channel).
 
 Then:

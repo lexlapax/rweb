@@ -572,6 +572,9 @@ pub const Hub = struct {
     tree_dirty: bool = true,
     rex_up: bool = true,
     closing: bool = false,
+    /// A newer rweb release, once the update check has found one (`setUpdate`), as `X.Y.Z`; in every
+    /// page's `mode` frame.
+    update: ?[]u8 = null,
     /// The control connection's generation this hub has already set itself up for.
     seen_generation: u32 = 0,
 
@@ -632,6 +635,7 @@ pub const Hub = struct {
         h.viewers.deinit(h.gpa);
         if (h.tree) |t| t.release(h.gpa);
         if (h.known) |*k| k.arena.deinit();
+        if (h.update) |u| h.gpa.free(u);
         h.xfers.deinit();
         h.gpa.destroy(h);
     }
@@ -709,7 +713,19 @@ pub const Hub = struct {
             .upload = h.cfg.transfer.enabled and !h.cfg.observe_only and h.cfg.transfer.upload_dir != null,
             .debug = h.cfg.debug_input,
             .auth = if (h.cfg.token_mode) "token" else null,
+            .update = h.update,
         }, .{ .emit_null_optional_fields = false });
+    }
+
+    /// A newer release is out (`version`, `X.Y.Z`): every page is told, through its `mode` frame, and
+    /// every page that connects later. Best effort: without memory for it, pages are not told.
+    pub fn setUpdate(h: *Hub, version: []const u8) void {
+        const copy = h.gpa.dupe(u8, version) catch return;
+        h.mu.lockUncancelable(h.io);
+        defer h.mu.unlock(h.io);
+        if (h.update) |old| h.gpa.free(old);
+        h.update = copy;
+        for (h.viewers.items) |v| h.pushModeLocked(v);
     }
 
     /// Whether an upload token issued to viewer `viewer_id` for view `view_gen` of this terminal may
@@ -2839,6 +2855,30 @@ test "hub: the mode frame says token mode only when the bridge signs in with a t
         defer m.deinit(testing.allocator);
         try testing.expect(std.mem.indexOf(u8, m.data, "\"auth\"") == null);
     }
+}
+
+test "hub: a newer release reaches every page's mode frame, and pages that connect later" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    {
+        const m = (try waitFrame(v, isMode)).?;
+        defer m.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(u8, m.data, "\"update\"") == null);
+    }
+    hs.hub.setUpdate("0.3.0");
+    {
+        const m = (try waitFrame(v, isMode)).?;
+        defer m.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(u8, m.data, "\"update\":\"0.3.0\"") != null);
+    }
+    hs.hub.setUpdate("0.3.1"); // a newer one replaces it
+    const later = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(later);
+    const m = (try waitFrame(later, isMode)).?;
+    defer m.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, m.data, "\"update\":\"0.3.1\"") != null);
 }
 
 // ---- running out of memory (F7) ----

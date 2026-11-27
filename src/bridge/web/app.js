@@ -17,6 +17,7 @@ let dbgOn = false;
 
 const state = {
   ws: null, retry: 500, observe: false, locked: false, rexUp: true,
+  update: null,                           // a newer rweb the bridge found (keys.js `updateVersion`), or null
   viewGen: 0,                             // raised each time the page shows another terminal, or none (keys.js `holdView`)
   tokenMode: K.tokenModeFromPath(location.pathname),   // SSH tunnel (page under /s/<id>/, or `auth: "token"`); see `dropped`
   link: K.LINK_START,                     // {phase, why} of keys.js `linkStep`; loading the page is the first request
@@ -464,7 +465,7 @@ setInterval(() => {
 
 function handleMessage(m) {
   switch (m.t) {
-    case 'mode': state.tokenMode = K.tokenModeFrom(state.tokenMode, m); setDebug(K.debugOn(dbgAsked, m)); state.canDownload = !!m.download; state.canUpload = !!m.upload; state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; updateControls(); renderStatus(); break;
+    case 'mode': state.tokenMode = K.tokenModeFrom(state.tokenMode, m); setDebug(K.debugOn(dbgAsked, m)); state.canDownload = !!m.download; state.canUpload = !!m.upload; state.observe = m.observe; state.locked = m.locked; state.rexUp = m.rex_up; state.update = K.updateVersion(m); renderUpdate(); updateControls(); renderStatus(); break;
     case 'rex': state.rexUp = m.up; renderStatus(); if (m.up) retryOpenNow(); break;
     case 'tree': {
       state.tree = m.sessions; renderAll(); maybeRestore();
@@ -772,6 +773,12 @@ document.addEventListener('pointerdown', e => { if (popFor && !$('pop').contains
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && popFor) { const a = popFor; closePop(); a.focus(); } });
 function item(pop, text, on, id) { const b = el('button', '', text); b.setAttribute('role', 'menuitem'); if (id) b.id = id; b.onclick = () => { on(b); }; pop.append(b); return b; }
 
+// A newer rweb: a dot on the ⋯ button, said in its label too; the menu has the item.
+function renderUpdate() {
+  const more = $('more');
+  more.classList.toggle('has-update', !!state.update);
+  more.setAttribute('aria-label', state.update ? `More (rweb ${state.update} is available)` : 'More');
+}
 $('more').onclick = () => openPop($('more'), pop => {
   item(pop, 'Copy text…', () => { closePop(); requestCopy(); }, 'pop-copy').disabled = !ready();
   const clip = item(pop, 'Text copied in the terminal…', () => { closePop(); copyPendingView = holdView(); try { term.blur(); } catch {} send({t: 'clip'}); }, 'pop-clip');
@@ -814,6 +821,8 @@ $('more').onclick = () => openPop($('more'), pop => {
     location.reload();
   });
   item(pop, 'Reconnect', () => { closePop(); reconnectNow(); });
+  // A newer rweb, once the bridge has found one: its release notes, opened as About is.
+  if (state.update) item(pop, `rweb ${state.update} is available`, () => { closePop(); window.open(K.releaseUrl($('crumb-home').href, state.update), '_blank', 'noopener,noreferrer'); }, 'pop-update');
   // rweb's own page, in a new tab or window, as the logo does. No referrer goes with it: this page's
   // address names the machine (and, through an SSH tunnel, the token's path).
   item(pop, 'About rweb', () => { closePop(); window.open($('crumb-home').href, '_blank', 'noopener,noreferrer'); }, 'pop-about');
