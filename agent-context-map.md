@@ -91,7 +91,9 @@ a 4-second `echo` loop, upright again after it.
   rebuild byte-identical from integrity-checked npm packages on macOS and Linux; `ghostty-vt.wasm` is
   wterm's own module (69 exports of its own; the pinned Ghostty's wasm build exports its C API), so it is
   checked against its package, not built (the owner asked to try; stopped and reported as agreed). Run
-  in this session at the owner's word after assistant-sandbox's rules declined network work.
+  in this session at the owner's word after assistant-sandbox's rules declined network work; since
+  2026-11-27 setup-repo's `assistant-sandbox job` (no agent, open internet, named folders only) runs it
+  in a sandbox: all eight identical there too, `@esbuild/linux-arm64` pinned from that run (owner's yes).
   Signed checksums done: `tools/release.sh` signs `SHA256SUMS` as `SHA256SUMS.sig` (`ssh-keygen -Y sign`,
   namespace `file`) and verifies against `tools/release-signers` (key `rweb-release`, Ed25519, made by the
   owner in 1Password, Private vault, "rweb release signing"); it refuses to finish unsigned unless

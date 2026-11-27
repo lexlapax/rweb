@@ -28,8 +28,16 @@ one line per file, `same` or `DIFFERENT`, and exits 0 only when all are the same
 | `ghostty-vt.wasm` | `@wterm/ghostty` 0.6.0, `wasm/ghostty-vt.wasm` (prebuilt by the wterm project) |
 | `LICENSE-wterm.txt` | `@wterm/core` 0.6.0, `LICENSE` |
 
-esbuild runs as its own binary from npm (`@esbuild/darwin-arm64` or `@esbuild/linux-x64`, both pinned);
-another platform needs its `@esbuild/...` package added to the lock.
+esbuild runs as its own binary from npm (`@esbuild/darwin-arm64`, `@esbuild/linux-x64` or
+`@esbuild/linux-arm64`, all pinned); another platform needs its `@esbuild/...` package added to the lock.
+
+On the owner's machines the check can run in a sandbox with no agent, so nothing it downloads reaches a
+session that can read private data (setup-repo's `assistant-sandbox job`; its output comes back as a
+proposal for review):
+
+```sh
+assistant-sandbox job --data ~/projects/lexlapax/rweb --name rweb-vendor-rebuild -- sh tools/vendor/rebuild.sh
+```
 
 ## Result
 
@@ -50,6 +58,10 @@ So the pinned Ghostty cannot stand in for it, and wterm's JavaScript would not r
 module. Rebuilding it from source needs the wterm repository at the commit of `@wterm/ghostty` 0.6.0 and
 the Ghostty commit it was built against; that was not attempted. What is checked is that the file is
 byte-identical to the one in the published package, which the registry's integrity covers.
+
+Run again 2026-11-27 in that sandbox (Linux, ARM64): every package verified against the lock and the
+registry, all eight files identical. `@esbuild/linux-arm64`'s integrity came from that run, matched the
+registry's, and was recorded at the owner's word.
 
 ## How it was run
 

@@ -28,6 +28,7 @@ integrity() { printf 'sha512-%s' "$(openssl dgst -sha512 -binary "$1" | openssl 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) esbuild_pkg=@esbuild/darwin-arm64 ;;
   Linux-x86_64) esbuild_pkg=@esbuild/linux-x64 ;;
+  Linux-aarch64|Linux-arm64) esbuild_pkg=@esbuild/linux-arm64 ;;   # assistant-sandbox's Linux on Apple silicon
   *) echo "rebuild.sh: no esbuild package is pinned for $(uname -s) $(uname -m); add its @esbuild package to the lock" >&2; exit 2 ;;
 esac
 
