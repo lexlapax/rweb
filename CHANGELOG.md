@@ -12,6 +12,9 @@ the Rex API revisions it speaks.
   bridge with Funnel off. It changes nothing, never prints a secret, and exits 1 when a check fails.
 - When the page reports a failure it says what happened in words ("Rex did not answer in time", "the
   terminal's output could not be reached"), not an internal error name; the name goes to rweb's log.
+- `tools/vendor/rebuild.sh` rebuilds the vendored browser code (xterm.js, wterm and their files) from
+  npm packages pinned by version and integrity (`tools/vendor/packages.lock`, `entry.mjs`) and checks
+  each file is byte-identical; all are. Where each comes from: `docs/vendored-browser-code.md`.
 - Building: the page's files are compressed and given their validators at build time, not on the first
   request.
 

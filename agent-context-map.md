@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-27 (0.2.0 released; Phase B done; Phase 6: `rweb doctor` done, rebuildable browser code next).
+Last updated: 2026-11-27 (0.2.0 released; Phase 6: `rweb doctor` and rebuildable browser code done; signed checksums next).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -86,8 +86,14 @@ a 4-second `echo` loop, upright again after it.
   `/proc/net/unix`, so a running bridge logs no refused peer; else a connect), Tailscale sign-in, HTTPS
   certificates, the Serve entry (the secret compared in memory, never printed) and Funnel. Checked on
   laptop-mac (all pass; the ssh layout and a wrong Rex socket fail with fixes) and linux-box (all pass,
-  no log line); macOS live 458/5 skip, linux-box live suite passed. **Next:** rebuildable browser code
-  (PLAN Phase 6 step 5).
+  no log line); macOS live 458/5 skip, linux-box live suite passed. Rebuildable browser code done
+  (`tools/vendor/`, [docs/vendored-browser-code.md](docs/vendored-browser-code.md)): all eight vendored files
+  rebuild byte-identical from integrity-checked npm packages on macOS and Linux; `ghostty-vt.wasm` is
+  wterm's own module (69 exports of its own; the pinned Ghostty's wasm build exports its C API), so it is
+  checked against its package, not built (the owner asked to try; stopped and reported as agreed). Run
+  in this session at the owner's word after assistant-sandbox's rules declined network work.
+  **Next:** signed checksums, owner's choice 2026-11-27: `ssh-keygen -Y sign` with a dedicated Ed25519 key
+  in 1Password (the owner makes the key); then channels.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

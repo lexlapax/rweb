@@ -1,0 +1,11 @@
+# The npm packages rweb's vendored browser files come from (src/bridge/web/vendor/), by exact version.
+# Columns: package, version, the registry's sha512 integrity of its tarball ("-": not recorded yet;
+# tools/vendor/rebuild.sh prints it, and it is copied here after review). esbuild is the bundler of
+# wterm.js; one of its platform packages is used, whichever runs where the script runs.
+@xterm/xterm 6.0.0 sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==
+@xterm/addon-fit 0.11.0 sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==
+@wterm/dom 0.6.0 sha512-c638pHIx3nN0fXP8B/nERAEjBc3GsSbJmW1TN+/WaDLOU97Y/IYw35bargP6e8y8Paq0sF1AnWB9HgKIZR4QBw==
+@wterm/core 0.6.0 sha512-5sKuBbMAILn1PyC5AJvTfVo+80nEAoPY+YyN0SYg3KkCV/DyUqdDzFIZQYuJN1ijTWZ/XQLh7hsmZRQtb59IYw==
+@wterm/ghostty 0.6.0 sha512-BmRMvea3/qYJY5C+CsjrGtd0dOYy3gyT26Bajiy/xOqyv6WILTKxPSEniLWz/mPBPoMWZpmzOS0QIQK15zHhUA==
+@esbuild/darwin-arm64 0.25.12 sha512-N3zl+lxHCifgIlcMUP5016ESkeQjLj/959RxxNYIthIg+CQHInujFuXeWbWMgnTo4cp5XVHqFPmpyu9J65C1Yg==
+@esbuild/linux-x64 0.25.12 sha512-uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==

@@ -136,7 +136,9 @@ What was done:
   from jsDelivr and hashed on first download, not checked against npm's integrity. Planned for Phase 6
   (before anyone else runs rweb): commit the entry file and a script that fetches the packages by integrity
   and rebuilds the bundle, and build `ghostty-vt.wasm` from the pinned Ghostty, so each vendored file can be
-  rebuilt and compared.
+  rebuilt and compared. **Done 2026-11-27:** `tools/vendor/rebuild.sh` rebuilds all eight files
+  byte-identical from integrity-checked npm packages; `ghostty-vt.wasm` turned out to be wterm's own
+  module, not buildable from the pinned Ghostty ([vendored-browser-code.md](vendored-browser-code.md)).
 - The page's security policy now allows WebAssembly (`'wasm-unsafe-eval'` in `script-src`): a
   change for the security review.
 - `wterm-shim.js` gives wterm the small xterm-like surface `app.js` uses. wterm hands its own

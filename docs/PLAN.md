@@ -313,7 +313,10 @@ Where the steps below stand (2026-11-26):
 - Step 3: no channel yet (no Homebrew tap, Linux unit or AUR package).
 - Step 4: tagged releases with checksums and notes, and the Rex revisions in `rweb --version`: done.
   Signed checksums: not yet.
-- Step 5: not started.
+- Step 5: done 2026-11-27 (`tools/vendor/rebuild.sh`, [vendored-browser-code.md](vendored-browser-code.md)):
+  every vendored file rebuilt byte-identical from integrity-checked npm packages, the wterm bundle by the
+  pinned esbuild. `ghostty-vt.wasm` is checked against its published package, not rebuilt from source:
+  it is wterm's own module, which the pinned Ghostty does not produce.
 - Exit: not met (nobody else has installed it from a channel).
 
 Then:
