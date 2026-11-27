@@ -299,7 +299,7 @@ and validated; the full list is at the top of `src/bridge/protocol.zig`.
 | | Pin | Why it matters |
 | --- | --- | --- |
 | Zig | 0.17.1 | Builds everything, including Ghostty's C++ |
-| libghostty-vt | Ghostty tag `vt-1.0.1` (by hash in `build.zig.zon`) | Decodes Rex's snapshot format; rweb refuses an unknown snapshot version |
+| libghostty-vt | Ghostty tag `vt-1.0.2` (by hash in `build.zig.zon`) | Decodes Rex's snapshot format; rweb refuses an unknown snapshot version |
 | Rex API | revisions 18–24 (Rex 0.1.0-preview.25 speaks 0–24) | Rex refuses clients outside its supported range |
 | wterm, xterm.js | wterm 0.6.0, xterm.js 6.0.0 with `@xterm/addon-fit` 0.11.0 (checksums in `vendor/SHA256SUMS`, checked by a test; rebuilt byte for byte from npm by `tools/vendor/rebuild.sh`) | The browser terminals |
 

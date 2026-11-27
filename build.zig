@@ -55,7 +55,7 @@ fn bridgeExe(b: *std.Build, m: *std.Build.Module) *std.Build.Step.Compile {
     return exe;
 }
 
-/// "vt-1.0.1" from Ghostty's tag URL in build.zig.zon.
+/// "vt-1.0.2" from Ghostty's tag URL in build.zig.zon.
 fn ghosttyTag(url: []const u8) []const u8 {
     const start = (std.mem.indexOf(u8, url, "/tags/") orelse return url) + "/tags/".len;
     const end = std.mem.indexOfPos(u8, url, start, ".tar.gz") orelse url.len;

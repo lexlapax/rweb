@@ -25,7 +25,7 @@ network.
 | Decision | Choice |
 | --- | --- |
 | Bridge language | Zig instead of Rust. libghostty-vt is a Zig package, so the bridge imports it directly, with no bindings and one toolchain. Accepted costs: Zig is before 1.0 and its releases break code, it does not prevent use-after-free, and it has fewer libraries. |
-| Zig toolchain | Installed on every build machine (linux-box, gateway-box, desktop-mac) by the owner's `setup-repo` repository, pinned to the Zig version the chosen libghostty-vt release requires (`vt-1.0.1` needs 0.17.0; Ghostty's main branch needs 0.17.1). The build checks the Zig version and fails on a mismatch. |
+| Zig toolchain | Installed on every build machine (linux-box, gateway-box, desktop-mac) by the owner's `setup-repo` repository, pinned to the Zig version the chosen libghostty-vt release requires (`vt-1.0.1` and `vt-1.0.2` need 0.17.0). The build checks the Zig version and fails on a mismatch. |
 | Requests from the machine's own Tailscale address | Rejected by default. A per-machine setting accepts them on hosts where no other user logs in, such as linux-box. |
 | desktop-mac | Included. The bridge starts a personal Rex server when none is running, as an `ssh://` client does, and listens on loopback TCP because Tailscale.app cannot forward to a unix socket; the exposure to other local users is accepted and recorded. |
 
@@ -117,8 +117,8 @@ the pinned Zig on linux-box.
   `rweb-test-` session, get a ticket with `data.connect`, open `/api/data`, and save the raw
   stream to a file. Record the snapshot header and version.
 - Try the routes in this order, stopping at the first that passes the checks:
-  1. **Bridge-side mirror:** decode the snapshot with libghostty-vt (Ghostty's `vt-1.0.1` tag as
-     a `build.zig.zon` dependency, pinned by hash), strip the `rex1` messages, feed live output,
+  1. **Bridge-side mirror:** decode the snapshot with libghostty-vt (a Ghostty `vt-*` tag as
+     a `build.zig.zon` dependency, pinned by hash: `vt-1.0.1`, `vt-1.0.2` since 0.3.1), strip the `rex1` messages, feed live output,
      and serve a formatter VT redraw plus live output to xterm.js.
   2. **Format repaint:** skip the snapshot up to the first nonce-marked `resize`, paint from
      `com.superlogical.terminal.format` in VT form with every `extra_*` option, then pass live
@@ -328,7 +328,8 @@ Where the steps below stand (2026-11-27):
 - Added by the owner, 2026-11-27, for after 0.3.0 and before new features: a check of the upstreams rweb
   pins (Rex, Ghostty's libghostty-vt, Zig, the vendored browser packages) for changes to account for.
   Done: `tools/upstream-check.sh` ([upstream-check.md](upstream-check.md)). First run after 0.3.0:
-  Ghostty `vt-1.0.2` is out (rweb pins `vt-1.0.1`); everything else as pinned or kept on purpose.
+  Ghostty `vt-1.0.2` is out (rweb pinned `vt-1.0.1`); everything else as pinned or kept on purpose.
+  Ghostty `vt-1.0.2` taken for 0.3.1 (upstream-check.md).
 - Exit: not met (nobody else has installed it from a channel).
 
 Then:

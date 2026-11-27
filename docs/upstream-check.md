@@ -29,7 +29,17 @@ laptop-mac and linux-box):
 | --- | --- | --- | --- |
 | `rex-api-revision` | 24 | 24 (Rex 0.1.0-preview.25, both machines) | nothing |
 | `rex-llms.txt` | preview.25 | the same document on both machines | nothing |
-| `ghostty-vt` | 1.0.1 | 1.0.2 | **look at it before new features**: what vt-1.0.2 changes, and whether rweb takes it |
+| `ghostty-vt` | 1.0.1 | 1.0.2 | **taken for 0.3.1** (below) |
 | `zig` | 0.17.1 | 0.17.1 | nothing |
 | `@xterm/xterm`, `@xterm/addon-fit`, `@wterm/core`, `@wterm/dom`, `@wterm/ghostty` | 6.0.0, 0.11.0, 0.6.0 ×3 | the same | nothing |
 | `esbuild` | 0.25.12 | 0.28.2 | nothing: kept, as above |
+
+**Ghostty `vt-1.0.2`, taken 2026-11-27 for 0.3.1.** What changed since `vt-1.0.1` (106 commits, read from
+GitHub's comparison through the sandbox's job profile): terminal-core fixes (soft wraps and semantic prompt
+marks across IL/DL, a clone's padding rows, hyperlink hashing, PageList integrity while growing), a
+snapshot fix ("a restored snapshot keeps a pending wrap at any column"; `src/terminal/snapshot/` changed,
+no new format version), wider skin-tone emoji clusters, mouse-encoder state across syncs, and changes
+rweb does not build (fonts, GTK, kitty drag and drop, CI). Its dependencies are unchanged
+(`THIRD-PARTY-NOTICES.md` regenerates byte-identical). Checked: `zig build test` with live Rex
+(preview.25, revision 24) 473 passed, 5 skipped, in Debug and in ReleaseSafe; `zig build fuzz`, and 300 s
+of `--fuzz` with no failure; no `rweb-test-` session left behind.

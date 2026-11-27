@@ -6,6 +6,9 @@ the Rex API revisions it speaks.
 
 ## Unreleased
 
+- Ghostty's libghostty-vt `vt-1.0.2` (was `vt-1.0.1`): terminal fixes, among them a restored snapshot
+  keeping a pending wrap at any column, soft wraps kept when lines are inserted or deleted, and wider
+  skin-tone emoji. `rweb --version` names it.
 - `tools/upstream-check.sh` reports what changed upstream of rweb's pins: the Rex server's API revision
   and protocol document, Ghostty's libghostty-vt tags, Zig and the vendored browser packages
   (`docs/upstream-check.md`, in the source repository).

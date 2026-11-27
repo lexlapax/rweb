@@ -40,7 +40,7 @@ a 4-second `echo` loop, upright again after it.
   [docs/upstream-check.md](docs/upstream-check.md); AGENTS.md makes it the first step after each release.
   First run: Rex preview.25 / revision 24 and its `llms.txt` unchanged on laptop-mac and linux-box;
   network half in the sandbox's job profile (proposal `20261127-123921-job-shell/rweb-upstream-check`):
-  **Ghostty `vt-1.0.2` is out** (pinned `vt-1.0.1`): look at it before new features; esbuild 0.28.2 is
+  Ghostty `vt-1.0.2` was out (pinned `vt-1.0.1`): **taken for 0.3.1** (2026-11-27; docs/upstream-check.md); esbuild 0.28.2 is
   newer but kept (it makes the wterm bundle byte-identical); Zig and the npm packages as pinned.
   Checked: shellcheck; the rex half here (same), with a changed lock hash (CHANGED) and with no server
   (unreadable).
@@ -783,7 +783,7 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
   Tailscale.app (sandboxed, no unix-socket Serve backend).
 - Tailscale 1.104.7 on linux-box (unix-socket Serve backends need ≥ 1.94; setting one needs root).
   Serve: rweb has a port of its own; other services use others.
-- Zig 0.17.1 (`/usr/bin/zig`) on linux-box. libghostty-vt: Ghostty tag `vt-1.0.1` (needs ≥ 0.17.0),
+- Zig 0.17.1 (`/usr/bin/zig`) on linux-box. libghostty-vt: Ghostty tag `vt-1.0.2` since 0.3.1 (`vt-1.0.1` before; needs ≥ 0.17.0),
   package hash `ghostty-1.4.1-dev-5UdBC4lkpgUYGLDYGJQcJoa9zOGZNB3qVMgMoS9CUH5O`; snapshot format 1.
 - Deployment order for Phase 4: linux-box, then gateway-box, then desktop-mac.
 

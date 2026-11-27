@@ -3,8 +3,8 @@
     .version = "0.3.0",
     .dependencies = .{
         .ghostty = .{
-            .url = "https://github.com/ghostty-org/ghostty/archive/refs/tags/vt-1.0.1.tar.gz",
-            .hash = "ghostty-1.4.1-dev-5UdBC4lkpgUYGLDYGJQcJoa9zOGZNB3qVMgMoS9CUH5O",
+            .url = "https://github.com/ghostty-org/ghostty/archive/refs/tags/vt-1.0.2.tar.gz",
+            .hash = "ghostty-1.4.1-dev-5UdBCxbdqAWvTbEDu8LHIX61u3JHpYit3s8zjCphO4mh",
         },
     },
     .minimum_zig_version = "0.17.1",

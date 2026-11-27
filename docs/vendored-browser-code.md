@@ -45,7 +45,7 @@ different bytes for these versions.
 ## What is not rebuilt: `ghostty-vt.wasm` from source
 
 `ghostty-vt.wasm` is the wterm project's own WebAssembly module: wterm's wrapper around Ghostty's
-terminal, with its own interface. Building Ghostty's wasm library from the Ghostty rweb pins (`vt-1.0.1`,
+terminal, with its own interface. Building Ghostty's wasm library from the Ghostty rweb pinned then (`vt-1.0.1`,
 `zig build -Demit-lib-vt -Dtarget=wasm32-freestanding`) gives a different module: it exports Ghostty's C
 API (217 `ghostty_*` functions and the table), while the vendored one exports 69 functions of wterm's
 design (`init`, `write`, `resize`, `get_viewport`, `get_scrollback_line`, `graphics_*` and so on) and
