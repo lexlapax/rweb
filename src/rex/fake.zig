@@ -117,6 +117,9 @@ pub const Fake = struct {
     path: []u8,
     /// Newest and oldest API revision this server speaks.
     api_max: u32 = 18,
+    /// A second block `session.list_blocks` lists in every session, of this flavor (null: no flavor,
+    /// as an older server may send), for tests of blocks that are not terminals. Set under `mu`.
+    extra_block: ?struct { flavor: ?[]const u8 } = null,
     api_min: u32 = 0,
 
     mu: Io.Mutex = .init,
@@ -714,14 +717,23 @@ pub const Fake = struct {
         } else if (std.mem.eql(u8, method, "session.list_blocks")) {
             const sid = strField(p, "session_id") orelse return f.respondError(c, id, "bad_request", 400, "session_id required");
             const s = f.findSession(sid) orelse return f.respondError(c, id, "session_not_found", 404, "session not found");
-            return f.respond(c, id, .{ .blocks = .{.{
+            const B = struct { block_id: []const u8, label: []const u8, creator_name: ?[]const u8, flavor: ?[]const u8, placement: []const u8, window_id: []const u8 };
+            const list = [2]B{ .{
                 .block_id = s.block.id,
                 .label = "fake-block",
                 .creator_name = "com.superlogical.terminal",
                 .flavor = "com.superlogical.terminal.shell",
                 .placement = "placed",
                 .window_id = s.window_id,
-            }} });
+            }, .{
+                .block_id = "block:00000000-0000-0000-0000-0000000e7a2a",
+                .label = "fake-extra",
+                .creator_name = null,
+                .flavor = if (f.extra_block) |x| x.flavor else null,
+                .placement = "placed",
+                .window_id = s.window_id,
+            } };
+            return f.respond(c, id, .{ .blocks = list[0..if (f.extra_block != null) 2 else 1] });
         } else if (std.mem.eql(u8, method, "session.set_label")) {
             const sid = strField(p, "session_id") orelse return f.respondError(c, id, "bad_request", 400, "session_id required");
             const s = f.findSession(sid) orelse return f.respondError(c, id, "session_not_found", 404, "session not found");

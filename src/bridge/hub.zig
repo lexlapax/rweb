@@ -1523,6 +1523,12 @@ pub const Hub = struct {
         try h.refreshTree();
     }
 
+    /// A block of Rex's terminal creator, or one with no flavor (an older server may leave it out).
+    fn isTerminalFlavor(flavor: ?[]const u8) bool {
+        const f = flavor orelse return true;
+        return std.mem.startsWith(u8, f, "com.superlogical.terminal.");
+    }
+
     /// Re-read sessions and blocks and send the tree to every viewer.
     pub fn refreshTree(h: *Hub) !void {
         const gpa = h.gpa;
@@ -1552,7 +1558,13 @@ pub const Hub = struct {
                 };
                 defer blocks.deinit();
                 const bl = try arena.alloc(Blk, blocks.value.len);
-                for (blocks.value, bl) |b, *o| {
+                var n: usize = 0;
+                for (blocks.value) |b| {
+                    // Only terminals: other block types (Rex's file transfers, its onboarding) have no
+                    // terminal stream to show.
+                    if (!isTerminalFlavor(b.flavor)) continue;
+                    const o = &bl[n];
+                    n += 1;
                     o.* = .{
                         .id = try arena.dupe(u8, b.block_id),
                         .label = try arena.dupe(u8, b.label),
@@ -1563,7 +1575,7 @@ pub const Hub = struct {
                     };
                     try known.keys.put(ka, try ka.print("{s}|{s}", .{ s.session_id, b.block_id }), {});
                 }
-                try out.append(arena, .{ .id = try arena.dupe(u8, s.session_id), .label = try arena.dupe(u8, s.label), .blocks = bl });
+                try out.append(arena, .{ .id = try arena.dupe(u8, s.session_id), .label = try arena.dupe(u8, s.label), .blocks = bl[0..n] });
             }
         }
 
@@ -3198,4 +3210,21 @@ test "hub: a fit does not wait for another viewer's call to Rex" {
     try testing.expect(try fitBehindSlowListing(hs, a, b) < 1_000_000);
     // The listing still ends, refused as not answered.
     (try waitFrame(a, isError)).?.deinit(testing.allocator);
+}
+
+test "hub: the tree lists terminals only, not Rex's other block types" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const extra = "block:00000000-0000-0000-0000-0000000e7a2a";
+    for ([_]?[]const u8{ "com.superlogical.fs.fs", "com.superlogical.onboarding.onboarding", null }) |flavor| {
+        hs.f.mu.lockUncancelable(testing.io);
+        hs.f.extra_block = .{ .flavor = flavor };
+        hs.f.mu.unlock(testing.io);
+        try hs.hub.refreshTree();
+        const tree = hs.hub.treeJson().?;
+        defer testing.allocator.free(tree);
+        try testing.expect(std.mem.indexOf(u8, tree, hs.block_id) != null);
+        // A block with no flavor is taken for a terminal (an older server may leave it out).
+        try testing.expectEqual(flavor == null, std.mem.indexOf(u8, tree, extra) != null);
+    }
 }

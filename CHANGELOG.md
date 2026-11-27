@@ -10,6 +10,10 @@ the Rex API revisions it speaks.
 - Issues are for bug reports, through a bug report form; pull requests are turned off on GitHub.
 - The logo at the top left, and "About rweb" in the ⋯ menu, open rweb's page on GitHub in a new tab,
   without sending this page's address (it names your machine).
+- rweb speaks Rex API revisions 18 to 24 (Rex 0.1.0-preview.25 is revision 24; it was 18 to 19). Nothing
+  rweb uses changed in 20 to 24, and an older server is still served at its own revision.
+- The list shows terminals only: Rex's other blocks (its file-transfer blocks, new in preview.25, and its
+  onboarding walkthrough) have no terminal to open and are left out.
 - A terminal that closes leaves the page at once (it took up to 0.2 s), and opening one is a few
   milliseconds faster. One browser's request that Rex is slow to answer (a folder listing, say) no longer
   holds up another browser's: before, every request to Rex waited for the one in progress.

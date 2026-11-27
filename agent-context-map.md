@@ -1,6 +1,7 @@
 # Agent context map
 
-Last updated: 2026-11-26 (Phase B step 6: assertions on internal invariants, 4 to 34; step 7 next).
+Last updated: 2026-11-26 (rweb speaks Rex API revisions 18 to 24, in step with Rex 0.1.0-preview.25;
+the tree lists terminals only; Phase B step 7 next).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -52,9 +53,14 @@ a 4-second `echo` loop, upright again after it.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
-- Rex on desktop-mac: the installed CLI is 0.1.0-preview.25 (API revision 24); the running server still
-  answers revision 18. rweb speaks 18 and 19: test it against a preview.25 server once the owner restarts
-  Rex onto it.
+- Rex (2026-11-26): every machine has 0.1.0-preview.25 installed (API revision 24, server speaks 0 to 24).
+  linux-box and the other machines restarted onto it; desktop-mac's server still ran revision 18 when
+  this was built (its restart ends every session there; the owner's). rweb now asks for 18 to 24: its
+  live suite passed at revision 24 (linux-box) and at 18 (desktop-mac), and a browser run against the
+  revision-24 server (open, type, new terminal and `exit`, Copy view, fit, Reconnect) passed. The 18 to 24
+  differences in Rex's own document: new methods and optional arguments rweb does not use, and the
+  `com.superlogical.fs` block type, which the tree now leaves out with every non-terminal block. Not
+  changed: the deployed binary (0.1.1, revisions 18 to 19), which a preview.25 server serves at 19.
 
 ## 2026-11-26: GitHub settings (owner)
 

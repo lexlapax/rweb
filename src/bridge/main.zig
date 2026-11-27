@@ -77,7 +77,7 @@ test "version text names the version, commit and Rex revisions" {
     const t = versionText();
     try std.testing.expect(std.mem.startsWith(u8, t, "rweb " ++ build_options.version ++ "\n"));
     try std.testing.expect(std.mem.indexOf(u8, t, "commit ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, t, "rex api revisions 18-19") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "rex api revisions 18-24") != null);
 }
 
 const log = std.log.scoped(.rweb);

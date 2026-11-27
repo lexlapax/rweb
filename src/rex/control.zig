@@ -19,14 +19,17 @@ const log = std.log.scoped(.rex_control);
 pub const subprotocol = "rex.control.v1";
 
 /// The Rex API revisions this client speaks (newest and oldest); `rweb --version` reports them.
-pub const api_max_supported: u32 = 19;
+pub const api_max_supported: u32 = 24;
 pub const api_min_supported: u32 = 18;
 
 pub const Options = struct {
     socket_path: []const u8,
     /// Newest and oldest API revision the client can use.
     /// 19 adds `event_dropped` (an oversize event no longer closes the connection) and is
-    /// otherwise the same as 18 for every call this library makes.
+    /// otherwise the same as 18 for every call this library makes. 20 to 24 (Rex 0.1.0-preview.25)
+    /// add methods and optional arguments this library does not use (`client.undo_close` and
+    /// `undoable`, `session.transfer_window`, two zooms per window, the `com.superlogical.fs` block
+    /// type, `program_resume_records`) and change none of the calls or events it does use.
     api_max: u32 = api_max_supported,
     api_min: u32 = api_min_supported,
     client_name: []const u8 = "rweb",
@@ -843,7 +846,7 @@ test "live: session.list and server.version on a real Rex (needs REX_SOCKET)" {
     if (sock.len == 0) return error.SkipZigTest;
     const c = try Control.open(testing.allocator, testing.io, .{ .socket_path = sock });
     defer c.close();
-    try testing.expect(c.revision >= 18 and c.revision <= 19);
+    try testing.expect(c.revision >= api_min_supported and c.revision <= api_max_supported);
     std.debug.print("\nlive: negotiated API revision {d}\n", .{c.revision});
     var l = try c.call("session.list", null);
     defer l.deinit();
@@ -851,6 +854,15 @@ test "live: session.list and server.version on a real Rex (needs REX_SOCKET)" {
     var v = try c.call("server.version", null);
     defer v.deinit();
     _ = try v.ok();
+}
+
+test "control: a server that speaks 24 is used at 24" {
+    const f = try fake.Fake.start(testing.allocator, testing.io);
+    defer f.deinit();
+    f.api_max = 24;
+    const c = try Control.open(testing.allocator, testing.io, .{ .socket_path = f.path });
+    defer c.close();
+    try testing.expectEqual(@as(u32, 24), c.revision);
 }
 
 test "control: a fake that speaks 19 is used at 19, and event_dropped is surfaced" {
