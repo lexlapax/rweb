@@ -1,11 +1,23 @@
 # Agent context map
 
-Last updated: 2026-11-26 (GitHub: pull requests and projects off, issues for bug reports through a form; the owner's choice).
+Last updated: 2026-11-26 (Phase 6 gates met and recorded in PLAN; next: the Zig audit's Phase B).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
 
 
+
+## Where things stand (2026-11-26, end of the day)
+
+- 0.1.1 is released (GitHub Release `v0.1.1`, commit `1846885`) and runs on the owner's four machines;
+  the repository is public. Phase 5 is done; Phase 6's gates are met and its steps' status is in
+  [docs/PLAN.md](docs/PLAN.md) ("Phase 6"): no channel, `doctor` or signed checksums yet.
+- **Next: Phase B** of [docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md)
+  (section 4), in its order, each step measured before and after in `ReleaseSafe`: the fixed workload
+  first (it is part of step 2), then typed JSON in the Rex client.
+- Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
+  whether the build should refuse group- or world-writable `zig-pkg` folders.
+- Not verified: a host's sleep and wake against the stale-address refusal.
 ## 2026-11-26: GitHub settings (owner)
 
 Pull requests and projects are turned off on the repository (wiki and discussions were off already);

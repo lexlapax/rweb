@@ -18,7 +18,7 @@ network.
 | Server language | Zig, one static binary per platform (changed from Rust on 2026-11-21; see below). |
 | First usable version | List sessions and their terminals; open one terminal full-screen; type, resize, reconnect; usable on a phone; create, rename and close sessions and terminals from the browser. |
 | Not in the first version | Drawing a Rex window's split layout. Forking Ovis. |
-| Repository | `lexlapax/rweb`, private. |
+| Repository | `lexlapax/rweb`, private until 2026-11-26, public since (see Phase 6). |
 
 ## Decisions made after the design research (2026-11-21)
 
@@ -288,13 +288,32 @@ pending reboot check), recorded in setup-repo.
 
 ### Phase 6: distribution to other people
 
-Gates, all before any public step:
+Gates, all before any public step (**all met 2026-11-26**):
 
-- Superlogical's answer on third-party clients and on the name (the owner asks).
+- Superlogical's answer on third-party clients and on the name: **given 2026-11-22** in Superlogical's
+  Discord: no restrictions on making Rex clients; they asked that Rex's logo (the dinosaur) not be used.
+  rweb's logo is its own.
 - A licence for the project, compatible with the vendored code: **decided 2026-11-25, MIT**, the same as
   Ghostty and libghostty-vt (owner's choice).
-- A new public repository built from a cleaned tree, not this one made public: this repository's
-  history names the owner's tailnet, hosts and setup, and stays private.
+- A public repository without the owner's setup: **done 2026-11-26, a different way than planned.** The
+  owner chose to rewrite this repository's history rather than start a new one: in every file version
+  and commit message the tailnet, host and setup-repository names became generic, commits are authored
+  by the owner's GitHub no-reply address, and the README names the maintainer. The rewritten history
+  went to a new public `lexlapax/rweb`, and the old private repository was deleted, so GitHub holds no
+  copy of the old objects. v0.1.1 is a GitHub Release there.
+
+Where the steps below stand (2026-11-26):
+
+- Step 1: the command line was generalised in round five (`rweb tailscale`, `rweb ssh`: no owner flags,
+  secrets and folders made, plain refusals with a fix) and the user guide covers Serve on Linux and
+  macOS. No `doctor` command yet.
+- Step 2: rounds five and six reviewed rweb for other people's machines (shared hosts, groups, disks,
+  procedures). Done for now; repeat when step 1 or 3 changes much.
+- Step 3: no channel yet (no Homebrew tap, Linux unit or AUR package).
+- Step 4: tagged releases with checksums and notes, and the Rex revisions in `rweb --version`: done.
+  Signed checksums: not yet.
+- Step 5: not started.
+- Exit: not met (nobody else has installed it from a channel).
 
 Then:
 
@@ -320,7 +339,7 @@ Rex from a phone, following only the docs.
 
 - Draw a Rex window's split layout.
 - Reuse the client library as an attach program for an Ovis fork, if Ovis's views are wanted.
-- Ask Superlogical about third-party client terms and a web client, and Ovis's maintainer what
+- Ask Ovis's maintainer what
   its `alt-runtime` slot is for.
 
 ## Risks
