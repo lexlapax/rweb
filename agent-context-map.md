@@ -61,8 +61,9 @@ a 4-second `echo` loop, upright again after it.
   other scopes errors only); the suite ran under Valgrind on linux-box (static musl at x86_64_v3, since
   AVX-512 and Arch's loader stop it otherwise): all tests pass, the only reports are a futex wake inside
   std's `Io.Threaded`. `src/bridge/sys.zig` holds every raw call of the bridge, each
-  returning a Zig error set (macOS live 370/5 skip, linux-box live 454/6 skip). **Open in step 7:**
-  `error_tracing` measured (item 36); F14, F17, F18, F19, F22.
+  returning a Zig error set (macOS live 370/5 skip, linux-box live 454/6 skip). `error_tracing` measured: +6 % binary, no CPU or
+  latency cost beyond noise, not enabled (stripped releases would show addresses only). **Open in step 7:**
+  F14, F17, F18, F19, F22 as their files are next touched. **Next:** the owner's release choices.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
