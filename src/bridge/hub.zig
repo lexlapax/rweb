@@ -198,8 +198,20 @@ pub const Viewer = struct {
     /// copy of themselves; `closed` and `exited` are always queued; replies count against the
     /// budget.
     pub fn push(v: *Viewer, kind: Kind, text: []const u8) void {
+        const copy = v.hub.gpa.dupe(u8, text) catch return;
+        v.pushOwned(kind, copy);
+    }
+
+    /// A reply made with the hub's allocator, queued as it is (no copy). The viewer owns it from
+    /// here, queued or not.
+    pub fn pushTextOwned(v: *Viewer, owned: []u8) void {
+        v.pushOwned(.reply, owned);
+    }
+
+    /// As `push`, taking `copy` (made with the hub's allocator) instead of copying the text: the
+    /// viewer owns it from here, and frees it if it is not queued.
+    pub fn pushOwned(v: *Viewer, kind: Kind, copy: []u8) void {
         const gpa = v.hub.gpa;
-        const copy = gpa.dupe(u8, text) catch return;
         v.mu.lockUncancelable(v.hub.io);
         defer v.mu.unlock(v.hub.io);
         if (v.closed) return gpa.free(copy);
@@ -683,8 +695,7 @@ pub const Hub = struct {
         const observe = v.observe;
         v.mu.unlock(h.io);
         const text = h.modeJson(observe) catch return;
-        defer h.gpa.free(text);
-        v.push(.mode, text);
+        v.pushOwned(.mode, text);
     }
 
     /// The `mode` frame for a viewer whose read-only switch is `observe`. Caller holds `mu`
@@ -824,8 +835,7 @@ pub const Hub = struct {
                 return h.refuseOpen(v, msg.open.session, msg.open.block, "too many requests", true, true);
             }
             const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = @tagName(msg), .msg = "too many requests", .rate = true }, .{}) catch return;
-            defer h.gpa.free(text);
-            return v.pushText(text);
+            return v.pushTextOwned(text);
         }
         switch (msg) {
             .ping => v.pushText("{\"t\":\"pong\"}"),
@@ -842,8 +852,7 @@ pub const Hub = struct {
                 var res = (got catch |e| return h.fail(v, "clip", e)) orelse return v.pushText("{\"t\":\"clip\",\"text\":null}");
                 defer res.deinit();
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "clip", .text = res.value }, .{}) catch return;
-                defer h.gpa.free(out);
-                v.pushText(out);
+                v.pushTextOwned(out);
             },
             .term_action => |act| {
                 if (h.isObserving(v)) return h.refuse(v, "term_action", "read-only");
@@ -910,8 +919,7 @@ pub const Hub = struct {
                 defer list.deinit(h.gpa);
                 for (d.value.entries) |e| list.append(h.gpa, .{ .n = e.name, .d = e.dir }) catch return;
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "ls", .path = d.value.path, .home = d.value.home, .status = d.value.status, .entries = list.items, .truncated = d.value.truncated }, .{}) catch return;
-                defer h.gpa.free(out);
-                v.pushText(out);
+                v.pushTextOwned(out);
             },
             .dl => |d| {
                 if (!h.forTerminal(v, what, term, d.at)) return;
@@ -930,8 +938,7 @@ pub const Hub = struct {
                 const name = h.gpa.dupe(u8, t_info.value.name) catch return;
                 const token = h.xfers.add(.{ .token = undefined, .kind = .download, .expires_ms = 0, .ticket = t_info.value.ticket, .name = name, .size = t_info.value.size, .viewer_id = v.id }) catch |e| return h.refuse(v, what, transferRefusal(e));
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "download", .token = token, .name = t_info.value.name, .size = t_info.value.size }, .{}) catch return;
-                defer h.gpa.free(out);
-                v.pushText(out);
+                v.pushTextOwned(out);
             },
             .ul => |u| {
                 if (h.cfg.transfer.upload_dir == null) return h.refuse(v, what, "uploads are off on this bridge");
@@ -953,8 +960,7 @@ pub const Hub = struct {
                 // `add` owns the strings from here, on success or failure.
                 const token = h.xfers.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = u.size, .session_id = sid, .block_id = bid, .viewer_id = v.id, .view_gen = view_gen }) catch |e| return h.refuse(v, what, transferRefusal(e));
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "upload", .token = token, .size = u.size }, .{}) catch return;
-                defer h.gpa.free(out);
-                v.pushText(out);
+                v.pushTextOwned(out);
             },
             else => unreachable,
         }
@@ -980,8 +986,7 @@ pub const Hub = struct {
         defer res.deinit();
         const i = res.value;
         const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "info", .state = i.state, .status_msg = i.status_msg, .progress = i.progress, .title = i.title, .pwd = i.pwd, .program = i.program, .exit_code = i.exit_code, .ports = i.ports }, .{}) catch return;
-        defer h.gpa.free(out);
-        v.pushText(out);
+        v.pushTextOwned(out);
     }
 
     /// The Copy view: the terminal's text, for the browser to select from.
@@ -1004,26 +1009,22 @@ pub const Hub = struct {
         const pt = res catch |e| return h.fail(v, "text", e);
         defer h.gpa.free(pt.text);
         const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "text", .text = pt.text, .truncated = pt.truncated }, .{}) catch return;
-        defer h.gpa.free(out);
-        v.push(.copy, out);
+        v.pushOwned(.copy, out);
     }
 
     fn refuseOpen(h: *Hub, v: *Viewer, session: []const u8, block: []const u8, msg: []const u8, rate: bool, transient: bool) void {
         const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = "open", .session = session, .block = block, .msg = msg, .rate = rate, .transient = transient }, .{}) catch return;
-        defer h.gpa.free(text);
-        v.pushText(text);
+        v.pushTextOwned(text);
     }
 
     fn fail(h: *Hub, v: *Viewer, what: []const u8, e: anyerror) void {
         const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = what, .msg = @errorName(e) }, .{}) catch return;
-        defer h.gpa.free(text);
-        v.pushText(text);
+        v.pushTextOwned(text);
     }
 
     fn refuse(h: *Hub, v: *Viewer, what: []const u8, msg: []const u8) void {
         const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = what, .msg = msg }, .{}) catch return;
-        defer h.gpa.free(text);
-        v.pushText(text);
+        v.pushTextOwned(text);
     }
 
     /// Whether a message that names its terminal (`protocol.Target`) is for `term`, the one this
@@ -1039,8 +1040,7 @@ pub const Hub = struct {
             break :blk .{ "stale", "the page showed another terminal when this was asked" };
         };
         const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = what, .code = code, .msg = msg }, .{}) catch return false;
-        defer h.gpa.free(text);
-        v.pushText(text);
+        v.pushTextOwned(text);
         return false;
     }
 
@@ -1072,8 +1072,7 @@ pub const Hub = struct {
                 };
                 if (!p.force and std.mem.indexOfAny(u8, clean, "\r\n") != null and !bracketed) {
                     const text = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "error", .@"for" = "paste", .code = "confirm_multiline", .msg = "this program does not take pastes as one block; each line would run on its own" }, .{}) catch return;
-                    defer h.gpa.free(text);
-                    return v.pushText(text);
+                    return v.pushTextOwned(text);
                 }
                 const body = std.json.Stringify.valueAlloc(h.gpa, .{ .text = clean }, .{}) catch return;
                 defer h.gpa.free(body);
@@ -1348,9 +1347,12 @@ pub const Hub = struct {
             subscribe: bool,
             /// The viewer's redraw requests seen when this redraw started.
             seq: u64,
-            fn deliver(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            /// Takes `body` (the redraw, made with the hub's allocator): queued as it is, or freed.
+            fn deliver(ctx: *anyopaque, body: []u8) anyerror!void {
                 const c: *@This() = @ptrCast(@alignCast(ctx));
                 const gpa = c.h.gpa;
+                var queued = false;
+                defer if (!queued) gpa.free(body);
                 const m = c.t.mirror;
                 // The mirror is locked: read its state directly.
                 const opened = try std.json.Stringify.valueAlloc(gpa, .{
@@ -1368,12 +1370,9 @@ pub const Hub = struct {
                     .owner = m.owner,
                     .exited = m.exit_code,
                 }, .{});
-                var queued = false;
                 defer if (!queued) gpa.free(opened);
                 const theme = if (m.theme) |*th| try themeFrame(gpa, th) else null;
                 defer if (!queued) if (theme) |x| gpa.free(x);
-                const body = try gpa.dupe(u8, bytes);
-                defer if (!queued) gpa.free(body);
 
                 c.t.vmu.lockUncancelable(c.h.io);
                 defer c.t.vmu.unlock(c.h.io);

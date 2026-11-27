@@ -60,7 +60,7 @@ mechanical changes above), **part fixed**, or **open**.
 | F1 | allocators | should-fix | `init.gpa` in a ReleaseSafe build is `std.heap.SafeAllocator` over the page allocator (std `start.zig`); nobody chose it or measured it | **decided in Phase B step 2** (2026-11-26): kept, now stated and checked at compile time | `src/bridge/main.zig:155` |
 | F2 | performance | should-fix | `readMessage` allocates and frees a buffer for every message, so once per chunk of terminal output | **fixed in Phase B step 3** (2026-11-26): `readMessageInto` with a kept buffer | `src/rex/ws.zig:517-577` |
 | F3 | performance | should-fix | live output is copied per viewer per chunk, and a frame grows by exact-size `realloc` (quadratic, bounded by the 64 KiB frame) | **fixed in Phase B step 3**: a pool of two live buffers per viewer, joined in place | `src/bridge/hub.zig:229-250` |
-| F4 | performance | should-fix | a reply is built with `valueAlloc`, then `push` copies it and the first copy is freed; a redraw (up to 16 MiB) is copied the same way | open (Phase B 3) | `src/bridge/hub.zig:186-188`, `:1238`; 17 `valueAlloc` in `hub.zig` |
+| F4 | performance | should-fix | a reply is built with `valueAlloc`, then `push` copies it and the first copy is freed; a redraw (up to 16 MiB) is copied the same way | **fixed in Phase B** (2026-11-26): `pushOwned`, and the mirror hands a redraw over | `src/bridge/hub.zig:186-188`, `:1238`; 17 `valueAlloc` in `hub.zig` |
 | F5 | comptime | should-fix | Rex replies: parsed in `dispatch`, copied, parsed again in `callTimeout`, deep-copied by `cloneValue`, then picked apart by hand; events get a third parse; request bodies are glued from escaped pieces | **fixed in Phase B step 1** (2026-11-26; section 4) | `src/rex/control.zig:490`, `:599`; `src/rex/api.zig:114`, `:583`; `src/rex/rex1.zig:182`; `src/rex/wire.zig:31`; `src/bridge/hub.zig:466`; `src/bridge/main.zig:731`, `:759` |
 | F6 | comptime | should-fix | message type matched by a chain of `eql`; `classOf` ended in `else => .free` | **fixed in round five**: `stringToEnum` and an exhaustive switch; both class functions list every tag, and a comptime loop refuses a tag that is under a mirror's lock and free | `src/bridge/protocol.zig:91-92`; `src/bridge/hub.zig:667-692` |
 | F7 | errors | should-fix | allocation failures swallowed with a wrong state left behind | **part fixed in round five**: the hub needs no memory to close, restart or drop a terminal (lists linked through `Terminal.link`, a `closed` frame kept from the open, a reserved queue slot). **Open**: a connection whose tracking `append` fails is served untracked, so `stop` cannot shut it | fixed: `src/bridge/hub.zig:266-283`, `:1519-1532`, `:1553-1640`; open: `src/bridge/server.zig:643` |
@@ -72,7 +72,7 @@ mechanical changes above), **part fixed**, or **open**.
 | F13 | concurrency | should-fix | `supervisor_wake` is set and never waited on (the supervisor polls every 200 ms); `openStream` polls the mirror every 5 ms | open (Phase B 5) | set at `src/bridge/hub.zig:404`, `:1343`, `:1540`; polls at `:1450`, `:1167-1169` |
 | F14 | one way | nice-to-have | three hand-written constant-time compares; own addresses parsed from text on every request | open | `src/bridge/access.zig:363`, `:221-229`; `src/bridge/server.zig:1336`; `src/bridge/xfer.zig:129` |
 | F15 | allocators | nice-to-have | `checkFdExtras` used the page allocator from inside | **fixed in round five**: it takes an allocator | `src/bridge/xfer.zig:1053` |
-| F16 | memory | nice-to-have | a browser connection carries 128 KiB of buffers it never uses | open | `src/rex/ws.zig:301-302`, `:440` |
+| F16 | memory | nice-to-have | a browser connection carries 128 KiB of buffers it never uses | **fixed in Phase B** (2026-11-26): socket buffers only for a connection that owns its socket | `src/rex/ws.zig:301-302`, `:440` |
 | F17 | safety style | nice-to-have | `term` and `vt` are `undefined` behind a `term_made` flag; `r` and `w` default to `undefined` | open | `src/rex/mirror.zig:111-115`; `src/rex/ws.zig:277-278` |
 | F18 | errors | nice-to-have | `anyerror` where an inferred or named set would do (25 functions); Zig error names reach the browser | open | `src/rex/rex1.zig:60`, `:144`, `:155`; `src/bridge/hub.zig:764`, `:820`, `:902`, `:988`; `src/bridge/server.zig:1234` |
 | F19 | build | nice-to-have | ETags and gzip bodies are made at run time on first use; lookup is a scan of 28 entries | open | `src/bridge/server.zig:908-926`; `src/bridge/assets.zig:46-54` |
@@ -276,8 +276,8 @@ Rex, in ReleaseSafe.
    allocator in a test (the target is 0 on the output path once warm, and 1 per keystroke); then the
    step 2 workload again.
 
-   **Done 2026-11-26** for the two paths that run all the time (F2, F3, F23); F4 (replies and redraws
-   copied once more when queued) and F16 (a browser connection's unused 128 KiB) are left for later.
+   **Done 2026-11-26** for the two paths that run all the time (F2, F3, F23); F4 and F16 followed the
+   same day (below).
    What changed:
    - `ws.zig`: `readMessageInto` reads into a buffer the caller keeps (a message is valid until the
      next read; a buffer grown past 256 KiB for one message is let go). The Rex data and control
@@ -313,6 +313,15 @@ Rex, in ReleaseSafe.
    and Linux with the live Rex (revision 19) in ReleaseSafe, all passed; web tests 44/44; and the page in
    desktop Chrome on a ReleaseSafe bridge built from this tree (a burst of output, pastes, an upload, the
    Copy view and a reconnect), with Rex's own capture read afterwards.
+
+   **F4 and F16, 2026-11-26.** A viewer takes a reply it is handed (`pushOwned`; 13 places built a
+   reply, queued a copy and freed the first), and the mirror hands a finished redraw over instead of
+   having each caller copy it (a redraw is up to 16 MiB with all the scrollback). A WebSocket connection
+   has socket buffers only when it owns its socket (the Rex connections); a browser's goes through the
+   HTTP server's and no longer carries 128 KiB besides (`@sizeOf(Conn)` is checked under 4 KiB).
+   Measured with a phase added to the workload, 20 redraws and Copy views of a terminal with 32 MiB of
+   output behind it (macOS, ReleaseSafe): 551 KiB and 46 allocations per redraw and Copy view before,
+   454 KiB and 45 after; the saving grows with the history asked for.
 
 4. **`checkAllAllocationFailures` for each owning type and request path (F24, item 30).** `Hub.open`
    and `close`, `Control.open`, `Data.openTerminal`, `Input.open`, `Mirror` from snapshot to live,

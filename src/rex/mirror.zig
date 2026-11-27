@@ -399,9 +399,9 @@ pub const Mirror = struct {
         const Cap = struct {
             gpa: Allocator,
             out: *?[]u8,
-            fn take(ctx: *anyopaque, bytes: []const u8) !void {
+            fn take(ctx: *anyopaque, bytes: []u8) !void {
                 const c: *@This() = @ptrCast(@alignCast(ctx));
-                c.out.* = try c.gpa.dupe(u8, bytes);
+                c.out.* = bytes;
             }
         };
         var cap: Cap = .{ .gpa = gpa, .out = &out };
@@ -419,14 +419,15 @@ pub const Mirror = struct {
 
     /// Build a redraw and hand it to `deliver` while the mirror is still locked, so nothing the
     /// mirror receives afterwards can be missed or repeated by whoever switches to it (live
-    /// output reaches observers under the same lock). `deliver` must not call into the mirror.
+    /// output reaches observers under the same lock). `deliver` must not call into the mirror. It
+    /// takes the redraw, made with `gpa`: it owns it from then on, whether it succeeds or not.
     /// As `redrawLockedInfo`, without saying how much history it carried.
     pub fn redrawLocked(
         m: *Mirror,
         gpa: Allocator,
         opts: RedrawOptions,
         ctx: *anyopaque,
-        deliver: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
+        deliver: *const fn (ctx: *anyopaque, bytes: []u8) anyerror!void,
     ) !void {
         _ = try m.redrawLockedInfo(gpa, opts, ctx, deliver);
     }
@@ -440,7 +441,7 @@ pub const Mirror = struct {
         gpa: Allocator,
         opts: RedrawOptions,
         ctx: *anyopaque,
-        deliver: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
+        deliver: *const fn (ctx: *anyopaque, bytes: []u8) anyerror!void,
     ) !Redrawn {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
@@ -458,7 +459,8 @@ pub const Mirror = struct {
                 rows /= 2;
                 continue;
             };
-            try deliver(ctx, out.written());
+            // Handed over, not copied (a redraw can be megabytes).
+            try deliver(ctx, try out.toOwnedSlice());
             return .{ .history_rows = rows, .history_cut = rows < wanted };
         }
     }
@@ -1590,10 +1592,10 @@ test "mirror: a redraw stays within its byte budget by carrying less history, do
         const Cap = struct {
             gpa: Allocator,
             bytes: ?[]u8 = null,
-            fn take(ctx: *anyopaque, b: []const u8) !void {
+            fn take(ctx: *anyopaque, b: []u8) !void {
                 const c: *@This() = @ptrCast(@alignCast(ctx));
                 if (c.bytes) |old| c.gpa.free(old);
-                c.bytes = try c.gpa.dupe(u8, b);
+                c.bytes = b; // the redraw is handed over
             }
         };
         var cap: Cap = .{ .gpa = a };

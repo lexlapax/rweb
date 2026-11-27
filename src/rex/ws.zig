@@ -298,8 +298,21 @@ pub const Conn = struct {
     /// Ping and pong frames read so far, for a caller that counts them against its own limits
     /// (`readMessage` answers and drops them).
     control_frames: u64 = 0,
-    read_buf: [64 * 1024]u8 = undefined,
-    write_buf: [64 * 1024]u8 = undefined,
+    /// The socket's buffers, only for a connection that owns its socket (`accept`, `connect`): one an
+    /// HTTP server upgraded (`fromHttp`, every browser) reads and writes through the server's own.
+    bufs: ?*[2][buf_len]u8 = null,
+
+    pub const buf_len = 64 * 1024;
+
+    /// Give a connection that owns its socket its own buffers (freed by `deinit`).
+    fn ownBuffers(c: *Conn, gpa: Allocator) Allocator.Error!void {
+        const b = try gpa.create([2][buf_len]u8);
+        c.bufs = b;
+        c.reader = c.stream.reader(c.io, &b[0]);
+        c.writer = c.stream.writer(c.io, &b[1]);
+        c.r = &c.reader.interface;
+        c.w = &c.writer.interface;
+    }
 
     /// Server side: read the upgrade request from an accepted `stream`, check it and answer 101.
     /// `subprotocol` is echoed if the client asked for it; otherwise the upgrade is refused.
@@ -307,10 +320,8 @@ pub const Conn = struct {
         const c = try gpa.create(Conn);
         errdefer gpa.destroy(c);
         c.* = .{ .io = io, .stream = stream, .reader = undefined, .writer = undefined, .is_client = false };
-        c.reader = stream.reader(io, &c.read_buf);
-        c.writer = stream.writer(io, &c.write_buf);
-        c.r = &c.reader.interface;
-        c.w = &c.writer.interface;
+        try c.ownBuffers(gpa);
+        errdefer gpa.destroy(c.bufs.?);
         const r = c.r;
         const w = c.w;
 
@@ -396,10 +407,8 @@ pub const Conn = struct {
         const c = try gpa.create(Conn);
         errdefer gpa.destroy(c);
         c.* = .{ .io = io, .stream = stream, .reader = undefined, .writer = undefined };
-        c.reader = stream.reader(io, &c.read_buf);
-        c.writer = stream.writer(io, &c.write_buf);
-        c.r = &c.reader.interface;
-        c.w = &c.writer.interface;
+        try c.ownBuffers(gpa);
+        errdefer gpa.destroy(c.bufs.?);
 
         var key_raw: [16]u8 = undefined;
         io.random(&key_raw);
@@ -455,6 +464,7 @@ pub const Conn = struct {
 
     pub fn deinit(c: *Conn, gpa: Allocator) void {
         if (c.owns_stream) c.stream.close(c.io);
+        if (c.bufs) |b| gpa.destroy(b);
         gpa.destroy(c);
     }
 
@@ -938,15 +948,17 @@ test "writeFrame: a task cancelled inside a frame still writes it whole" {
     const client_stream = try connectUnix(io, l.path);
     const server_stream = try l.server.accept(io);
 
+    var cbuf: [2][Conn.buf_len]u8 = undefined;
+    var sbuf: [2][Conn.buf_len]u8 = undefined;
     var client: Conn = .{ .io = io, .stream = client_stream, .reader = undefined, .writer = undefined };
-    client.reader = client_stream.reader(io, &client.read_buf);
-    client.writer = client_stream.writer(io, &client.write_buf);
+    client.reader = client_stream.reader(io, &cbuf[0]);
+    client.writer = client_stream.writer(io, &cbuf[1]);
     client.r = &client.reader.interface;
     client.w = &client.writer.interface;
     defer client_stream.close(io);
     var server: Conn = .{ .io = io, .stream = server_stream, .reader = undefined, .writer = undefined, .is_client = false, .max_message = 8 << 20 };
-    server.reader = server_stream.reader(io, &server.read_buf);
-    server.writer = server_stream.writer(io, &server.write_buf);
+    server.reader = server_stream.reader(io, &sbuf[0]);
+    server.writer = server_stream.writer(io, &sbuf[1]);
     server.r = &server.reader.interface;
     server.w = &server.writer.interface;
     defer server_stream.close(io);
@@ -983,19 +995,21 @@ const TestPair = struct {
     l: TestListener = .{},
     client: Conn = undefined,
     server: Conn = undefined,
+    cbuf: [2][Conn.buf_len]u8 = undefined,
+    sbuf: [2][Conn.buf_len]u8 = undefined,
 
     fn init(p: *TestPair, io: Io) !void {
         try p.l.init(io);
         const cs = try connectUnix(io, p.l.path);
         const ss = try p.l.server.accept(io);
         p.client = .{ .io = io, .stream = cs, .reader = undefined, .writer = undefined, .owns_stream = false };
-        p.client.reader = cs.reader(io, &p.client.read_buf);
-        p.client.writer = cs.writer(io, &p.client.write_buf);
+        p.client.reader = cs.reader(io, &p.cbuf[0]);
+        p.client.writer = cs.writer(io, &p.cbuf[1]);
         p.client.r = &p.client.reader.interface;
         p.client.w = &p.client.writer.interface;
         p.server = .{ .io = io, .stream = ss, .reader = undefined, .writer = undefined, .is_client = false, .owns_stream = false, .max_message = 8 << 20 };
-        p.server.reader = ss.reader(io, &p.server.read_buf);
-        p.server.writer = ss.writer(io, &p.server.write_buf);
+        p.server.reader = ss.reader(io, &p.sbuf[0]);
+        p.server.writer = ss.writer(io, &p.sbuf[1]);
         p.server.r = &p.server.reader.interface;
         p.server.w = &p.server.writer.interface;
     }
@@ -1087,4 +1101,16 @@ test "live: control hello against a real Rex (needs REX_SOCKET)" {
     defer gpa.free(m.data);
     try std.testing.expectEqual(Opcode.text, m.opcode);
     try std.testing.expect(std.mem.indexOf(u8, m.data, "welcome") != null);
+}
+
+test "a connection carries no socket buffers unless it owns its socket" {
+    // Every browser connection is made by `fromHttp` and reads and writes through the HTTP server's
+    // buffers: it should not carry 128 KiB of its own besides.
+    try std.testing.expect(@sizeOf(Conn) < 4096);
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+    var r: std.Io.Reader = .fixed("");
+    const c = try Conn.fromHttp(std.testing.allocator, std.testing.io, undefined, &r, &sink.writer, 1 << 16);
+    defer c.deinit(std.testing.allocator);
+    try std.testing.expect(c.bufs == null);
 }

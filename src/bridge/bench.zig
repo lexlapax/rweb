@@ -80,6 +80,11 @@ const Browser = struct {
             const m = try b.conn.readMessage(gpa);
             defer gpa.free(m.data);
             if (m.opcode == .close) return error.Closed;
+            // A refusal is an answer too: do not wait for what will not come.
+            if (m.opcode == .text and std.mem.indexOf(u8, m.data, "\"t\":\"error\"") != null) {
+                std.debug.print("bench: refused: {s}\n", .{m.data});
+                return error.Refused;
+            }
             if (m.opcode == .binary) got += m.data.len;
             if (m.opcode == opcode and std.mem.indexOf(u8, m.data, needle) != null) return got;
         }
@@ -198,6 +203,29 @@ test "bench: output, viewers and keystrokes through the bridge (only with RWEB_B
         counting.printSites("output to 3 viewers, per MiB", 12, output_mib);
         counting.resetSites();
         counting.profile.store(true, .monotonic);
+    }
+
+    // Redraws and Copy views of a terminal with a long scrollback: what one costs the bridge.
+    {
+        const rounds = 20;
+        const rc0 = counting.snap();
+        const rt0 = nowNs(io);
+        for (0..rounds) |_| {
+            // Two of the hub's "work" requests per round, at most 8 a second: one round every 300 ms.
+            const r0 = nowNs(io);
+            defer {
+                const spent = nowNs(io) - r0;
+                if (spent < 300_000_000) io.sleep(.fromNanoseconds(@intCast(300_000_000 - spent)), .awake) catch {};
+            }
+            try vs[0].send("{{\"t\":\"redraw\"}}", .{});
+            _ = try vs[0].until(.text, "\"t\":\"opened\"");
+            try vs[0].send("{{\"t\":\"text\"}}", .{});
+            _ = try vs[0].until(.text, "\"t\":\"text\"");
+        }
+        const rc1 = counting.snap();
+        std.debug.print("bench {s}: {d} redraws and Copy views: {d} ms wall; bridge: {d} allocations, {d} KiB per redraw and Copy view\n", .{
+            which, rounds, @divTrunc(nowNs(io) - rt0, 1_000_000), (rc1[0] - rc0[0]) / rounds, (rc1[1] - rc0[1]) / rounds / 1024,
+        });
     }
 
     // Keystrokes: each typed word, timed until its echo reaches the viewer.
