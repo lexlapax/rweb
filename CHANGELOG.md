@@ -6,6 +6,10 @@ the Rex API revisions it speaks.
 
 ## Unreleased
 
+- `rweb doctor [tailscale|ssh] [options]` checks a setup and says what to fix: Rex (running, answering,
+  a revision rweb speaks), the secret, token and upload folder (as at startup), whether a bridge is
+  listening, and for Tailscale its sign-in, HTTPS certificates and a Serve entry that forwards to this
+  bridge with Funnel off. It changes nothing, never prints a secret, and exits 1 when a check fails.
 - When the page reports a failure it says what happened in words ("Rex did not answer in time", "the
   terminal's output could not be reached"), not an internal error name; the name goes to rweb's log.
 - Building: the page's files are compressed and given their validators at build time, not on the first

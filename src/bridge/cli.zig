@@ -13,6 +13,7 @@ pub const short_usage =
     \\  rweb ssh          through an SSH tunnel from your laptop
     \\
     \\Each sets everything up and prints the one command left to run.
+    \\rweb doctor checks a setup and says what to fix.
     \\rweb --help lists every option.
     \\
 ;
@@ -29,6 +30,10 @@ pub const usage =
     \\      For an SSH tunnel: a unix socket only your own user can connect to
     \\      (Linux $XDG_RUNTIME_DIR/rweb/ssh.sock, macOS <config>/run/ssh.sock) and a
     \\      token in <config>/token. Prints the `ssh` line for your laptop.
+    \\  rweb doctor [tailscale|ssh] [options]
+    \\      Checks Rex, Tailscale and Serve, the files and the bridge as that command
+    \\      (default tailscale) with those options would use them, and says what to fix.
+    \\      Changes nothing. Exits 1 when a check fails.
     \\  rweb --version
     \\
     \\  <config> is $XDG_CONFIG_HOME/rweb, else ~/.config/rweb. A missing token or secret
@@ -228,9 +233,9 @@ pub fn maxUnixPath(os: std.Target.Os.Tag) usize {
     return if (os.isDarwin()) 104 else 108;
 }
 
-/// What the command line asks for: to run with these options, or to print a help text or the version
-/// and exit.
-pub const Action = union(enum) { run: Parsed, help: Help };
+/// What the command line asks for: to run with these options, to check a setup with them (`rweb
+/// doctor`), or to print a help text or the version and exit.
+pub const Action = union(enum) { run: Parsed, doctor: Parsed, help: Help };
 
 pub const Help = enum {
     /// No arguments at all: the short help.
@@ -251,13 +256,16 @@ pub fn parse(arena: Allocator, args: []const []const u8) Error!Action {
 /// options did not give. Slices in the result point into `args`, except the lists and the paths a
 /// layout makes, which are allocated from `arena`. On failure `diag.arg` names the argument.
 pub fn parseEnv(arena: Allocator, args: []const []const u8, env: layout.Env, diag: *Diag) Error!Action {
-    const p = parseOptions(arena, args, env, diag) catch |e| {
+    // `rweb doctor [tailscale|ssh] [options]`: the rest is parsed as the command it checks would be.
+    const doctor = args.len > 0 and std.mem.eql(u8, args[0], "doctor");
+    const rest = if (!doctor) args else if (args.len > 1) args[1..] else &[_][]const u8{"tailscale"};
+    const p = parseOptions(arena, rest, env, diag) catch |e| {
         if (e == error.ShortHelp) return .{ .help = .short };
         if (e == error.FullHelp) return .{ .help = .full };
         if (e == error.Version) return .{ .help = .version };
         return @errorCast(e);
     };
-    return .{ .run = p };
+    return if (doctor) .{ .doctor = p } else .{ .run = p };
 }
 
 /// A help option, met where it stands among the others, ends the parse at once (an error is the
@@ -451,7 +459,7 @@ fn helpOf(args: []const []const u8) Error!?Help {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     return switch (try parse(arena.allocator(), args)) {
-        .run => null,
+        .run, .doctor => null,
         .help => |h| h,
     };
 }
@@ -461,7 +469,7 @@ fn parseT(args: []const []const u8) (Error || error{TestExpectedRun})!Parsed {
     defer arena.deinit();
     const p = switch (try parse(arena.allocator(), args)) {
         .run => |r| r,
-        .help => return error.TestExpectedRun,
+        .help, .doctor => return error.TestExpectedRun,
     };
     // Lists live in the arena: copy what the tests look at out of it.
     return .{
@@ -602,8 +610,24 @@ fn parseL(arena: Allocator, args: []const []const u8, env: layout.Env) (Error ||
     var d: Diag = .{};
     return switch (try parseEnv(arena, args, env, &d)) {
         .run => |r| r,
-        .help => error.TestExpectedRun,
+        .help, .doctor => error.TestExpectedRun,
     };
+}
+
+test "doctor checks what the command after it would use, `rweb tailscale` when none is named" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d: Diag = .{};
+    const plain = (try parseEnv(a, &.{"doctor"}, linux_env, &d)).doctor;
+    try testing.expectEqual(Command.tailscale, plain.command);
+    try testing.expectEqualStrings("/run/user/1000/rweb/bridge.sock", plain.listen.unix);
+    const ssh = (try parseEnv(a, &.{ "doctor", "ssh", "--config-dir", "/srv/rweb" }, linux_env, &d)).doctor;
+    try testing.expectEqual(Command.ssh, ssh.command);
+    try testing.expectEqualStrings("/srv/rweb/token", ssh.token_file.?);
+    // Its options are checked as the command's are.
+    try testing.expectError(error.UnknownOption, parseEnv(a, &.{ "doctor", "ssh", "--nope" }, linux_env, &d));
+    try testing.expectEqual(Help.version, (try parseEnv(a, &.{ "doctor", "--version" }, linux_env, &d)).help);
 }
 
 const linux_env: layout.Env = .{ .os = .linux, .home = "/home/me", .xdg_runtime_dir = "/run/user/1000", .uid = 1000 };

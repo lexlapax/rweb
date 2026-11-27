@@ -78,7 +78,7 @@ pub fn ensureSecretFile(arena: Allocator, io: Io, path: []const u8, problem: *xf
     const dir = std.fs.path.dirname(path) orelse return error.BadPath;
     const base = std.fs.path.basename(path);
     if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..")) return error.BadPath;
-    const up = try xfer.openUploadDir(arena, io, dir, problem);
+    const up = try xfer.openUploadDir(arena, io, dir, true, problem);
     defer up.dir.close(io);
     problem.setPath(path);
     var text: [secret_len + 1]u8 = undefined;

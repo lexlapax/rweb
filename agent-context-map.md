@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-27 (0.2.0 released and running on all four machines; Phase B done, its last five findings fixed after the release).
+Last updated: 2026-11-27 (0.2.0 released; Phase B done; Phase 6: `rweb doctor` done, rebuildable browser code next).
 Read first; load linked
 context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
@@ -79,8 +79,15 @@ a 4-second `echo` loop, upright again after it.
   no private names); setup-repo pin pushed and applied: all four machines run `rweb-0.2.0-010e057157c5`
   behind unchanged Serve entries, 0.1.1 kept for rollback. **Phase B done (2026-11-27):** F14, F17, F18, F19,
   F22 fixed (the audit's "five leftovers" note; checks macOS live 370/5 skip, Debug 362/13, linux-box live
-  453/6, web 45/45); in CHANGELOG "Unreleased". **Next:** Phase 6's open steps (review round 7 on the 0.2.0
-  changes recommended first, then `doctor`, channels, signed checksums; docs/PLAN.md).
+  453/6, web 45/45); in CHANGELOG "Unreleased". **Phase 6, the owner's order (2026-11-27): `doctor`,
+  rebuildable browser code, signed checksums, channels; then the owner's review round 7, then a release.**
+  `rweb doctor [tailscale|ssh] [options]` done (`src/bridge/doctor.zig`): Rex, secret/token/upload files
+  (checked without being made: `openUploadDir` and the socket folder take `create`), the bridge (Linux:
+  `/proc/net/unix`, so a running bridge logs no refused peer; else a connect), Tailscale sign-in, HTTPS
+  certificates, the Serve entry (the secret compared in memory, never printed) and Funnel. Checked on
+  laptop-mac (all pass; the ssh layout and a wrong Rex socket fail with fixes) and linux-box (all pass,
+  no log line); macOS live 458/5 skip, linux-box live suite passed. **Next:** rebuildable browser code
+  (PLAN Phase 6 step 5).
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

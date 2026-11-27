@@ -306,7 +306,8 @@ Where the steps below stand (2026-11-26):
 
 - Step 1: the command line was generalised in round five (`rweb tailscale`, `rweb ssh`: no owner flags,
   secrets and folders made, plain refusals with a fix) and the user guide covers Serve on Linux and
-  macOS. No `doctor` command yet.
+  macOS. `rweb doctor` since 2026-11-27 (after 0.2.0): checks Rex, the files, the bridge, Tailscale and
+  Serve as the command it names would use them, and says what to fix.
 - Step 2: rounds five and six reviewed rweb for other people's machines (shared hosts, groups, disks,
   procedures). Done for now; repeat when step 1 or 3 changes much.
 - Step 3: no channel yet (no Homebrew tap, Linux unit or AUR package).

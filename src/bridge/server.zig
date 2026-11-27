@@ -88,7 +88,7 @@ pub fn bind(gpa: Allocator, io: Io, listen: Listen, problem: ?*xfer.Problem) !Bo
             // folders were made.
             if (!unixPathFits(path)) return error.NameTooLong;
             var own_problem: xfer.Problem = .{};
-            const dir = try openSocketDir(gpa, io, path, problem orelse &own_problem);
+            const dir = try openSocketDir(gpa, io, path, true, problem orelse &own_problem);
             errdefer (Io.Dir{ .handle = dir.fd }).close(io);
             try clearStaleSocket(io, dir.fd, dir.name, path);
             var b: Bound = .{ .listen = listen, .listener = undefined, .sock_dir = dir.fd, .sock_name = dir.name };
@@ -1397,6 +1397,73 @@ fn clearStaleSocket(io: Io, dir_fd: std.posix.fd_t, name: []const u8, path: []co
     try (Io.Dir{ .handle = dir_fd }).deleteFile(io, name);
 }
 
+/// What `rweb doctor` finds where a unix listener would be, making nothing: the folders on the way
+/// and the socket's own are checked as `bind` checks them; then whether a socket is there and whether
+/// anything answers on it.
+pub const SocketState = enum { missing_folder, no_socket, not_a_socket, stale, listening };
+
+pub fn checkSocket(gpa: Allocator, io: Io, path: []const u8, problem: *xfer.Problem) !SocketState {
+    const dir = openSocketDir(gpa, io, path, false, problem) catch |e| {
+        if (e == error.FileNotFound) return .missing_folder;
+        return e;
+    };
+    defer (Io.Dir{ .handle = dir.fd }).close(io);
+    const n = xfer.statAt(dir.fd, dir.name) catch |e| {
+        if (e == error.FileNotFound) return .no_socket;
+        return e;
+    };
+    if (!xfer.isSocket(n)) return .not_a_socket;
+    // Linux: the kernel's table of unix sockets says whether one listens at the path, without a
+    // connection a running bridge would refuse (and log). Elsewhere, connecting is the way to know.
+    if (builtin.os.tag == .linux) {
+        // Read to the end: a /proc file says its size is 0.
+        var arena_state = std.heap.ArenaAllocator.init(gpa);
+        defer arena_state.deinit();
+        const table = xfer.readSmallFile(arena_state.allocator(), io, "/proc/net/unix", 16 << 20) catch |e| {
+            if (e == error.OutOfMemory) return error.OutOfMemory;
+            return .stale;
+        } orelse return .stale;
+        return if (unixListening(table, path)) .listening else .stale;
+    }
+    const addr = try Io.net.UnixAddress.init(path);
+    const conn = addr.connect(io) catch return .stale;
+    conn.close(io);
+    return .listening;
+}
+
+/// Whether `/proc/net/unix` (`table`) lists a listening socket bound at `path`: a line whose flags
+/// field has `__SO_ACCEPTCON` (0x10000) and whose last field is the path.
+pub fn unixListening(table: []const u8, path: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, table, '\n');
+    _ = lines.next(); // the header
+    while (lines.next()) |line| {
+        var f = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = f.next() orelse continue; // Num
+        _ = f.next() orelse continue; // RefCount
+        _ = f.next() orelse continue; // Protocol
+        const flags = std.fmt.parseInt(u32, f.next() orelse continue, 16) catch continue;
+        _ = f.next() orelse continue; // Type
+        _ = f.next() orelse continue; // St
+        _ = f.next() orelse continue; // Inode
+        const p = f.rest();
+        if (flags & 0x10000 != 0 and std.mem.eql(u8, p, path)) return true;
+    }
+    return false;
+}
+
+test "doctor reads the kernel's unix socket table for a listener at a path" {
+    const table =
+        \\Num       RefCount Protocol Flags    Type St Inode Path
+        \\0000000048fb3686: 00000002 00000000 00010000 0001 01 670035 /run/user/1000/rweb/bridge.sock
+        \\0000000048fb3687: 00000003 00000000 00000000 0001 03 670036 /run/user/1000/rweb/ssh.sock
+        \\0000000048fb3688: 00000002 00000000 00010000 0001 01 670037
+    ;
+    try std.testing.expect(unixListening(table, "/run/user/1000/rweb/bridge.sock"));
+    try std.testing.expect(!unixListening(table, "/run/user/1000/rweb/ssh.sock")); // connected, not listening
+    try std.testing.expect(!unixListening(table, "/run/user/1000/rweb/other.sock"));
+    try std.testing.expect(!unixListening("", "/x"));
+}
+
 // ---- OS bits ----
 
 /// The unix socket's folder, opened and checked: every folder above it passes `xfer.checkAncestor`
@@ -1406,7 +1473,7 @@ fn clearStaleSocket(io: Io, dir_fd: std.posix.fd_t, name: []const u8, path: []co
 /// folder, this one included, must also have no ACL that lets another user write and be on a
 /// filesystem whose owners mean what they say. The caller keeps the descriptor; `name` is the socket's
 /// name in it (a slice of `socket_path`).
-fn openSocketDir(gpa: Allocator, io: Io, socket_path: []const u8, problem: *xfer.Problem) !struct { fd: std.posix.fd_t, name: []const u8 } {
+fn openSocketDir(gpa: Allocator, io: Io, socket_path: []const u8, create: bool, problem: *xfer.Problem) !struct { fd: std.posix.fd_t, name: []const u8 } {
     problem.setPath(socket_path);
     if (socket_path.len == 0 or socket_path[0] != '/') return error.SocketPathNotAbsolute;
     const name = std.fs.path.basename(socket_path);
@@ -1415,10 +1482,10 @@ fn openSocketDir(gpa: Allocator, io: Io, socket_path: []const u8, problem: *xfer
     const above = std.fs.path.dirname(dir) orelse return error.SocketDirNotOurs; // the socket right in `/`
     const dir_name = std.fs.path.basename(dir);
     if (std.mem.eql(u8, dir_name, ".") or std.mem.eql(u8, dir_name, "..")) return error.BadSocketPath;
-    const parent = try xfer.openChain(gpa, io, above, true, problem);
+    const parent = try xfer.openChain(gpa, io, above, create, problem);
     defer (Io.Dir{ .handle = parent }).close(io);
     problem.setPath(dir);
-    const fd = try xfer.openFolderAt(io, parent, dir_name, true);
+    const fd = try xfer.openFolderAt(io, parent, dir_name, create);
     errdefer (Io.Dir{ .handle = fd }).close(io);
     // Ours and closed to others, by mode and by ACL, on a filesystem whose owners mean what they say.
     xfer.checkPrivateDirFdDetailed(gpa, io, fd, problem) catch |e| return switch (e) {
@@ -2478,7 +2545,7 @@ fn uploadDir(buf: []u8) !UploadDir {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var problem: xfer.Problem = .{};
-    const up = try xfer.openUploadDir(arena.allocator(), testing.io, path, &problem);
+    const up = try xfer.openUploadDir(arena.allocator(), testing.io, path, true, &problem);
     return .{ .path = path, .dir = up.dir, .parts = up.parts };
 }
 

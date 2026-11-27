@@ -678,7 +678,7 @@ pub fn checkMountOrigin(mi: ?MountInfo, utab: ?[]const u8) CheckError!void {
 const fdMount = sys.fdMount;
 
 /// A small file's contents, or null when it does not exist. More than `limit` bytes is an error.
-fn readSmallFile(arena: Allocator, io: Io, path: []const u8, limit: usize) error{ ReadFailed, TooLong, OutOfMemory }!?[]u8 {
+pub fn readSmallFile(arena: Allocator, io: Io, path: []const u8, limit: usize) error{ ReadFailed, TooLong, OutOfMemory }!?[]u8 {
     const fd = posix.openat(posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true, .NOCTTY = true }, 0) catch |e| switch (e) {
         error.FileNotFound => return null,
         else => return error.ReadFailed,
@@ -1289,18 +1289,20 @@ fn sweepPartEntry(io: Io, parts: Io.Dir, name: []const u8, kind: Io.File.Kind) b
     return true;
 }
 
-pub fn openUploadDir(arena: Allocator, io: Io, path: []const u8, problem: *Problem) OpenError!UploadDir {
+/// The upload folder at `path` and its folder for unfinished uploads, checked; made when missing if
+/// `create` (`rweb doctor` checks without making them).
+pub fn openUploadDir(arena: Allocator, io: Io, path: []const u8, create: bool, problem: *Problem) OpenError!UploadDir {
     problem.setPath(path);
     const trimmed = std.mem.trimEnd(u8, path, "/");
     if (trimmed.len == 0 or trimmed[0] != '/') return error.BadPath;
     var w: Walker = undefined;
     try w.init(arena, io, trimmed, problem);
     defer w.deinit();
-    const base = try w.walk(.name, true);
+    const base = try w.walk(.name, create);
     const real_path = try std.fs.path.join(arena, &.{ w.canonical(), base });
     problem.setPath(path);
     problem.look(.private_folder);
-    const fd = openFolderAt(io, w.fd, base, true) catch |e| {
+    const fd = openFolderAt(io, w.fd, base, create) catch |e| {
         if (e == error.SymLink) noteLink(problem, w.fd, base);
         return e;
     };
@@ -1311,7 +1313,7 @@ pub fn openUploadDir(arena: Allocator, io: Io, path: []const u8, problem: *Probl
     const parts_path = try std.fs.path.join(arena, &.{ real_path, upload_parts_dir });
     problem.setPath(parts_path);
     problem.look(.private_folder);
-    const parts_fd = openFolderAt(io, fd, upload_parts_dir, true) catch |e| {
+    const parts_fd = openFolderAt(io, fd, upload_parts_dir, create) catch |e| {
         if (e == error.SymLink) noteLink(problem, fd, upload_parts_dir);
         return e;
     };
@@ -1974,7 +1976,7 @@ test "a folder its group can write to passes only when the group is a safe one" 
     test_group_safe = true;
     try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, file, 4096, &p));
     try testing.expectEqualStrings(prog, try checkedProgram(arena, io, prog, &p));
-    const up = try openUploadDir(arena, io, try arena.print("{s}/grp/uploads", .{root}), &p);
+    const up = try openUploadDir(arena, io, try arena.print("{s}/grp/uploads", .{root}), true, &p);
     up.dir.close(io);
     // Any other group: refused, and the folder named.
     test_group_safe = false;
@@ -2028,30 +2030,30 @@ test "the upload folder is made private if missing, and must be a private folder
     var p: Problem = .{};
     // Missing: made 0700, and opened.
     const fresh = try arena.print("{s}/up/loads/", .{root});
-    const up = try openUploadDir(arena, io, fresh, &p);
+    const up = try openUploadDir(arena, io, fresh, true, &p);
     defer up.dir.close(io);
     const st = try up.dir.stat(io);
     try testing.expectEqual(@as(u32, 0o700), @backingInt(st.permissions) & 0o777);
     try testing.expectEqualStrings(try arena.print("{s}/up/loads", .{root}), up.real_path);
     // Through a linked folder: the path to paste is the real one, not the link's.
     try tmp.dir.symLink(io, "up", "via", .{});
-    const via = try openUploadDir(arena, io, try arena.print("{s}/via/more", .{root}), &p);
+    const via = try openUploadDir(arena, io, try arena.print("{s}/via/more", .{root}), true, &p);
     defer via.dir.close(io);
     try testing.expectEqualStrings(try arena.print("{s}/up/more", .{root}), via.real_path);
     // Under a folder others can write to: refused, and nothing is made there.
     try tmp.dir.createDirPath(io, "open");
     try chmodPath(arena, try arena.print("{s}/open", .{root}), 0o777);
-    try testing.expectError(error.FolderWritableByOthers, openUploadDir(arena, io, try arena.print("{s}/open/new/uploads", .{root}), &p));
+    try testing.expectError(error.FolderWritableByOthers, openUploadDir(arena, io, try arena.print("{s}/open/new/uploads", .{root}), true, &p));
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "open/new", .{}));
-    try testing.expectError(error.BadPath, openUploadDir(arena, io, "relative/uploads", &p));
+    try testing.expectError(error.BadPath, openUploadDir(arena, io, "relative/uploads", true, &p));
     // Open to others, a link to a good folder, a file.
     try tmp.dir.createDirPath(io, "wide");
     try chmodPath(arena, try arena.print("{s}/wide", .{root}), 0o755);
-    try testing.expectError(error.TooOpen, openUploadDir(arena, io, try arena.print("{s}/wide", .{root}), &p));
+    try testing.expectError(error.TooOpen, openUploadDir(arena, io, try arena.print("{s}/wide", .{root}), true, &p));
     try tmp.dir.symLink(io, "up/loads", "linked", .{});
-    try testing.expectError(error.SymLink, openUploadDir(arena, io, try arena.print("{s}/linked", .{root}), &p));
+    try testing.expectError(error.SymLink, openUploadDir(arena, io, try arena.print("{s}/linked", .{root}), true, &p));
     try writeFileMode(io, tmp.dir, "file", 0o600, "x");
-    try testing.expectError(error.NotADirectory, openUploadDir(arena, io, try arena.print("{s}/file", .{root}), &p));
+    try testing.expectError(error.NotADirectory, openUploadDir(arena, io, try arena.print("{s}/file", .{root}), true, &p));
 }
 
 test "a token that has expired is nothing, and is dropped" {
@@ -2265,11 +2267,11 @@ test "macOS: an ACL entry that lets another user change a folder or program is r
     // An entry only for new folders: this folder passes; a folder rweb makes in it starts without
     // the entry, one made otherwise inherits it and is refused as an upload folder.
     try runTool(arena, io, &.{ "/bin/chmod", "+a", "user:nobody allow add_file,directory_inherit,only_inherit", dir });
-    const up = try openUploadDir(arena, io, try arena.print("{s}/acl/made", .{root}), &p);
+    const up = try openUploadDir(arena, io, try arena.print("{s}/acl/made", .{root}), true, &p);
     up.dir.close(io);
     try tmp.dir.createDirPath(io, "acl/other");
     try chmodPath(arena, try arena.print("{s}/acl/other", .{root}), 0o700);
-    try testing.expectError(error.AclGivesOthersWrite, openUploadDir(arena, io, try arena.print("{s}/acl/other", .{root}), &p));
+    try testing.expectError(error.AclGivesOthersWrite, openUploadDir(arena, io, try arena.print("{s}/acl/other", .{root}), true, &p));
 }
 
 test "Linux: a named ACL entry that lets another user write to a folder is refused" {
@@ -2331,7 +2333,7 @@ test "links on the given path are followed only from checked folders, and the wa
     // A program through links (its own name one too) is run by the path with no link on it.
     try testing.expectEqualStrings(try arena.print("{s}/good/prog", .{root}), try checkedProgram(arena, io, try arena.print("{s}/sub/up/lnprog", .{root}), &p));
     // The upload folder's path to paste is the resolved one.
-    const up = try openUploadDir(arena, io, try arena.print("{s}/sub/up/new", .{root}), &p);
+    const up = try openUploadDir(arena, io, try arena.print("{s}/sub/up/new", .{root}), true, &p);
     up.dir.close(io);
     try testing.expectEqualStrings(try arena.print("{s}/good/new", .{root}), up.real_path);
     // A link in a folder others can write to: that folder is refused before the link is read.
@@ -2365,7 +2367,7 @@ test "links on the given path are followed only from checked folders, and the wa
     try testing.expectError(error.SymLink, readPrivateFile(arena, io, try arena.print("{s}/fl", .{root}), 4096, &p));
     try testing.expectEqualStrings("good/ok", p.detail());
     // So is a link as the upload folder itself.
-    try testing.expectError(error.SymLink, openUploadDir(arena, io, try arena.print("{s}/rel", .{root}), &p));
+    try testing.expectError(error.SymLink, openUploadDir(arena, io, try arena.print("{s}/rel", .{root}), true, &p));
     try testing.expectEqualStrings("good", p.detail());
     // A folder through a link, for the socket's chain.
     const fd = try openChain(arena, io, try arena.print("{s}/sub/up", .{root}), false, &p);
@@ -2384,14 +2386,14 @@ test "macOS: /tmp and /var, links root owns in /, lead to their real folders" {
     defer Io.Dir.cwd().deleteTree(io, arena.print("/private/tmp/{s}", .{name}) catch unreachable) catch {};
     defer Io.Dir.cwd().deleteTree(io, arena.print("/private/var/tmp/{s}", .{name}) catch unreachable) catch {};
     var p: Problem = .{};
-    const up = try openUploadDir(arena, io, try arena.print("/tmp/{s}/up", .{name}), &p);
+    const up = try openUploadDir(arena, io, try arena.print("/tmp/{s}/up", .{name}), true, &p);
     try writeFileMode(io, up.dir, "s", 0o600, "secret");
     up.dir.close(io);
     try testing.expectEqualStrings(try arena.print("/private/tmp/{s}/up", .{name}), up.real_path);
     try testing.expectEqualStrings("secret", try readPrivateFile(arena, io, try arena.print("/tmp/{s}/up/s", .{name}), 4096, &p));
     const fd = try openChain(arena, io, "/var/tmp", false, &p);
     closeFd(io, fd);
-    const vup = try openUploadDir(arena, io, try arena.print("/var/tmp/{s}", .{name}), &p);
+    const vup = try openUploadDir(arena, io, try arena.print("/var/tmp/{s}", .{name}), true, &p);
     vup.dir.close(io);
     try testing.expectEqualStrings(try arena.print("/private/var/tmp/{s}", .{name}), vup.real_path);
 }
@@ -2869,7 +2871,7 @@ test "openUploadDir makes the folder for unfinished uploads private, and refuses
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", arena);
     const up_path = try std.fs.path.join(arena, &.{ root, "up" });
     var problem: Problem = .{};
-    const up = try openUploadDir(arena, testing.io, up_path, &problem);
+    const up = try openUploadDir(arena, testing.io, up_path, true, &problem);
     const om = try fdOwnerMode(up.parts.handle);
     try testing.expectEqual(@as(u32, 0o700), om.mode & 0o777);
     up.parts.close(testing.io);
@@ -2878,7 +2880,7 @@ test "openUploadDir makes the folder for unfinished uploads private, and refuses
     try tmp.dir.createDir(testing.io, "elsewhere", .default_dir);
     try up.dir.symLink(testing.io, "../elsewhere", upload_parts_dir, .{});
     up.dir.close(testing.io);
-    try testing.expectError(error.SymLink, openUploadDir(arena, testing.io, up_path, &problem));
+    try testing.expectError(error.SymLink, openUploadDir(arena, testing.io, up_path, true, &problem));
 }
 
 fn quoteAndFree(a: Allocator, s: []const u8) !void {

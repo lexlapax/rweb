@@ -15,6 +15,7 @@ pub const cli = @import("cli.zig");
 pub const layout = @import("layout.zig");
 pub const proc = @import("proc.zig");
 pub const sys = @import("sys.zig");
+pub const doctor = @import("doctor.zig");
 const build_options = @import("build_options");
 
 comptime {
@@ -272,6 +273,10 @@ fn commandLine(init: std.process.Init, arena: std.mem.Allocator) !struct { argv:
     };
     const parsed = switch (action) {
         .run => |p| p,
+        .doctor => |p| {
+            const passed = try doctor.run(init.gpa, arena, io, p, env_map);
+            std.process.exit(if (passed) 0 else 1);
+        },
         .help => |h| {
             const text = switch (h) {
                 .short => cli.short_usage,
@@ -329,7 +334,7 @@ fn fileTransfer(arena: std.mem.Allocator, io: Io, parsed: cli.Parsed) xfer.Confi
             // Opened once and kept open for the life of the process: uploads go into this folder,
             // whatever is later put at its path.
             var up_problem: xfer.Problem = .{};
-            const up = xfer.openUploadDir(arena, io, dir, &up_problem) catch |e| refuseFile("the upload folder", dir, e, &up_problem, .{ .item_option = "--upload-dir" });
+            const up = xfer.openUploadDir(arena, io, dir, true, &up_problem) catch |e| refuseFile("the upload folder", dir, e, &up_problem, .{ .item_option = "--upload-dir" });
             transfer.upload_dir_handle = up.dir;
             transfer.upload_parts_handle = up.parts;
             // Only what no running rweb holds: another rweb may be using the same folder.
@@ -567,7 +572,7 @@ fn socketPathFix(args: []const []const u8) []const u8 {
 }
 
 /// The name of the account this process runs as, from the system's user database (in `buf`).
-fn accountName(buf: []u8) ?[]const u8 {
+pub fn accountName(buf: []u8) ?[]const u8 {
     return sys.userName(sys.uid(), buf);
 }
 
@@ -700,7 +705,7 @@ pub fn connectRex(gpa: std.mem.Allocator, io: Io, finder: anytype, hub_cfg: hub.
 }
 
 /// Why Rex could not be reached, in words (`where` is `at PATH` or `in A, B`), in `buf`.
-fn rexProblem(buf: []u8, why: anyerror, where: []const u8) []const u8 {
+pub fn rexProblem(buf: []u8, why: anyerror, where: []const u8) []const u8 {
     const text = switch (why) {
         error.RexSocketNotFound => std.fmt.bufPrint(buf, "Rex is not running: no socket {s} (pass --rex-socket PATH if it is elsewhere)", .{where}),
         error.FileNotFound, error.ConnectionRefused => std.fmt.bufPrint(buf, "Rex is not running: nothing answers {s}", .{where}),
@@ -769,12 +774,12 @@ pub fn chooseTailscale(given: ?[]const u8, candidates: []const []const u8, ctx: 
     return .none;
 }
 
-const SystemProbe = struct { arena: std.mem.Allocator, io: Io };
+pub const SystemProbe = struct { arena: std.mem.Allocator, io: Io };
 
 /// The program at `path`, checked by `xfer.checkedProgram`: `ok` holds the exact path to run. A
 /// refusal carries the whole Problem by value (its path is kept as an offset into its own buffer, so
 /// the copy still names where the check failed).
-fn systemProbe(ctx: SystemProbe, path: []const u8) Probe {
+pub fn systemProbe(ctx: SystemProbe, path: []const u8) Probe {
     var problem: xfer.Problem = .{};
     const real = xfer.checkedProgram(ctx.arena, ctx.io, path, &problem) catch |e| {
         if (e == error.FileNotFound) return .missing;
@@ -811,7 +816,7 @@ fn tailscaleProgram(arena: std.mem.Allocator, io: Io, given: ?[]const u8) []cons
 /// print (`proc.run`): a `tailscale` that hangs, babbles, or closes its output and stays must not stall
 /// the own-address refresh or grow memory. Past the deadline it is killed; that is a failed call like
 /// any other.
-fn runTailscale(arena: std.mem.Allocator, io: Io, argv: []const []const u8) !proc.Result {
+pub fn runTailscale(arena: std.mem.Allocator, io: Io, argv: []const []const u8) !proc.Result {
     return proc.run(arena, io, .{ .argv = argv, .timeout_ms = tailscale_timeout_ms, .output_max = tailscale_output_max });
 }
 const tailscale_output_max = 1 << 20;
@@ -826,7 +831,7 @@ fn tailscaleOwner(arena: std.mem.Allocator, io: Io, ts: []const u8) ![]const u8 
 
 /// The owner's login from `tailscale status --json`. A tagged node has no user login (its "user" is a
 /// placeholder for the tag that no person signs in as), so it is refused: the owner must be named.
-fn ownerFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u8 {
+pub fn ownerFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u8 {
     const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, status_json, .{});
     if (v != .object) return error.NoSelf;
     const self_v = v.object.get("Self") orelse return error.NoSelf;
@@ -854,7 +859,7 @@ fn tailscaleDnsName(arena: std.mem.Allocator, io: Io, ts: []const u8) ![]const u
 }
 
 /// This node's MagicDNS name from `tailscale status --json`; any other shape is `NoSelf`.
-fn dnsNameFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u8 {
+pub fn dnsNameFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const u8 {
     const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, status_json, .{});
     if (v != .object) return error.NoSelf;
     const self_v = v.object.get("Self") orelse return error.NoSelf;
@@ -869,7 +874,7 @@ fn dnsNameFromStatus(arena: std.mem.Allocator, status_json: []const u8) ![]const
 /// The contents of a secret file, trimmed, read through `xfer.readPrivateFile` (a regular file of
 /// ours, closed to group and others, in folders only we or root can change, never through a link),
 /// and long enough; with `path_safe` it may hold only characters that are safe in a URL path.
-fn readSecretFile(arena: std.mem.Allocator, io: Io, path: []const u8, min_len: usize, path_safe: bool, problem: *xfer.Problem) (xfer.OpenError || error{ TooShort, BadCharacters })![]const u8 {
+pub fn readSecretFile(arena: std.mem.Allocator, io: Io, path: []const u8, min_len: usize, path_safe: bool, problem: *xfer.Problem) (xfer.OpenError || error{ TooShort, BadCharacters })![]const u8 {
     const raw = try xfer.readPrivateFile(arena, io, path, 4096, problem);
     const text = std.mem.trim(u8, raw, " \t\r\n");
     if (text.len < min_len) return error.TooShort;
@@ -1291,6 +1296,7 @@ test {
     _ = server;
     _ = cli;
     _ = layout;
+    _ = doctor;
     _ = sys;
     _ = proc;
     _ = @import("bench.zig");

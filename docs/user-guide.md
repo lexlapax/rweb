@@ -414,6 +414,28 @@ remove the Serve entry the same way, or set up the service from section 5 or 6.
 
 ## 12. Troubleshooting
 
+Start with `rweb doctor`. It checks a setup the way `rweb tailscale` would use it (`rweb doctor ssh` for
+an SSH tunnel; add the options you start rweb with, such as `--config-dir`) and says what to fix: Rex
+(running, answering, an API revision rweb speaks), the backend secret or token file and the upload folder
+(the same checks as at startup), whether a bridge is listening, and for Tailscale whether it is signed
+in, has HTTPS certificates on, and has a Serve entry that forwards to this bridge with Funnel off. It
+changes nothing and exits 1 when a check fails. A file rweb makes at its first start is a note, not a
+failure. It never prints the backend secret or the token.
+
+```
+$ rweb doctor
+rweb doctor: checking rweb tailscale (rweb 0.2.0)
+  ok    Rex answers at /run/user/1000/rex/server.sock, API revision 24 (rweb speaks 18 to 24)
+  ok    a bridge is listening on unix:/run/user/1000/rweb/bridge.sock
+  ok    Tailscale: box.example.ts.net, signed in as you@example.com (/usr/bin/tailscale)
+  ok    Tailscale: HTTPS certificates are on
+  FAIL  Tailscale Serve: nothing forwards to this bridge
+        if Tailscale Serve is not set up for rweb yet, run this once:
+        sudo tailscale serve --bg --https=12443 unix:/run/user/1000/rweb/bridge.sock
+        …
+rweb doctor: 4 passed, 0 notes, 1 failed
+```
+
 Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.log` (macOS LaunchAgent).
 When rweb refuses to start, its message names what is wrong and, for a file or folder, ends with a
 `Fix:` line holding the command or change that puts it right. Run it and start rweb again; a second

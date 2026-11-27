@@ -100,6 +100,9 @@ rweb sets up the rest itself and prints the one command that is left, a `tailsca
 Without Tailscale, `rweb ssh` does the same for an SSH tunnel: it makes a token and prints the `ssh` line
 to run on your laptop.
 
+When something does not work, `rweb doctor` (or `rweb doctor ssh`) checks Rex, Tailscale and Serve, the
+files and the bridge, and says what to fix.
+
 Running rweb in a terminal is for a first try: when you stop it, also run
 `tailscale serve --https=12443 off`, or Serve keeps sending your requests to a socket or port nobody
 serves. The **[user guide](docs/user-guide.md)** covers Tailscale setup step by step, the SSH tunnel,
