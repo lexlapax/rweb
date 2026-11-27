@@ -28,5 +28,6 @@ loads a third-party tap's formulae only once trusted.
 Prepared 2026-11-27 for the published 0.2.0 (filled by hand from its `SHA256SUMS`, which predates signing):
 the tap's `Formula/rweb.rb` passes `brew style` and `brew audit --strict` and fetches the archive (tapped from
 the local repository, then removed); `rweb-bin` 0.2.0 builds with `makepkg` on Arch from the release
-download (both sources pass their checksums; the binary reports 0.2.0) and has its `.SRCINFO`. Not yet
-published: the tap repository and the AUR package.
+download (both sources pass their checksums; the binary reports 0.2.0) and has its `.SRCINFO`. **Published
+2026-11-27:** the tap `lexlapax/homebrew-rweb` (tapped from GitHub and audited) and the AUR package `rweb-bin`
+(pushed as the owner's AUR account), both at 0.2.0.

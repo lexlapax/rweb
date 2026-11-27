@@ -17,7 +17,8 @@ the Rex API revisions it speaks.
 - When the page reports a failure it says what happened in words ("Rex did not answer in time", "the
   terminal's output could not be reached"), not an internal error name; the name goes to rweb's log.
 - Packages: a Homebrew formula (tap `lexlapax/rweb`, macOS ARM64 and Linux x86-64, with `brew services`)
-  and an AUR package (`rweb-bin`, with a systemd user unit), both from the signed release archives;
+  and an AUR package (`rweb-bin`, with a systemd user unit), both from the release archives and both
+  already serving 0.2.0;
   `tools/packaging.sh VERSION` makes them from a release. The archives carry the user guide's services
   (`contrib/`).
 - Releases come with `SHA256SUMS.sig`: `SHA256SUMS` signed with rweb's release key (an Ed25519 SSH key;

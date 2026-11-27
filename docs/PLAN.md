@@ -313,8 +313,8 @@ Where the steps below stand (2026-11-26):
 - Step 3: made 2026-11-27, published with the next release: a Homebrew formula (release binary, macOS ARM64
   and Linux x86-64, `brew services`), an AUR package `rweb-bin` (with a systemd user unit), and the
   services in the archive (`contrib/`); `tools/packaging.sh` makes them from a signed release
-  ([packaging/README.md](../packaging/README.md)). Not yet published: the tap repository
-  `lexlapax/homebrew-rweb` (the owner's word to create it) and the AUR package (the owner's AUR account).
+  ([packaging/README.md](../packaging/README.md)). Published 2026-11-27 at 0.2.0: the tap
+  `lexlapax/homebrew-rweb` and the AUR package `rweb-bin`; each release updates them.
 - Step 4: tagged releases with checksums and notes, and the Rex revisions in `rweb --version`: done.
   Signed checksums: since 2026-11-27, `SHA256SUMS.sig` (`ssh-keygen -Y sign`, namespace `file`, key
   `rweb-release` in `tools/release-signers`, the README and the user guide; held in the owner's 1Password

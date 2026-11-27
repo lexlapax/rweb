@@ -28,7 +28,7 @@ Contents: [1 What you need](#1-what-you-need) · [2 Install](#2-install) ·
 
 ## 2. Install
 
-**Homebrew** (macOS on Apple silicon, Linux x86-64), from the release after 0.2.0:
+**Homebrew** (macOS on Apple silicon, Linux x86-64), from the tap `lexlapax/rweb`:
 
 ```sh
 brew tap lexlapax/rweb && brew trust lexlapax/rweb   # Homebrew loads a tap's formulae only once trusted
@@ -38,7 +38,7 @@ brew install rweb
 Then run `rweb tailscale` once in a terminal (section 5 or 6), and `brew services start rweb` keeps it
 running at login. The formula installs the release archive below, checked by its SHA-256.
 
-**Arch Linux**, from the AUR (from the release after 0.2.0): the package `rweb-bin`, with any AUR helper
+**Arch Linux**, from the AUR: the package `rweb-bin`, with any AUR helper
 (`yay -S rweb-bin`). It installs `/usr/bin/rweb` and a systemd user unit, `rweb.service`, that runs
 `rweb tailscale`: `systemctl --user enable --now rweb`.
 
