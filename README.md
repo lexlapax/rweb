@@ -16,8 +16,10 @@ prompt that is waiting, run the quick command, and go. Not affiliated with Super
   <img src="assets/screenshots/phone.png" alt="rweb on a phone: a terminal with git log and ls output, and the key bar above the browser's address bar" width="200">
 </p>
 
-What changed in each version, and the current one: [CHANGELOG.md](CHANGELOG.md). `rweb --version` names
-the version you have.
+**Current release: 0.2.0** (2026-11-27). It works with Rex 0.1.0-preview.25 (Rex API revisions 18 to 24),
+closes terminals on the page at once, keeps one browser's slow request from holding up another, and uses
+less memory and CPU on busy terminals. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+`rweb --version` names the version you have.
 
 ## Why
 
@@ -139,14 +141,23 @@ their verdicts, fixes and tests: [round 1](docs/release-review-2026-11-25.md),
 [round 5](docs/security-review-2026-11-26-round5.md),
 [round 6](docs/security-review-2026-11-26-round6.md) (in the source repository).
 
+For 0.2.0 the code was also audited against a checklist of Zig practice for production code
+([docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md), in the source repository) and
+the findings worked through with measurements: every type that owns memory and every parser is tested
+with each of its allocations failing in turn (this found and fixed a double free), the parsers of
+untrusted bytes and the terminal mirror are fuzzed, internal invariants are asserted, every raw system
+call goes through one file that turns its status into an error, and the test suite ran clean under
+Valgrind on Linux.
+
 ## Building from source
 
 [Zig](https://ziglang.org) 0.17.1:
 
 ```sh
-zig build -Doptimize=ReleaseSafe     # zig-out/bin/rweb
+zig build -Doptimize=ReleaseSafe     # zig-out/bin/rweb (or `zig build --release`); a plain `zig build` is Debug, much slower
 zig build test                        # unit tests; REX_SOCKET=<socket> adds live tests (they make and close their own sessions)
 zig build web-test                    # the page's logic (needs Node)
+zig build fuzz --fuzz=1M              # fuzz the parsers; -Dtest-filter=<name> picks one target
 zig build dist                        # archives of this working tree (uncommitted edits included) in zig-out/dist
 tools/release.sh [COMMIT]             # release archives: one commit's clean export, tested, built with the pinned Zig
 ```
@@ -204,5 +215,6 @@ which it is built. The software it contains or serves keeps its own licences:
 ## Status
 
 rweb is in daily use on Linux and macOS. Rex is a preview: rweb pins the Rex API revisions it speaks
-(see `rweb --version`) and is tested against each Rex update. Release archives: macOS on Apple silicon,
+(see `rweb --version`; 0.2.0 speaks 18 to 24, Rex 0.1.0-preview.21 to preview.25) and is tested against
+each Rex update. Release archives: macOS on Apple silicon,
 and Linux x86-64 (static, any distribution). Windows support will come later.

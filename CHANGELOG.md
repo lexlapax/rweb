@@ -6,34 +6,64 @@ the Rex API revisions it speaks.
 
 ## 0.2.0 (2026-11-27)
 
-- README: screenshots of the page on a desktop and on a phone (`assets/screenshots/`).
-- Issues are for bug reports, through a bug report form; pull requests are turned off on GitHub.
-- The logo at the top left, and "About rweb" in the ⋯ menu, open rweb's page on GitHub in a new tab,
-  without sending this page's address (it names your machine).
-- rweb speaks Rex API revisions 18 to 24 (Rex 0.1.0-preview.25 is revision 24; it was 18 to 19). Nothing
-  rweb uses changed in 20 to 24, and an older server is still served at its own revision.
+Works with Rex 0.1.0-preview.25, is quicker to react and lighter on busy terminals, and is the result of a
+pass over the whole code against Zig practice for production code
+(`docs/zig-idiom-audit-2026-11-26.md`, in the source repository). No options, files or Serve entries
+change: install the archive over 0.1.1 and restart rweb.
+
+Rex:
+
+- rweb speaks Rex API revisions 18 to 24 (Rex 0.1.0-preview.25 is revision 24; 0.1.1 spoke 18 to 19).
+  Nothing rweb uses changed in 20 to 24, and an older server is still served at its own revision.
 - The list shows terminals only: Rex's other blocks (its file-transfer blocks, new in preview.25, and its
   onboarding walkthrough) have no terminal to open and are left out.
+- Each answer from Rex is parsed once and read into a typed structure, and requests are written in one
+  pass; a tree refresh with 50 sessions makes 63 % fewer allocations. A malformed answer is refused more
+  strictly (a field of the wrong type is an error, not ignored).
+
+The page:
+
 - A terminal that closes leaves the page at once (it took up to 0.2 s), and opening one is a few
   milliseconds faster. One browser's request that Rex is slow to answer (a folder listing, say) no longer
   holds up another browser's: before, every request to Rex waited for the one in progress.
+- The logo at the top left, and "About rweb" in the ⋯ menu, open rweb's page on GitHub in a new tab,
+  without sending this page's address (it names your machine).
 - The logo turns slowly while the terminal on screen prints, and rests upright once it is quiet (still
   with reduced motion).
-- Rex client: each answer is parsed once and read into a typed structure, and requests are written in
-  one pass; a tree refresh with 50 sessions makes 63 % fewer allocations. A malformed answer from Rex is
-  refused more strictly (a field of the wrong type is an error, not ignored).
-- Terminal output reaches the page without memory allocations once warm (before: one per chunk for
-  each viewer, and two per chunk read from Rex); a keystroke makes 4 instead of 23. Linux: about 12 %
-  less CPU and half the page faults on a 32 MiB burst to three viewers.
-- The release archive carries the README's screenshots (they were missing, so its pictures were broken).
-- Fixed a double free in the terminal mirror when memory runs out as a stream reconnects; when a
-  transfer cannot be registered for lack of memory the page now says so (it said "too many transfers").
-- The log no longer repeats what the terminal emulator thinks of a program's output (unknown escape
-  sequences, bad colours), which any program could fill it with; its other errors still show. A
-  connection that ends on a socket error says which (`ConnectionResetByPeer`, say), not only "ReadFailed".
-- Building: `zig build --help` says a plain build is Debug (for tests; the terminal emulator runs much
-  slower) and ReleaseSafe is what releases ship; `zig build --release` alone now means ReleaseSafe.
-  `zig build fuzz` takes `-Dtest-filter` to fuzz one target.
+
+Speed and memory:
+
+- Terminal output reaches the page without memory allocations once warm (before: one per chunk for each
+  viewer, and two per chunk read from Rex); a keystroke makes 4 instead of 23. Linux: about 12 % less CPU
+  and half the page faults on a 32 MiB burst to three viewers. Measured with a fixed workload
+  (`src/bridge/bench.zig`); the memory allocator stays the safe one, now as a stated decision.
+
+Fixes:
+
+- A double free in the terminal mirror when memory ran out as a stream reconnected.
+- When a transfer could not be registered for lack of memory the page said "too many transfers"; it now
+  says what happened.
+- If something the bridge relies on internally turns out wrong, it stops (a service set up as the user
+  guide shows starts it again) instead of carrying on with damaged state.
+
+The log:
+
+- It no longer repeats what the terminal emulator thinks of a program's output (unknown escape sequences,
+  bad colours), which any program could fill it with; the emulator's other errors still show.
+- A connection that ends on a socket error says which (`ConnectionResetByPeer`, say), not only
+  "ReadFailed".
+
+Release archives, building and the project:
+
+- The archive carries the README's screenshots (they were missing, so its pictures were broken).
+- `zig build --help` says a plain build is Debug (for tests; the terminal emulator runs much slower) and
+  ReleaseSafe is what releases ship; `zig build --release` alone now means ReleaseSafe. `zig build fuzz`
+  takes `-Dtest-filter` to fuzz one target; `tools/release.sh` stops a test that hangs after 60 s.
+- New tests: every type that owns memory and every parser fails each of its allocations in turn; fuzz
+  targets for the paste cleaner, the escape-sequence cut, the mount table and ACL parsers; random
+  terminal output for the mirror. The suite ran clean under Valgrind on Linux.
+- README: screenshots of the page on a desktop and on a phone. Issues are for bug reports, through a bug
+  report form; pull requests are turned off on GitHub.
 
 ## 0.1.1 (2026-11-26)
 
