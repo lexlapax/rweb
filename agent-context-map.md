@@ -29,9 +29,11 @@ a 4-second `echo` loop, upright again after it.
   `SHA256SUMS`, `SHA256SUMS.sig`, the first signed release; `tools/release.sh 38f4a3f` on laptop-mac,
   signed through 1Password with the owner's approval; signature and sums verified after download; the
   latest-release API answers v0.3.0). Homebrew tap `19a54b4`, AUR `rweb-bin` `bc0eca2`, both 0.3.0
-  (packaging/README.md). **Not deployed yet** on the owner's machines (they run 0.2.0); the owner's next
-  item is setup-repo on the upstream binaries for macOS and Linux (download the release vs Homebrew/AUR:
-  the owner's choice), which is also the 0.3.0 live run through Serve.
+  (packaging/README.md). **Deployed 2026-11-27 on all four machines from the packages** (owner's choice:
+  Homebrew on the Macs, the AUR's `rweb-bin` on linux-box and gateway-box; setup-repo installs them, minimum
+  0.3.0, its own services). That was 0.3.0's live run: through each machine's real Serve address from
+  another node, page 200, WebSocket from the page's `https://` origin 101, from `http://` or another port
+  403; `rweb doctor` 7/7 on laptop-mac. Next: Ghostty `vt-1.0.2` (upstream check) before new features.
 - **Upstream check (owner, 2026-11-27):** `tools/upstream-check.sh rex|network`, `tools/upstream.lock`,
   [docs/upstream-check.md](docs/upstream-check.md); AGENTS.md makes it the first step after each release.
   First run: Rex preview.25 / revision 24 and its `llms.txt` unchanged on laptop-mac and linux-box;
