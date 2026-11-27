@@ -82,6 +82,41 @@ test "version text names the version, commit and Rex revisions" {
 
 const log = std.log.scoped(.rweb);
 
+/// The bridge's log. rweb's own scopes (and unscoped messages) log at the build's level. Ghostty's are a
+/// library's: only its errors are shown, and none at all from where it parses a program's output (an
+/// escape sequence it does not know, a colour it cannot read): those say nothing about rweb, and any
+/// program could fill the log with them.
+pub const std_options: std.Options = .{ .logFn = logFiltered };
+
+fn logFiltered(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
+    if (comptime !logShown(level, scope)) return;
+    std.log.defaultLog(level, scope, format, args);
+}
+
+fn logShown(comptime level: std.log.Level, comptime scope: @EnumLiteral()) bool {
+    const name = @tagName(scope);
+    const ours = [_][]const u8{ "default", "rweb", "server", "hub", "fake_rex" };
+    for (ours) |o| if (std.mem.eql(u8, name, o)) return true;
+    if (std.mem.startsWith(u8, name, "rex_")) return true;
+    // Ghostty's scopes that read what a program prints.
+    const output_exact = [_][]const u8{ "stream", "stream_terminal", "parser", "sgr", "glyph", "osc", "terminal_dcs", "terminal_apc", "snapshot_kitty" };
+    for (output_exact) |o| if (std.mem.eql(u8, name, o)) return false;
+    const output_prefix = [_][]const u8{ "osc_", "kitty_", "terminal_tmux", "mouse_", "key_" };
+    for (output_prefix) |o| if (std.mem.startsWith(u8, name, o)) return false;
+    return level == .err;
+}
+
+test "log: rweb's scopes as the build says, Ghostty's errors only, its output parsers not at all" {
+    try std.testing.expect(comptime logShown(.info, .rweb));
+    try std.testing.expect(comptime logShown(.debug, .rex_mirror));
+    try std.testing.expect(comptime logShown(.warn, .default));
+    try std.testing.expect(comptime !logShown(.err, .stream));
+    try std.testing.expect(comptime !logShown(.warn, .osc_color));
+    try std.testing.expect(comptime !logShown(.err, .kitty_gfx));
+    try std.testing.expect(comptime logShown(.err, .page_list));
+    try std.testing.expect(comptime !logShown(.warn, .page_list));
+}
+
 /// Print to standard error (the terminal, or the service's log).
 fn say(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);

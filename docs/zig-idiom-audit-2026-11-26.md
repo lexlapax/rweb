@@ -512,7 +512,26 @@ Rex, in ReleaseSafe.
    linux-box (Rex 0.1.0-preview.25) ReleaseSafe with its live Rex 450 passed, 6 skipped; `zig fmt --check`
    clean; `zig build dist` builds both archives. `rex ls` unchanged on both machines.
 
-   Left in step 7: one `sys.zig` for the raw calls and a Valgrind run (item 25; the owner approved valgrind
-   on linux-box through setup-repo, 2026-11-27: added to its `dev` module, installed when the owner applies
-   it there); `error_tracing` measured (item 36); the Ghostty log filter; the rest of F14, F17, F18, F19
-   and F22.
+   **Progress 2026-11-27.**
+   - **Ghostty's log filtered.** `main.zig` sets `std_options.logFn`: rweb's own scopes (and unscoped
+     messages) log as before; Ghostty's scopes show only errors; and nothing from the scopes where Ghostty
+     reads a program's output (`stream`, `parser`, `sgr`, `osc*`, `kitty_*`, `terminal_dcs`, `terminal_apc`,
+     `terminal_tmux*`, `glyph`, `mouse_*`, `key_*`, `snapshot_kitty`). A test pins the rule. Not yet
+     watched in a running bridge.
+   - **Valgrind run (item 25).** Valgrind 3.25.1 on linux-box (installed through setup-repo's `dev`
+     module with the owner's approval). Two obstacles: the native build uses AVX-512, which Valgrind cannot
+     run, and Arch's glibc loader lacks the symbols Valgrind needs. So the three test binaries were built
+     for the release's own target, static musl, at `-Dcpu=x86_64_v3`:
+     `zig build test -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dcpu=x86_64_v3`, each then run as
+     `valgrind --leak-check=full --error-exitcode=99 --track-origins=yes ./test` (no live Rex). Every test
+     passed under it (bridge 100 s, Rex library 79 s, fuzz module 3 s). Reports: 110, all from three
+     contexts inside Zig's std `Io.Threaded` (`Future.start` and `Group.Task.start`): a `futexWake` on a
+     waiter's word after the waiter was released and may have returned, so Valgrind sees the system call
+     point at stale stack. A wake uses the address only as a key; not rweb's, and harmless. None in rweb's
+     code or Ghostty's C++. What the run cannot show: Zig 0.17's allocators send Valgrind no client
+     requests and a static binary's `malloc` is not replaced, so it checked wild accesses and uses of
+     uninitialised stack values, not heap blocks; leaks and use-after-free are the testing and safe
+     allocators' work, which the suite already does.
+
+   Left in step 7: one `sys.zig` for the raw calls (item 25); `error_tracing` measured (item 36); the rest
+   of F14, F17, F18, F19 and F22.
