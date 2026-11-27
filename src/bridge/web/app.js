@@ -801,6 +801,9 @@ $('more').onclick = () => openPop($('more'), pop => {
     location.reload();
   });
   item(pop, 'Reconnect', () => { closePop(); reconnectNow(); });
+  // rweb's own page, in a new tab or window, as the logo does. No referrer goes with it: this page's
+  // address names the machine (and, through an SSH tunnel, the token's path).
+  item(pop, 'About rweb', () => { closePop(); window.open($('crumb-home').href, '_blank', 'noopener,noreferrer'); }, 'pop-about');
   updateControls();
 });
 $('tab-menu').onclick = () => openPop($('tab-menu'), pop => {

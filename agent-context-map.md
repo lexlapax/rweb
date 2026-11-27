@@ -1,12 +1,20 @@
 # Agent context map
 
-Last updated: 2026-11-26 (Phase B step 4: allocation-failure tests for every owning type and parser, a mirror double free fixed; step 5 next).
+Last updated: 2026-11-26 (the logo and "About rweb" link to the GitHub page; Phase B step 5 next).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
 
 
 
+
+## 2026-11-26: links to rweb's page (owner)
+
+The header logo is a link, and the ⋯ menu ends with "About rweb": both open `https://github.com/lexlapax/rweb`
+in a new tab with `noopener noreferrer` (the page also sends `Referrer-Policy: no-referrer`), since this
+page's address names the machine and, through a tunnel, the token's path. It is the page's only outside
+address: `assets.zig` and the server's CSP test allow exactly that link and nothing else. Checked in
+desktop Chrome on a ReleaseSafe bridge (a real click opened the GitHub page; the header unchanged).
 ## Where things stand (2026-11-26, end of the day)
 
 - 0.1.1 is released (GitHub Release `v0.1.1`, commit `1846885`) and runs on the owner's four machines;

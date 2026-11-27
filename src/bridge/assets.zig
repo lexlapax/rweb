@@ -125,6 +125,9 @@ test "the page references only files that are embedded, and carries no inline co
             rest = rest[i + attr.len ..];
             const end = std.mem.indexOfScalar(u8, rest, '"').?;
             const url = rest[0..end];
+            // The one link out (to rweb's own page, opened in a new tab; checked in the test below)
+            // loads nothing into this page.
+            if (std.mem.eql(u8, attr, "href=\"") and std.mem.eql(u8, url, rweb_home)) continue;
             // Relative, so the page also works under a path prefix (the SSH-tunnel cookie path).
             try std.testing.expect(url.len > 0 and url[0] != '/' and std.mem.indexOf(u8, url, "//") == null);
             if (url[0] != '#') {
@@ -269,4 +272,27 @@ test "the token form is static: relative embedded files, no inline code, a passw
     for ([_][]const u8{ "location.search", "innerHTML", "eval(", "localStorage.", "sessionStorage.", "console." }) |bad| {
         try std.testing.expect(std.mem.indexOf(u8, js, bad) == null);
     }
+}
+
+/// rweb's own page: the page's only link out (the logo, and "About rweb" in the menu).
+pub const rweb_home = "https://github.com/lexlapax/rweb";
+
+test "the page's one link out goes to rweb's own page, in a new tab, with no referrer or opener" {
+    const page: []const u8 = @embedFile("web/index.html");
+    var links: usize = 0;
+    var it = std.mem.splitSequence(u8, page, "<a ");
+    _ = it.next();
+    while (it.next()) |rest| {
+        const tag = rest[0 .. std.mem.indexOfScalar(u8, rest, '>') orelse return error.TestUnexpectedResult];
+        if (std.mem.indexOf(u8, tag, "href=\"http") == null) continue;
+        links += 1;
+        // This page's address names the machine and, through an SSH tunnel, the token's path: none of
+        // it may reach the other site, and the other site gets no handle on this window.
+        try std.testing.expect(std.mem.indexOf(u8, tag, "href=\"https://github.com/lexlapax/rweb\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, tag, "target=\"_blank\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, tag, "rel=\"noopener noreferrer\"") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), links);
+    const script: []const u8 = @embedFile("web/app.js");
+    try std.testing.expect(std.mem.indexOf(u8, script, "'_blank', 'noopener,noreferrer'") != null);
 }

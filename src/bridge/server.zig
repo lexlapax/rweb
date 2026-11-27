@@ -1675,8 +1675,11 @@ test "server: assets are served with a strict content security policy" {
     try testing.expect(std.mem.indexOf(u8, h.head, "frame-ancestors 'none'") != null);
     // The web app manifest is same-origin; without `manifest-src`, `default-src 'none'` would block it.
     try testing.expect(std.mem.indexOf(u8, h.head, "manifest-src 'self'") != null);
-    // Nothing in the page loads from elsewhere.
-    try testing.expect(std.mem.indexOf(u8, h.body, "http://") == null and std.mem.indexOf(u8, h.body, "https://") == null);
+    // Nothing in the page loads from elsewhere: its one outside address is a link to rweb's own page,
+    // opened in a new tab (`assets.zig` checks it), which loads nothing here.
+    try testing.expect(std.mem.indexOf(u8, h.body, "http://") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, h.body, "https://"));
+    try testing.expect(std.mem.indexOf(u8, h.body, "href=\"" ++ assets.rweb_home ++ "\"") != null);
 
     for ([_][]const u8{ "/app.js", "/keys.js", "/lab", "/lab.js", "/app.css", "/vendor/xterm.js", "/vendor/xterm.css", "/vendor/addon-fit.js", "/vendor/LICENSE-xterm.txt", "/wterm-shim.js", "/vendor/wterm.js", "/vendor/wterm.css", "/vendor/ghostty-vt.wasm", "/vendor/LICENSE-wterm.txt" }) |p| {
         const a = try getT(rig, p, "");
