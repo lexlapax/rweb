@@ -145,6 +145,8 @@ pub const Control = struct {
     /// Bytes of server event JSON in `events`.
     ev_bytes: usize = 0,
     signal: Io.Event = .unset,
+    /// `wakeEvents` was called since `nextEvent` last returned for it.
+    woken: bool = false,
     reader: ?Io.Future(void) = null,
 
     /// Connect and complete the welcome. Fails if it cannot, so a caller sees a bad socket or
@@ -382,13 +384,19 @@ pub const Control = struct {
         c.ev_len = out;
     }
 
-    /// The next event, waiting up to `timeout_ms`; null on timeout. Caller calls `deinit` on it.
+    /// The next event, waiting up to `timeout_ms`; null on timeout, or once after `wakeEvents`. Caller
+    /// calls `deinit` on it.
     pub fn nextEvent(c: *Control, timeout_ms: u32) !?Event {
         while (true) {
             c.mu.lockUncancelable(c.io);
             if (c.popLocked()) |e| {
                 c.mu.unlock(c.io);
                 return e;
+            }
+            if (c.woken) {
+                c.woken = false;
+                c.mu.unlock(c.io);
+                return null;
             }
             c.signal.reset();
             c.mu.unlock(c.io);
@@ -397,6 +405,15 @@ pub const Control = struct {
                 else => |x| return x,
             };
         }
+    }
+
+    /// Make the consumer's `nextEvent` return now (null, if no event is queued), so it looks at its
+    /// own state without polling: its owner has something for it to do.
+    pub fn wakeEvents(c: *Control) void {
+        c.mu.lockUncancelable(c.io);
+        defer c.mu.unlock(c.io);
+        c.woken = true;
+        c.signal.set(c.io);
     }
 
     /// The largest message the connection takes (the server's limit, at most

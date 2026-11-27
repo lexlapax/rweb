@@ -232,7 +232,12 @@ sequenceDiagram
   moment (a typed key, a redraw, the Copy view, a stream restart). Closing it (its block went away) takes
   it out of the list and detaches its viewers at once; the last reference destroys it. The hub's main
   lock is never held while waiting on Rex: attaching, opening a stream, waiting for its snapshot and
-  restarting a stream all happen outside it, so one slow terminal cannot stall the others.
+  restarting a stream all happen outside it, so one slow terminal cannot stall the others. Nor does any
+  other lock wrap a call to Rex: each request calls through its own client value, and the connection
+  matches answers to calls, so a call Rex is slow to answer holds up only the browser that made it.
+- The hub's supervisor (Rex's events, stream restarts, tree reads) sleeps until Rex sends an event or
+  something wakes it (a stream ended, the tree changed), or until its next deadline (a restart's backoff,
+  the 150 ms gap between tree reads); it does not poll.
 - The mirror never answers terminal queries: Rex's own terminal already answered the program, and the
   page drops any reply the browser terminal produces.
 

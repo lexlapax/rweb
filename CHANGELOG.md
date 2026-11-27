@@ -10,6 +10,9 @@ the Rex API revisions it speaks.
 - Issues are for bug reports, through a bug report form; pull requests are turned off on GitHub.
 - The logo at the top left, and "About rweb" in the ⋯ menu, open rweb's page on GitHub in a new tab,
   without sending this page's address (it names your machine).
+- A terminal that closes leaves the page at once (it took up to 0.2 s), and opening one is a few
+  milliseconds faster. One browser's request that Rex is slow to answer (a folder listing, say) no longer
+  holds up another browser's: before, every request to Rex waited for the one in progress.
 - The logo turns slowly while the terminal on screen prints, and rests upright once it is quiet (still
   with reduced motion).
 - Rex client: each answer is parsed once and read into a typed structure, and requests are written in

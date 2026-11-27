@@ -279,6 +279,14 @@ pub const Conn = struct {
     /// False when the stream belongs to someone else (an HTTP server connection).
     owns_stream: bool = true,
     write_mutex: Io.Mutex = .init,
+    /// The write in progress must end by this time (ms on the awake clock); 0: no write is timed;
+    /// `deadline_fired`: the watcher shut the stream. One watcher task per connection watches it
+    /// (`watch`), started by the first timed write, rather than a task per frame.
+    deadline: std.atomic.Value(i64) = .init(0),
+    watch_wake: Io.Event = .unset,
+    watcher: ?Io.Future(void) = null,
+    /// Watcher tasks started, for tests (at most one per connection).
+    watch_starts: u32 = 0,
     /// True for the connecting side, which must mask its frames.
     is_client: bool = true,
     /// Server side: the subprotocol agreed in `accept` (one of the slices passed in).
@@ -462,7 +470,42 @@ pub const Conn = struct {
         return c;
     }
 
+    const deadline_fired: i64 = -1;
+
+    /// Stop the deadline watcher, if one started. Before the stream is closed: it may shut it.
+    pub fn stopWatcher(c: *Conn) void {
+        if (c.watcher) |*w| w.cancel(c.io);
+        c.watcher = null;
+    }
+
+    /// The deadline watcher: shuts the stream if a timed write is still going at its deadline.
+    fn watch(c: *Conn) void {
+        while (true) {
+            c.watch_wake.reset();
+            const d = c.deadline.load(.acquire);
+            if (d == deadline_fired) return;
+            if (d == 0) {
+                c.watch_wake.wait(c.io) catch return; // stopped
+                continue;
+            }
+            const now = Io.Clock.awake.now(c.io).toMilliseconds();
+            if (now >= d) {
+                // Only if that same write is still going: one that ended just now has cleared it.
+                if (c.deadline.cmpxchgStrong(d, deadline_fired, .acq_rel, .acquire) == null) {
+                    c.stream.shutdown(c.io, .both) catch {}; // best effort: it fails every read and write after
+                    return;
+                }
+                continue;
+            }
+            c.watch_wake.waitTimeout(c.io, .{ .duration = .{ .raw = .fromMilliseconds(d - now), .clock = .awake } }) catch |e| switch (e) {
+                error.Timeout => {},
+                error.Canceled => return,
+            };
+        }
+    }
+
     pub fn deinit(c: *Conn, gpa: Allocator) void {
+        c.stopWatcher();
         if (c.owns_stream) c.stream.close(c.io);
         if (c.bufs) |b| gpa.destroy(b);
         gpa.destroy(c);
@@ -481,16 +524,25 @@ pub const Conn = struct {
     /// (null: no deadline) of taking the write lock, the stream is shut, which fails this write
     /// (`error.WriteTimeout`) and every read and write after it, so the connection's owner drops
     /// it and reconnects. A peer that stops reading cannot hold a writer, or the tasks queued
-    /// behind it, for longer. `error.ConcurrencyUnavailable` (no task for the deadline) means
-    /// nothing was written and the connection is unchanged.
+    /// behind it, for longer. `error.ConcurrencyUnavailable` (no task for the connection's deadline
+    /// watcher, on its first timed write) means nothing was written and the connection is unchanged.
     pub fn writeFrameTimeout(c: *Conn, op: Opcode, data: []const u8, timeout_ms: ?u32) !void {
         const old_protection = c.io.swapCancelProtection(.blocked);
         defer _ = c.io.swapCancelProtection(old_protection);
         c.write_mutex.lockUncancelable(c.io);
         defer c.write_mutex.unlock(c.io);
-        var dog: ?Watchdog = if (timeout_ms) |t| try Watchdog.start(c.io, c.stream, t) else null;
+        const t = timeout_ms orelse return c.writeFrameLocked(op, data);
+        if (c.watcher == null) {
+            c.watcher = try c.io.concurrent(watch, .{c});
+            c.watch_starts += 1;
+        }
+        const mine = @max(1, Io.Clock.awake.now(c.io).toMilliseconds() + t);
+        // A connection whose deadline already fired is shut: this write would fail anyway.
+        if (c.deadline.cmpxchgStrong(0, mine, .acq_rel, .acquire) != null) return error.WriteTimeout;
+        c.watch_wake.set(c.io);
         const wrote = c.writeFrameLocked(op, data);
-        if (dog) |*d| if (d.stopFired(c.io)) return error.WriteTimeout;
+        // Clear it, unless the watcher fired first (then the stream is shut and this write failed).
+        if (c.deadline.cmpxchgStrong(mine, 0, .acq_rel, .acquire) != null) return error.WriteTimeout;
         return wrote;
     }
 
@@ -1015,6 +1067,8 @@ const TestPair = struct {
     }
 
     fn deinit(p: *TestPair, io: Io) void {
+        p.client.stopWatcher();
+        p.server.stopWatcher();
         p.client.stream.close(io);
         p.server.stream.close(io);
         p.l.deinit(io);
@@ -1046,6 +1100,8 @@ test "writeFrame: a peer that stops reading cannot hold a write past its deadlin
     try std.testing.expect(Io.Clock.awake.now(io).toMilliseconds() - t0 < 5000);
     // The connection is shut: the next write fails at once, whatever its own deadline.
     try std.testing.expect(std.meta.isError(p.client.writeFrameTimeout(.text, "late", 60_000)));
+    // One watcher did it all.
+    try std.testing.expectEqual(@as(u32, 1), p.client.watch_starts);
     // And the peer sees the end of the stream after the part of the frame that got through.
     try std.testing.expect(std.meta.isError(p.server.readMessage(gpa)));
 }
@@ -1113,4 +1169,25 @@ test "a connection carries no socket buffers unless it owns its socket" {
     const c = try Conn.fromHttp(std.testing.allocator, std.testing.io, undefined, &r, &sink.writer, 1 << 16);
     defer c.deinit(std.testing.allocator);
     try std.testing.expect(c.bufs == null);
+}
+
+test "writeFrame: timed writes share one deadline watcher per connection" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var p: TestPair = .{};
+    try p.init(io);
+    defer p.deinit(io);
+    p.client.write_timeout_ms = 50;
+    // Many frames, each well within its deadline, and pauses longer than the deadline between
+    // some: none is cut, and only one task was started for all of them.
+    for (0..200) |i| {
+        try p.client.writeFrame(.text, "tick");
+        const m = try p.server.readMessage(gpa);
+        gpa.free(m.data);
+        if (i % 50 == 0) try io.sleep(.fromMilliseconds(80), .awake);
+    }
+    try std.testing.expectEqual(@as(u32, 1), p.client.watch_starts);
+    // Untimed writes start none.
+    try p.server.writeFrame(.text, "back");
+    try std.testing.expectEqual(@as(u32, 0), p.server.watch_starts);
 }

@@ -126,6 +126,8 @@ pub const Mirror = struct {
     snapshot_bytes: usize = 0,
     /// Why the stream ended, once it has (see `data.End`).
     ended: ?data.End = null,
+    /// Set once the mirror is live, has failed or its stream ended (`waitSettled`).
+    settled: Io.Event = .unset,
     /// Most bytes one redraw may take; tests lower it.
     redraw_budget: usize = max_redraw_bytes,
 
@@ -185,6 +187,7 @@ pub const Mirror = struct {
         m.status = .failed;
         log.warn("mirror failed, so its stream ends: {t}", .{e});
         m.ended = .mirror_failed;
+        m.settled.set(m.io);
         if (m.observer) |o| if (o.ended) |f| f(o.ctx, .mirror_failed);
     }
 
@@ -200,7 +203,18 @@ pub const Mirror = struct {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
         m.ended = why;
+        m.settled.set(m.io);
         if (m.observer) |o| if (o.ended) |f| f(o.ctx, why);
+    }
+
+    /// Wait until the mirror is live, has failed or its stream ended, at most `timeout_ms`. False if
+    /// none of those came in time. (`getStatus` and `endReason` say which.)
+    pub fn waitSettled(m: *Mirror, timeout_ms: u32) error{Canceled}!bool {
+        m.settled.waitTimeout(m.io, .{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } }) catch |e| switch (e) {
+            error.Timeout => return false,
+            error.Canceled => return error.Canceled,
+        };
+        return true;
     }
 
     pub fn endReason(m: *Mirror) ?data.End {
@@ -263,6 +277,7 @@ pub const Mirror = struct {
             .bytes => |b| m.vt.nextSlice(b),
         }
         m.status = .live;
+        m.settled.set(m.io);
         m.snapshot_bytes = used;
         m.version += 1;
         const rest = try m.gpa.dupe(u8, m.snap.items[used..]);

@@ -1556,6 +1556,8 @@ const Rig = struct {
         silent_limit_ms: u32 = 20_000,
         write_deadline_ms: u32 = 30_000,
         transfer_idle_ms: u32 = 30_000,
+        /// The Rex client's call timeout.
+        call_timeout_ms: u32 = 30_000,
     };
 
     fn init(hub_cfg: hub_mod.Config, acc: access.Config, listen: Listen) !Rig {
@@ -1573,7 +1575,7 @@ const Rig = struct {
         const f = try fake.Fake.start(a, testing.io);
         errdefer f.deinit();
         const made = try f.createSession("rweb-test-server");
-        const ctl = try rex.control.Control.open(a, testing.io, .{ .socket_path = f.path });
+        const ctl = try rex.control.Control.open(a, testing.io, .{ .socket_path = f.path, .call_timeout_ms = extra.call_timeout_ms });
         errdefer ctl.close();
         const h = try Hub.open(a, testing.io, ctl, hub_cfg);
         errdefer h.close();
@@ -2472,19 +2474,18 @@ test "server: a viewer is silent only when its reader is not busy in a handler" 
 }
 
 test "server: a browser whose handler waits on Rex is not dropped as silent" {
-    const o = try openRigExtra(.{}, .{ .silent_limit_ms = 600 });
+    const o = try openRigExtra(.{}, .{ .silent_limit_ms = 600, .call_timeout_ms = 2_500 });
     defer o.rig.deinit();
     defer o.c.deinit(testing.allocator);
-    // Rex is slow: the call this message needs waits far past the silence limit.
-    o.rig.hub.api_mu.lockUncancelable(testing.io);
-    var locked = true;
-    defer if (locked) o.rig.hub.api_mu.unlock(testing.io);
+    // Rex does not answer the call this message needs: it waits far past the silence limit, until
+    // the call's own timeout.
+    o.rig.f.mu.lockUncancelable(testing.io);
+    o.rig.f.silent_method = "com.superlogical.terminal.clipboard_read";
+    o.rig.f.mu.unlock(testing.io);
     try sendJson(o.c, "{{\"t\":\"clip\"}}", .{});
-    try testing.io.sleep(.fromMilliseconds(2_000), .awake);
+    try testing.io.sleep(.fromMilliseconds(1_500), .awake);
     try testing.expectEqual(@as(u32, 1), o.rig.srv.active.load(.acquire));
-    o.rig.hub.api_mu.unlock(testing.io);
-    locked = false;
-    // The reply arrives, and the connection goes on.
+    // The answer (nothing copied, as a call that timed out reads) arrives, and the connection goes on.
     try waitText(o.c, "\"t\":\"clip\"");
     try sendJson(o.c, "{{\"t\":\"ping\"}}", .{});
     try waitText(o.c, "pong");

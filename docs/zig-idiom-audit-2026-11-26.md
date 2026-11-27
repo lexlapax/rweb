@@ -67,9 +67,9 @@ mechanical changes above), **part fixed**, or **open**.
 | F8 | C interop | should-fix | two `peerUid` functions, the server's with hard-coded socket constants | **fixed in round five**: one function, std's constants, the returned length checked | `src/rex/ws.zig:199-220`; called at `src/bridge/server.zig:574`, `:732` |
 | F9 | C interop | should-fix | `fdMount` returned an empty answer (which passes) on other systems, and assumed 64-bit words with only a comment | **fixed in round five**: `@compileError` for another OS or word size | `src/bridge/xfer.zig:781`, `:791`, `:801` |
 | F10 | C interop | nice-to-have | `umask` re-declared; raw errno numbers | **fixed in round five** | `src/bridge/server.zig:95-96`; `src/bridge/xfer.zig:986-990` |
-| F11 | performance | should-fix | every frame written to Rex starts and cancels a watchdog task | open (Phase B 5) | `src/rex/ws.zig:476-481` |
-| F12 | design | should-fix | one mutex serialises every Rex call of every viewer, only to guard `Api.last_error` | open (Phase B 5) | `src/bridge/hub.zig:489`; `src/rex/api.zig:73` |
-| F13 | concurrency | should-fix | `supervisor_wake` is set and never waited on (the supervisor polls every 200 ms); `openStream` polls the mirror every 5 ms | open (Phase B 5) | set at `src/bridge/hub.zig:404`, `:1343`, `:1540`; polls at `:1450`, `:1167-1169` |
+| F11 | performance | should-fix | every frame written to Rex starts and cancels a watchdog task | **fixed in Phase B step 5** (2026-11-26): one watcher per connection | `src/rex/ws.zig:476-481` |
+| F12 | design | should-fix | one mutex serialises every Rex call of every viewer, only to guard `Api.last_error` | **fixed in Phase B step 5**: an `Api` per task, `api_mu` gone | `src/bridge/hub.zig:489`; `src/rex/api.zig:73` |
+| F13 | concurrency | should-fix | `supervisor_wake` is set and never waited on (the supervisor polls every 200 ms); `openStream` polls the mirror every 5 ms | **fixed in Phase B step 5**: the supervisor and `openStream` wait on events | set at `src/bridge/hub.zig:404`, `:1343`, `:1540`; polls at `:1450`, `:1167-1169` |
 | F14 | one way | nice-to-have | three hand-written constant-time compares; own addresses parsed from text on every request | open | `src/bridge/access.zig:363`, `:221-229`; `src/bridge/server.zig:1336`; `src/bridge/xfer.zig:129` |
 | F15 | allocators | nice-to-have | `checkFdExtras` used the page allocator from inside | **fixed in round five**: it takes an allocator | `src/bridge/xfer.zig:1053` |
 | F16 | memory | nice-to-have | a browser connection carries 128 KiB of buffers it never uses | **fixed in Phase B** (2026-11-26): socket buffers only for a connection that owns its socket | `src/rex/ws.zig:301-302`, `:440` |
@@ -80,7 +80,7 @@ mechanical changes above), **part fixed**, or **open**.
 | F21 | build | nice-to-have | the bridge's module graph is built twice; `optimize: anytype`; a plain `zig build` is Debug | open | `build.zig:21-36` against `:65-80`; `build.zig:21`; `build.zig:48` |
 | F22 | style | nice-to-have | `@hasField` on the project's own struct; a function-static buffer; tests before `main`; a long `main`; help and version returned as errors | **part fixed in round five**: the `@hasField` is gone and `rexProblem` takes a buffer (`src/bridge/main.zig:614`). **Open**: tests at `src/bridge/main.zig:26-74` before `main` at `:154`; `main` is 269 lines; `src/bridge/cli.zig:146-150` | as named |
 | F23 | performance | nice-to-have | four or five small allocations per keystroke; byte-wise masking; a ping payload copied to the heap; hand-made deques | **mostly fixed in Phase B step 3**: requests written in one pass, ping on the stack; deques left | `src/rex/input.zig:285-305`, `:273`; `src/rex/ws.zig:504`, `:553`, `:560`; `src/bridge/hub.zig:88`, `:171` |
-| F24 | tests | nice-to-have | waits are polls with wall-clock limits; `checkAllAllocationFailures` is not used | part done in Phase B step 4 (allocation failures); the polling waits are step 5 | 0 uses; 56 `sleep` calls, about 40 of them in tests |
+| F24 | tests | nice-to-have | waits are polls with wall-clock limits; `checkAllAllocationFailures` is not used | done for allocation failures (step 4); test sleeps did not fall in step 5 (see there) | 0 uses; 56 `sleep` calls, about 40 of them in tests |
 
 **Fixed now**, not in the table because the first pass treated them as the repository's choice: the
 0.17 names. `@intFromEnum` and `@enumFromInt` are `@backingInt` and `@fromBackingInt`,
@@ -369,6 +369,51 @@ Rex, in ReleaseSafe.
    per keystroke (now 1, target 0); the time a `fit` waits while another viewer's directory listing
    is slow (now up to 5 s, target none). The tests that sleep should fall with this: count them
    before and after (about 40 now).
+
+   **Done 2026-11-26.** What changed:
+   - **F13.** The supervisor waits in the Rex client's `nextEvent` until an event, a `wakeEvents` (a
+     stream ended, the tree is dirty, a re-attach), or its next deadline: the earliest restart backoff or
+     the 150 ms gap between tree reads, else 30 s as a floor under a missed wake. `openStream` waits on
+     the mirror's new `settled` event (live, failed or ended) instead of polling `getStatus` every 5 ms.
+   - **F11.** A WebSocket connection starts one deadline watcher on its first timed write; each write
+     sets a deadline the watcher reads, and an atomic compare-exchange decides between a write that
+     ended in time and a watcher that fired (it shuts the stream). `watch_starts` counts it.
+   - **F12.** `api_mu` is gone: each task calls Rex through its own `Api` value (`Hub.rexApi`), which
+     keeps its own `last_error`; the client was already safe for calls side by side (answers matched by
+     id, frames written under the connection's write lock). `Hub.quick_timeout_ms` replaces the shared
+     value's setting.
+   - **Found on the way.** The supervisor swallowed `error.Canceled` in places (a tree read, a restart);
+     a cancel is delivered once, so a `close` that landed there left it waiting. The 200 ms poll had
+     hidden this; with a 30 s idle wait, `Hub.close` took 30 s in about one run in three of the hub
+     tests. It now checks `closing` (set before the cancel) before every wait and after each event.
+
+   Measured with a gated test (`RWEB_MEASURE=1 zig build test -Doptimize=ReleaseSafe -Dtest-filter="hub:
+   measure"`), against the fake on macOS, 20 rounds each; before is `main` at `f07160f`:
+
+   | | before | after |
+   |---|---|---|
+   | supervisor wake-ups per idle second | 5 (by construction) | 0 to 1 (tested: at most 1) |
+   | a block closed, to the viewer's `closed` frame (median, max) | 195 ms, 197 ms | 2.4 ms, 2.5 ms |
+   | opening a terminal (median, max) | 7.4 ms, 9.9 ms | 0.8 ms, 1.0 ms |
+   | a fit while another viewer's listing waits on Rex | 4,895 ms | 0.7 ms |
+   | tasks started per timed write (a keystroke's request) | 1 | 0 after the connection's first |
+
+   Against the real Rex in desktop Chrome (ReleaseSafe bridge, a throwaway session): a terminal opened in
+   22 ms, one closed by `exit` left the list in 21 ms, typing and Reconnect worked. The keystroke round
+   trip of the fixed workload did not change (median 2.9 to 3.1 ms, as before): the task per frame was
+   not its cost, and where it goes is not established. Sleep calls in `src`: 64 before, 67 after; in tests
+   48 before, 52 after. One sleep left the code (the snapshot poll); the tests added three timing tests,
+   and the older test sleeps place another task (a held snapshot, a program's output) rather than wait out
+   a poll, so they stay.
+
+   Tests added: the supervisor sleeps when idle; a closed block reaches its viewer at once (five rounds
+   under 250 ms in all); a fit does not wait for another viewer's call; timed writes share one watcher,
+   and untimed ones start none. The server test that held `api_mu` to stand in for a slow Rex now leaves
+   the call unanswered at the fake. Checks: Debug and ReleaseSafe suites on macOS; ReleaseSafe with the
+   live Rex on macOS (the running server answers API revision 18; the installed CLI is already
+   0.1.0-preview.25, revision 24, and the server has not restarted onto it) and Linux (0.1.0-preview.22,
+   revision 19), and Debug on Linux; web tests 45/45. rweb speaks revisions 18 and 19; whether a preview.25
+   server still offers them is not tested yet.
 
 6. **Assertions on internal invariants (item 38).** `std.debug.assert` where a broken invariant
    would otherwise become a wrong answer: reference counts never below zero, a viewer's byte counts

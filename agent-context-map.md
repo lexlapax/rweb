@@ -1,6 +1,8 @@
 # Agent context map
 
-Last updated: 2026-11-26 (the logo turns while the terminal prints; Phase B step 5 next).
+Last updated: 2026-11-26 (Phase B step 5: the supervisor and stream opening wait on events, one
+write-deadline watcher per connection, no lock around Rex calls; step 6 next). Read first; load linked
+context lazily. Keep this file short: current
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
@@ -20,6 +22,7 @@ The logo also turns (one turn per 2.4 s) while the terminal on screen receives o
 at the end of a turn once no output came for 1.2 s (`keys.js` `keepTurning`, tested); none with
 `prefers-reduced-motion`. Checked in desktop Chrome on a ReleaseSafe bridge: still at rest, turning during
 a 4-second `echo` loop, upright again after it.
+
 ## Where things stand (2026-11-26, end of the day)
 
 - 0.1.1 is released (GitHub Release `v0.1.1`, commit `1846885`) and runs on the owner's four machines;
@@ -36,16 +39,27 @@ a 4-second `echo` loop, upright again after it.
   sites. F4 and F16 followed (replies and redraws handed over, not copied;
   a browser connection 128 KiB smaller). **Step 4 done**: `checkAllAllocationFailures` for 12 parsers and
   owning types, and 166 fail-from-N rounds of a hub handling every message type; found a double free in
-  `Mirror.setNonce` on out-of-memory (fixed), and three smaller faults. **Next: step 5**, events instead
-  of polling, one write-deadline watcher per connection, the mutex around Rex calls.
+  `Mirror.setNonce` on out-of-memory (fixed), and three smaller faults. **Step 5 done**: the supervisor
+  sleeps until an event or its next deadline (it woke every 200 ms), a new stream waits on the mirror's
+  "settled" signal (it polled every 5 ms), one deadline watcher per Rex connection (a task per frame
+  before), and each task calls Rex through its own `Api` (one lock serialised every call). A closed block
+  reaches the page in 2.4 ms (195), opening takes 0.8 ms (7.4), a resize behind another browser's stuck
+  listing 0.7 ms (4.9 s). Found on the way: the supervisor swallowed a cancel in places, which the 200 ms
+  poll had hidden (`close` waited 30 s); it now checks `closing` before every wait. **Next: step 6**,
+  assertions on internal invariants; then step 7.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
+- Rex on desktop-mac: the installed CLI is 0.1.0-preview.25 (API revision 24); the running server still
+  answers revision 18. rweb speaks 18 and 19: test it against a preview.25 server once the owner restarts
+  Rex onto it.
+
 ## 2026-11-26: GitHub settings (owner)
 
 Pull requests and projects are turned off on the repository (wiki and discussions were off already);
 forks are allowed (always, for a public repository). Issues stay on, for bug reports only: a form in
 `.github/ISSUE_TEMPLATE/bug_report.yml`, blank issues off. README and CONTRIBUTING.md say so.
+
 ## 2026-11-26: screenshots
 
 `assets/screenshots/desktop.png` and `phone.png`, shown at the top of the README; how they were made and
@@ -54,6 +68,7 @@ address is blurred. Found while making them: the clones' `zig-pkg/` and `zig-out
 and others (Zig keeps the modes of the dependency tarballs); fixed by hand on the owner's machines with
 `chmod -R go-w`. Release archives were not affected (`tools/release.sh` builds in its own private folder
 with a new cache). Not yet decided: whether rweb's build should do this itself.
+
 ## 2026-11-26: public
 
 - Superlogical (Discord, 2026-11-22): no restrictions on Rex clients; please do not use Rex's dinosaur logo
@@ -65,6 +80,7 @@ with a new cache). Not yet decided: whether rweb's build should do this itself.
   only in the owner's own backup.
 - Deployment (the owner's, outside this repository): rweb is now each host's main Tailscale Serve
   address (port 443).
+
 ## 2026-11-26: `f43ae8e` deployed
 
 - Deployed through setup-repo on laptop-mac, desktop-mac, linux-box and gateway-box (its pin `a9451b7`, its action

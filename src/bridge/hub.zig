@@ -3,8 +3,8 @@
 //! frames that a connection drains, so it is tested without sockets.
 //!
 //! Lock order, outermost first: `Hub.mu`, `Terminal.tmu`, the mirror's lock, `Terminal.vmu`,
-//! `Viewer.mu`. `api_mu` and `Hub.mu` are never held together. Nothing waits on Rex (a call, a
-//! stream, a snapshot) while holding `Hub.mu`. Output reaches viewers from the mirror's lock, so
+//! `Viewer.mu`. Rex calls take no hub lock (each task calls through its own `Api`, from `Hub.rexApi`).
+//! Nothing waits on Rex (a call, a stream, a snapshot) while holding `Hub.mu`. Output reaches viewers from the mirror's lock, so
 //! pushing to a viewer never blocks: queues are bounded and an overflowing viewer is told to
 //! redraw instead.
 //!
@@ -473,7 +473,7 @@ pub const Terminal = struct {
         const t: *Terminal = @ptrCast(@alignCast(ctx));
         if (why == .closed_by_us) return;
         t.ended.store(1 + @as(u8, @backingInt(why)), .release);
-        t.hub.supervisor_wake.set(t.hub.io);
+        t.hub.wakeSupervisor();
     }
 };
 
@@ -556,9 +556,8 @@ pub const Hub = struct {
     io: Io,
     cfg: Config,
     ctl: *Control,
-    api: Api,
-    /// Serialises calls through `api` (it keeps `last_error`). Never held with `mu`.
-    api_mu: Io.Mutex = .init,
+    /// The timeout of the calls `Api` calls quick (listings, downloads, terminal info); tests lower it.
+    quick_timeout_ms: u32 = rex.api.quick_call_timeout_ms,
     /// One-time tokens for file transfers (see `xfer.zig`).
     xfers: xfer.Registry,
 
@@ -586,7 +585,8 @@ pub const Hub = struct {
     seen_generation: u32 = 0,
 
     supervisor: ?Io.Future(void) = null,
-    supervisor_wake: Io.Event = .unset,
+    /// Rounds of the supervisor's loop, for tests of how often it wakes.
+    supervisor_rounds: std.atomic.Value(u64) = .init(0),
 
     const Known = struct {
         arena: std.heap.ArenaAllocator,
@@ -596,7 +596,7 @@ pub const Hub = struct {
     pub fn open(gpa: Allocator, io: Io, ctl: *Control, cfg: Config) !*Hub {
         const h = try gpa.create(Hub);
         errdefer gpa.destroy(h);
-        h.* = .{ .gpa = gpa, .io = io, .cfg = cfg, .ctl = ctl, .api = Api.init(gpa, ctl), .xfers = xfer.Registry.init(gpa, io) };
+        h.* = .{ .gpa = gpa, .io = io, .cfg = cfg, .ctl = ctl, .xfers = xfer.Registry.init(gpa, io) };
         ctl.mu.lockUncancelable(io);
         h.seen_generation = ctl.generation;
         ctl.mu.unlock(io);
@@ -607,12 +607,20 @@ pub const Hub = struct {
             h.attached.deinit(gpa);
             if (h.tree) |t| t.release(gpa);
             if (h.known) |*k| k.arena.deinit();
-            h.api.deinit();
             h.xfers.deinit();
         }
         try h.subscribeAndRefresh();
         h.supervisor = try io.concurrent(supervise, .{h});
         return h;
+    }
+
+    /// A Rex API client for one task's calls. Calls through different values run side by side (the
+    /// connection matches answers to calls); each keeps its own last error text, so no lock is held
+    /// across a call. The caller deinits it.
+    fn rexApi(h: *Hub) Api {
+        var a = Api.init(h.gpa, h.ctl);
+        a.quick_timeout_ms = h.quick_timeout_ms;
+        return a;
     }
 
     pub fn close(h: *Hub) void {
@@ -633,7 +641,6 @@ pub const Hub = struct {
         h.viewers.deinit(h.gpa);
         if (h.tree) |t| t.release(h.gpa);
         if (h.known) |*k| k.arena.deinit();
-        h.api.deinit();
         h.xfers.deinit();
         h.gpa.destroy(h);
     }
@@ -716,7 +723,7 @@ pub const Hub = struct {
     /// Whether an upload token issued to viewer `viewer_id` for view `view_gen` of this terminal may
     /// still be used: the viewer is still here, may write, and is still in that same view of that
     /// terminal (switching away and back raises `view_gen`). Checked when the upload arrives and
-    /// again before its path is pasted. Do not call holding `api_mu`.
+    /// again before its path is pasted.
     pub fn mayUpload(h: *Hub, viewer_id: u64, session_id: []const u8, block_id: []const u8, view_gen: u64) bool {
         if (h.cfg.observe_only) return false;
         h.mu.lockUncancelable(h.io);
@@ -736,7 +743,7 @@ pub const Hub = struct {
     /// check and the queueing are one step under the viewer's lock, and the paste goes into the
     /// terminal's own input queue: it is ordered against that page's switching terminals, turning
     /// read-only or leaving exactly as its typing is, and against the typing itself. False: not
-    /// pasted. Do not call holding `api_mu`.
+    /// pasted.
     pub fn pasteUpload(h: *Hub, viewer_id: u64, session_id: []const u8, block_id: []const u8, view_gen: u64, text: []const u8) bool {
         if (h.cfg.observe_only) return false;
         const body = std.json.Stringify.valueAlloc(h.gpa, .{ .text = text }, .{}) catch return false;
@@ -846,9 +853,9 @@ pub const Hub = struct {
             .clip => {
                 const term = h.pin(v) orelse return h.refuse(v, "clip", "no terminal open");
                 defer h.unpin(term);
-                h.api_mu.lockUncancelable(h.io);
-                const got = h.api.clipboard(term.session_id, term.block_id);
-                h.api_mu.unlock(h.io);
+                var api = h.rexApi();
+                defer api.deinit();
+                const got = api.clipboard(term.session_id, term.block_id);
                 var res = (got catch |e| return h.fail(v, "clip", e)) orelse return v.pushText("{\"t\":\"clip\",\"text\":null}");
                 defer res.deinit();
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "clip", .text = res.value }, .{}) catch return;
@@ -859,9 +866,9 @@ pub const Hub = struct {
                 const term = h.pin(v) orelse return h.refuse(v, "term_action", "no terminal open");
                 defer h.unpin(term);
                 if (!h.forTerminal(v, "term_action", term, act.at)) return;
-                h.api_mu.lockUncancelable(h.io);
-                defer h.api_mu.unlock(h.io);
-                h.api.termAction(term.session_id, term.block_id, @tagName(act.action)) catch |e| h.fail(v, "term_action", e);
+                var api = h.rexApi();
+                defer api.deinit();
+                api.termAction(term.session_id, term.block_id, @tagName(act.action)) catch |e| h.fail(v, "term_action", e);
             },
             .tree => h.sendTree(v),
             // A refusal names the terminal it was for, so a page that has moved on can ignore it, and
@@ -910,9 +917,9 @@ pub const Hub = struct {
             .ls => |l| {
                 if (!h.forTerminal(v, what, term, l.at)) return;
                 const path = l.path;
-                h.api_mu.lockUncancelable(h.io);
-                defer h.api_mu.unlock(h.io);
-                var d = h.api.listDir(term.session_id, term.block_id, path) catch |e| return h.fail(v, what, e);
+                var api = h.rexApi();
+                defer api.deinit();
+                var d = api.listDir(term.session_id, term.block_id, path) catch |e| return h.fail(v, what, e);
                 defer d.deinit();
                 const Out = struct { n: []const u8, d: bool };
                 var list: std.ArrayList(Out) = .empty;
@@ -925,10 +932,10 @@ pub const Hub = struct {
                 if (!h.forTerminal(v, what, term, d.at)) return;
                 const path = d.path;
                 const ref = rex.transfer.newRef(h.io, "download:");
-                h.api_mu.lockUncancelable(h.io);
-                defer h.api_mu.unlock(h.io);
-                var t_info = h.api.downloadBegin(term.session_id, term.block_id, &ref, path) catch |e| {
-                    return h.refuse(v, what, if (h.api.last_error) |le| le else @errorName(e));
+                var api = h.rexApi();
+                defer api.deinit();
+                var t_info = api.downloadBegin(term.session_id, term.block_id, &ref, path) catch |e| {
+                    return h.refuse(v, what, if (api.last_error) |le| le else @errorName(e));
                 };
                 defer t_info.deinit();
                 if (t_info.value.size > h.cfg.transfer.max_bytes) {
@@ -977,12 +984,9 @@ pub const Hub = struct {
     fn sendInfo(h: *Hub, v: *Viewer) void {
         const term = h.pin(v) orelse return;
         defer h.unpin(term);
-        h.api_mu.lockUncancelable(h.io);
-        var res = h.api.termInfo(term.session_id, term.block_id) catch |e| {
-            h.api_mu.unlock(h.io);
-            return h.fail(v, "info", e);
-        };
-        h.api_mu.unlock(h.io);
+        var api = h.rexApi();
+        defer api.deinit();
+        var res = api.termInfo(term.session_id, term.block_id) catch |e| return h.fail(v, "info", e);
         defer res.deinit();
         const i = res.value;
         const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "info", .state = i.state, .status_msg = i.status_msg, .progress = i.progress, .title = i.title, .pwd = i.pwd, .program = i.program, .exit_code = i.exit_code, .ports = i.ports }, .{}) catch return;
@@ -1082,11 +1086,11 @@ pub const Hub = struct {
             .fit => |f| {
                 if (!h.forTerminal(v, "fit", term, f.at)) return;
                 // Only on request: take the block, then ask for the size.
-                h.api_mu.lockUncancelable(h.io);
-                defer h.api_mu.unlock(h.io);
-                var own = h.api.own(term.session_id, term.block_id, .take) catch |e| return h.fail(v, "fit", e);
+                var api = h.rexApi();
+                defer api.deinit();
+                var own = api.own(term.session_id, term.block_id, .take) catch |e| return h.fail(v, "fit", e);
                 own.deinit();
-                h.api.resize(term.session_id, term.block_id, f.cols, f.rows) catch |e| h.fail(v, "fit", e);
+                api.resize(term.session_id, term.block_id, f.cols, f.rows) catch |e| h.fail(v, "fit", e);
             },
             else => unreachable,
         }
@@ -1095,9 +1099,9 @@ pub const Hub = struct {
     fn manage(h: *Hub, v: *Viewer, msg: protocol.Msg) void {
         if (h.isObserving(v)) return h.refuse(v, "manage", "read-only");
         const ok = blk: {
-            h.api_mu.lockUncancelable(h.io);
-            defer h.api_mu.unlock(h.io);
-            const api = &h.api;
+            var api_v = h.rexApi();
+            defer api_v.deinit();
+            const api = &api_v;
             const result: anyerror!void = switch (msg) {
                 .new_session => |label| r: {
                     var made = api.createSession(label) catch |e| break :r e;
@@ -1125,7 +1129,6 @@ pub const Hub = struct {
             };
             break :blk true;
         };
-        // After `api_mu` is released: this takes `mu`.
         if (ok) h.markTreeDirty();
     }
 
@@ -1299,24 +1302,22 @@ pub const Hub = struct {
         m.setObserver(t.observer());
         const d = try Data.openTerminal(h.gpa, h.io, h.ctl, sid, bid, m.sink());
         errdefer d.close();
-        var waited: u32 = 0;
-        while (m.getStatus() != .live) : (waited += 5) {
-            if (waited > snapshot_wait_ms or m.endReason() != null or m.getStatus() == .failed) return error.NoSnapshot;
-            try h.io.sleep(.fromMilliseconds(5), .awake);
-        }
+        // Live, failed or ended: whichever comes first.
+        if (!try m.waitSettled(snapshot_wait_ms)) return error.NoSnapshot;
+        if (m.getStatus() != .live) return error.NoSnapshot;
         return .{ .mirror = m, .data = d };
     }
 
-    /// Attach `sid` once, so its streams can be opened. Takes `mu` and `api_mu`, never both.
+    /// Attach `sid` once, so its streams can be opened. Does not hold `mu` across the call.
     fn ensureAttached(h: *Hub, sid: []const u8) !void {
         h.mu.lockUncancelable(h.io);
         const have = h.attached.contains(sid);
         h.mu.unlock(h.io);
         if (have) return;
         {
-            h.api_mu.lockUncancelable(h.io);
-            defer h.api_mu.unlock(h.io);
-            try h.api.attach(sid);
+            var api = h.rexApi();
+            defer api.deinit();
+            try api.attach(sid);
         }
         h.mu.lockUncancelable(h.io);
         defer h.mu.unlock(h.io);
@@ -1482,14 +1483,20 @@ pub const Hub = struct {
         h.mu.lockUncancelable(h.io);
         h.tree_dirty = true;
         h.mu.unlock(h.io);
-        h.supervisor_wake.set(h.io);
+        h.wakeSupervisor();
+    }
+
+    /// Have the supervisor look at the hub now (a stream ended, the tree changed, a restart is due)
+    /// rather than at its next deadline.
+    fn wakeSupervisor(h: *Hub) void {
+        h.ctl.wakeEvents();
     }
 
     fn subscribeAndRefresh(h: *Hub) !void {
         {
-            h.api_mu.lockUncancelable(h.io);
-            defer h.api_mu.unlock(h.io);
-            try h.api.attachAll();
+            var api = h.rexApi();
+            defer api.deinit();
+            try api.attachAll();
         }
         try h.refreshTree();
     }
@@ -1510,12 +1517,12 @@ pub const Hub = struct {
         const ka = known.arena.allocator();
 
         {
-            h.api_mu.lockUncancelable(h.io);
-            defer h.api_mu.unlock(h.io);
-            var sessions = try h.api.sessions();
+            var api = h.rexApi();
+            defer api.deinit();
+            var sessions = try api.sessions();
             defer sessions.deinit();
             for (sessions.value) |s| {
-                var blocks = h.api.blocks(s.session_id) catch {
+                var blocks = api.blocks(s.session_id) catch {
                     // A session that just went away, or one that failed to answer: keep its
                     // terminals until a tree says which blocks it has.
                     try known.keys.put(ka, try ka.print("{s}|*", .{s.session_id}), {});
@@ -1586,28 +1593,47 @@ pub const Hub = struct {
 
     // ---- supervisor: Rex events, reconnects, stream restarts ----
 
+    /// Longest the supervisor sleeps with nothing due. Everything that needs it wakes it (an event
+    /// from Rex, `wakeSupervisor`); this is only a floor under a wake that never came.
+    const supervisor_idle_ms: i64 = 30_000;
+    /// Least time between two tree reads: a burst of changes is read once.
+    const tree_gap_ms: i64 = 150;
+
     fn supervise(h: *Hub) void {
-        var last_tree_ms: i64 = 0;
+        var last_tree_ms: i64 = -tree_gap_ms;
+        var wait_ms: i64 = 0;
         while (true) {
-            const ev = h.ctl.nextEvent(200) catch return;
+            // Checked before every wait: `close` sets it before cancelling this task, and a cancel
+            // that arrives inside a step that swallows it (a tree read, a restart) is delivered once.
+            if (h.isClosing()) return;
+            const ev = h.ctl.nextEvent(@intCast(std.math.clamp(wait_ms, 0, supervisor_idle_ms))) catch return;
+            _ = h.supervisor_rounds.fetchAdd(1, .monotonic);
             if (ev) |e| {
                 defer e.deinit(h.gpa);
                 h.onEvent(e);
             }
-            h.mu.lockUncancelable(h.io);
-            const closing = h.closing;
-            h.mu.unlock(h.io);
-            if (closing) return;
-            h.restartEnded();
+            if (h.isClosing()) return;
+            // The next thing due: a restart, or a tree read held back by `tree_gap_ms`.
+            var next: i64 = h.restartEnded() orelse std.math.maxInt(i64);
             const now = std.Io.Clock.awake.now(h.io).toMilliseconds();
             h.mu.lockUncancelable(h.io);
             const dirty = h.tree_dirty;
             h.mu.unlock(h.io);
-            if (dirty and now - last_tree_ms >= 150 and h.ctl.isConnected()) {
-                last_tree_ms = now;
-                h.refreshTree() catch |e| log.debug("tree: {t}", .{e});
+            // Not connected: the `connected` event that follows marks the tree dirty again.
+            if (dirty and h.ctl.isConnected()) {
+                if (now - last_tree_ms >= tree_gap_ms) {
+                    last_tree_ms = now;
+                    h.refreshTree() catch |e| log.debug("tree: {t}", .{e});
+                } else next = @min(next, last_tree_ms + tree_gap_ms);
             }
+            wait_ms = if (next == std.math.maxInt(i64)) supervisor_idle_ms else next - std.Io.Clock.awake.now(h.io).toMilliseconds();
         }
+    }
+
+    fn isClosing(h: *Hub) bool {
+        h.mu.lockUncancelable(h.io);
+        defer h.mu.unlock(h.io);
+        return h.closing;
     }
 
     fn broadcastRexState(h: *Hub, up: bool) void {
@@ -1646,11 +1672,9 @@ pub const Hub = struct {
 
     /// A restarted Rex knows nothing about this client: attach again, and rebuild every stream.
     fn reattachAfterRestart(h: *Hub) void {
-        {
-            h.api_mu.lockUncancelable(h.io);
-            defer h.api_mu.unlock(h.io);
-            h.api.attachAll() catch |e| log.debug("attach_all: {t}", .{e});
-        }
+        var api = h.rexApi();
+        defer api.deinit();
+        api.attachAll() catch |e| log.debug("attach_all: {t}", .{e});
         // The sessions to attach again. Their ids are the set's own keys, borrowed: a key is freed
         // only below (on this task) and by `close`, which stops this task first. A session that is
         // not attached again is forgotten, and attached when its terminal restarts or is next opened
@@ -1664,12 +1688,10 @@ pub const Hub = struct {
             while (it.next()) |k| ids.appendAssumeCapacity(.{ .sid = k.* });
         } else |_| h.forgetAttachedLocked();
         h.mu.unlock(h.io);
-        h.api_mu.lockUncancelable(h.io);
-        for (ids.items) |*id| h.api.attach(id.sid) catch |e| {
+        for (ids.items) |*id| api.attach(id.sid) catch |e| {
             log.debug("re-attach: {t}", .{e});
             id.ok = false;
         };
-        h.api_mu.unlock(h.io);
         // Every stream is gone: rebuild each from a new snapshot.
         h.mu.lockUncancelable(h.io);
         defer h.mu.unlock(h.io);
@@ -1679,7 +1701,7 @@ pub const Hub = struct {
             t.*.ended.store(1 + @as(u8, @backingInt(rex.data.End.restart_needed)), .release);
             t.*.restart_after_ms = 0;
         }
-        h.supervisor_wake.set(h.io);
+        h.wakeSupervisor(); // (when not on the supervisor's own task)
     }
 
     /// Terminals whose block or session is not in a fresh tree: tell their viewers and drop them.
@@ -1754,8 +1776,9 @@ pub const Hub = struct {
 
     /// Rebuild the stream of every terminal whose stream ended. The streams are opened without
     /// `mu`; a terminal is held by a reference meanwhile, and gets its new stream only if it is still
-    /// open by then.
-    fn restartEnded(h: *Hub) void {
+    /// open by then. Returns when the next restart that is waiting out its backoff is due, if any.
+    fn restartEnded(h: *Hub) ?i64 {
+        var next: ?i64 = null;
         // Lists linked through `Terminal.link`: no memory needed, so no terminal is skipped or leaked.
         var todo: ?*Terminal = null;
         var dead: ?*Terminal = null;
@@ -1783,7 +1806,10 @@ pub const Hub = struct {
                     }
                     continue;
                 }
-                if (now < t.restart_after_ms) continue;
+                if (now < t.restart_after_ms) {
+                    next = @min(next orelse t.restart_after_ms, t.restart_after_ms);
+                    continue;
+                }
                 t.refs += 1;
                 t.restarting = true;
                 t.link = todo;
@@ -1799,13 +1825,18 @@ pub const Hub = struct {
                 h.mu.lockUncancelable(h.io);
                 t.restarts += 1;
                 t.restart_after_ms = std.Io.Clock.awake.now(h.io).toMilliseconds() + @min(@as(i64, 500) << @intCast(@min(t.restarts, 4)), 8000);
+                next = @min(next orelse t.restart_after_ms, t.restart_after_ms);
                 h.mu.unlock(h.io);
             };
             h.mu.lockUncancelable(h.io);
             t.restarting = false;
+            // Still or again ended (the try failed, or the new stream ended meanwhile): due at its
+            // backoff, which is past for a stream that had opened.
+            if (t.ended.load(.acquire) != 0) next = @min(next orelse t.restart_after_ms, t.restart_after_ms);
             h.mu.unlock(h.io);
             h.unpin(t);
         }
+        return next;
     }
 
     /// Open a new stream for `t` (the caller holds a reference) and swap it in.
@@ -2828,7 +2859,7 @@ test "hub: a block that closes while no memory can be had is still told to its v
     flaky.fail.store(true, .release);
     // What the stream's end does; the supervisor may get to it first, either way with no memory.
     t.ended.store(1 + @as(u8, @backingInt(rex.data.End.block_closed)), .release);
-    hs.hub.restartEnded();
+    _ = hs.hub.restartEnded();
     flaky.fail.store(false, .release);
     try expectClosedFor(v, hs);
     try testing.expect(viewedTerminal(v) == null);
@@ -3039,4 +3070,104 @@ test "hub: a hub and every message type, with allocations failing from each poin
         rounds += 1;
     }
     std.debug.print("hub out-of-memory rounds: {d} (a whole round makes {d} allocations)\n", .{ rounds, total });
+}
+
+fn usSince(t0: i96) i64 {
+    return @intCast(@divTrunc(std.Io.Clock.awake.now(testing.io).nanoseconds - t0, 1000));
+}
+
+/// A listing Rex never answers, on viewer `a`; then how long viewer `b`'s fit takes meanwhile (µs).
+fn fitBehindSlowListing(hs: Harness, a: *Viewer, b: *Viewer) !i64 {
+    hs.f.mu.lockUncancelable(testing.io);
+    hs.f.silent_method = "com.superlogical.terminal.list_dir";
+    hs.f.mu.unlock(testing.io);
+    defer {
+        hs.f.mu.lockUncancelable(testing.io);
+        hs.f.silent_method = null;
+        hs.f.mu.unlock(testing.io);
+    }
+    const Lister = struct {
+        fn run(h: *Hub, v: *Viewer, at: protocol.Target) void {
+            h.handle(v, .{ .ls = .{ .path = "", .at = at } });
+        }
+    };
+    var listing = try testing.io.concurrent(Lister.run, .{ hs.hub, a, hs.at() });
+    defer listing.await(testing.io);
+    try testing.io.sleep(.fromMilliseconds(100), .awake); // the listing is waiting on Rex
+    const t0 = std.Io.Clock.awake.now(testing.io).nanoseconds;
+    hs.hub.handle(b, .{ .fit = .{ .cols = 90, .rows = 30, .at = hs.at() } });
+    return usSince(t0);
+}
+
+test "hub: measure: opening, a block closing, and a fit behind a slow listing (only with RWEB_MEASURE)" {
+    if (testing.environ.getPosix("RWEB_MEASURE") == null) return error.SkipZigTest;
+    const hs = try Harness.init(.{ .transfer = .{ .enabled = true } });
+    defer hs.deinit();
+    const rounds = 20;
+    var open_us: [rounds]i64 = undefined;
+    var closed_us: [rounds]i64 = undefined;
+    for (0..rounds) |i| {
+        const t0 = std.Io.Clock.awake.now(testing.io).nanoseconds;
+        const v = try hs.openViewer();
+        defer hs.hub.removeViewer(v);
+        (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+        open_us[i] = usSince(t0);
+        const t1 = std.Io.Clock.awake.now(testing.io).nanoseconds;
+        hs.f.endStreams(hs.block_id, 4000, "block closed");
+        (try waitFrame(v, isClosed)).?.deinit(testing.allocator);
+        closed_us[i] = usSince(t1);
+    }
+    std.mem.sort(i64, &open_us, {}, std.sort.asc(i64));
+    std.mem.sort(i64, &closed_us, {}, std.sort.asc(i64));
+    std.debug.print("measure hub: open a terminal: median {d} us, max {d} us\n", .{ open_us[rounds / 2], open_us[rounds - 1] });
+    std.debug.print("measure hub: block closed to the viewer's closed frame: median {d} us, max {d} us\n", .{ closed_us[rounds / 2], closed_us[rounds - 1] });
+
+    const a = try hs.openViewer();
+    defer hs.hub.removeViewer(a);
+    const b = try hs.openViewer();
+    defer hs.hub.removeViewer(b);
+    for ([_]*Viewer{ a, b }) |v| (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    std.debug.print("measure hub: a fit while another viewer's listing waits on Rex: {d} us\n", .{try fitBehindSlowListing(hs, a, b)});
+}
+
+test "hub: an idle hub's supervisor sleeps instead of polling" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    try testing.io.sleep(.fromMilliseconds(300), .awake); // the start-up's tree read and its gap
+    const r0 = hs.hub.supervisor_rounds.load(.monotonic);
+    try testing.io.sleep(.fromMilliseconds(1_000), .awake);
+    // It woke every 200 ms before, whatever happened.
+    try testing.expect(hs.hub.supervisor_rounds.load(.monotonic) - r0 <= 1);
+}
+
+test "hub: a closed block reaches its viewer at once, not at the supervisor's next look" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    var total_us: i64 = 0;
+    for (0..5) |_| {
+        const v = try hs.openViewer();
+        defer hs.hub.removeViewer(v);
+        (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+        const t0 = std.Io.Clock.awake.now(testing.io).nanoseconds;
+        hs.f.endStreams(hs.block_id, 4000, "block closed");
+        (try waitFrame(v, isClosed)).?.deinit(testing.allocator);
+        total_us += usSince(t0);
+    }
+    // About 200 ms each before (the supervisor's poll); a few ms now. Generous for a busy machine.
+    try testing.expect(total_us < 250_000);
+}
+
+test "hub: a fit does not wait for another viewer's call to Rex" {
+    const hs = try Harness.init(.{ .transfer = .{ .enabled = true } });
+    defer hs.deinit();
+    hs.hub.quick_timeout_ms = 1_500;
+    const a = try hs.openViewer();
+    defer hs.hub.removeViewer(a);
+    const b = try hs.openViewer();
+    defer hs.hub.removeViewer(b);
+    for ([_]*Viewer{ a, b }) |v| (try waitFrame(v, isRedraw)).?.deinit(testing.allocator);
+    // One lock around every Rex call made it wait out the listing's timeout.
+    try testing.expect(try fitBehindSlowListing(hs, a, b) < 1_000_000);
+    // The listing still ends, refused as not answered.
+    (try waitFrame(a, isError)).?.deinit(testing.allocator);
 }
