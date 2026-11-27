@@ -65,9 +65,17 @@ a 4-second `echo` loop, upright again after it.
   F14, F17, F18, F19, F22 as their files are next touched. **0.2.0 (owner, 2026-11-27: every recommendation
   taken):** version set, changelog dated and grouped by topic, README names the current release, its
   0.2.0 review and build commands (owner asked for both), archives carry the README's screenshots, user
-  guide notes the upgrade. **Next:** `tools/release.sh` on this commit, trial of those archives on laptop-mac and linux-box
-  (desktop Chrome, iOS Simulator, Android emulator, the log filter), the owner's phone, then the GitHub
-  Release and setup-repo pins on all four.
+  guide notes the upgrade. Release commit `010e057`; `tools/release.sh 010e057` on laptop-mac
+  (official Zig 0.17.1): linux-x86_64 `6c07756d…`, macos-arm64 `f992b849…` in `zig-out/release/0.2.0/`.
+  **Trial 2026-11-27, those archives through setup-repo's pin (local commits on laptop-mac and linux-box,
+  unpushed) on both, each behind its existing Serve entry:** `rweb --version` 0.2.0 / 010e057 / revisions
+  18-24; desktop Chrome (laptop-mac) → linux-box: list, open, typing, a closed terminal leaves the page at
+  once; escape sequences that Ghostty complains about left nothing in linux-box's log (the filter, in a
+  running bridge); iOS Simulator Mobile Safari (laptop-mac) → linux-box: page loads and connects; Android
+  emulator Chrome (linux-box) → laptop-mac: drawer, open, typing through Gboard, key bar. Web tests 45/45
+  (Node on linux-box; laptop-mac has none on PATH). Throwaway `rweb-test-trial020` sessions killed on both.
+  **Next:** the owner's phone; then tag `v0.2.0` at `010e057`, GitHub Release with the archives and
+  `SHA256SUMS`, push setup-repo's pin and apply on desktop-mac and gateway-box (archives copied first).
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
