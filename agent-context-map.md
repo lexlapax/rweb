@@ -25,7 +25,13 @@ a 4-second `echo` loop, upright again after it.
 
 ## Where things stand (2026-11-27)
 
-- **0.3.0 is released (2026-11-27)** and closed out: GitHub Release `v0.3.0` at `38f4a3f` (archives,
+- **0.3.1 is released (2026-11-27)** and closed out: GitHub Release `v0.3.1` at `4fbe928` (signed; latest),
+  tap `3b2cca3`, AUR `6fc0bf8`; the page shows the version under "About rweb", Ghostty `vt-1.0.2`.
+  setup-repo now upgrades the package itself when it is older than its minimum (0.3.1): laptop-mac and
+  desktop-mac upgraded through it (both run 0.3.1); linux-box and gateway-box wait for the owner (sudo for
+  yay). Upstream check after 0.3.1: everything as pinned (esbuild newer, kept). Next: none planned; new
+  features at the owner's word.
+- **0.3.0 was released (2026-11-27)** and closed out: GitHub Release `v0.3.0` at `38f4a3f` (archives,
   `SHA256SUMS`, `SHA256SUMS.sig`, the first signed release; `tools/release.sh 38f4a3f` on laptop-mac,
   signed through 1Password with the owner's approval; signature and sums verified after download; the
   latest-release API answers v0.3.0). Homebrew tap `19a54b4`, AUR `rweb-bin` `bc0eca2`, both 0.3.0

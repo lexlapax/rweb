@@ -29,6 +29,12 @@ matches; `makepkg` builds `rweb-bin` on Arch with the binary, the systemd user u
 `/usr/bin/rweb`), the docs and the licences. Users of the tap must `brew trust lexlapax/rweb`: Homebrew
 loads a third-party tap's formulae only once trusted.
 
+**0.3.1, 2026-11-27:** from the signed release (`v0.3.1` at `4fbe928`; `SHA256SUMS` signed separately after
+`release.sh`'s own signing found the 1Password prompt unanswered, then verified). The formula passes
+`brew style` and `brew audit --strict` and fetches 0.3.1 (checked in a temporary tap named
+`lexlapax/rweb-check`, since `lexlapax/rweb` itself is in use on laptop-mac); tap `3b2cca3`. `rweb-bin`
+0.3.1 builds on Arch (both sources pass; the binary reports 0.3.1 and `vt-1.0.2`); AUR `6fc0bf8`.
+
 **0.3.0, 2026-11-27:** made by `tools/packaging.sh 0.3.0` from the signed release (signature checked).
 The tap's formula passes `brew style` and `brew audit --strict` and fetches the 0.3.0 archive with its
 SHA-256 (tapped from the committed local repository, then removed); pushed as `19a54b4`. `rweb-bin` 0.3.0

@@ -43,3 +43,7 @@ rweb does not build (fonts, GTK, kitty drag and drop, CI). Its dependencies are 
 (`THIRD-PARTY-NOTICES.md` regenerates byte-identical). Checked: `zig build test` with live Rex
 (preview.25, revision 24) 473 passed, 5 skipped, in Debug and in ReleaseSafe; `zig build fuzz`, and 300 s
 of `--fuzz` with no failure; no `rweb-test-` session left behind.
+
+**2026-11-27, after 0.3.1** (the Rex half on laptop-mac; the network half in the sandbox's job profile):
+Rex revision 24 and its `llms.txt` unchanged; `ghostty-vt` 1.0.2, Zig 0.17.1, xterm.js 6.0.0, the fit addon
+0.11.0 and wterm 0.6.0 all as pinned; esbuild 0.28.2 newer, kept as above. Nothing to do before new work.
