@@ -16,9 +16,9 @@ prompt that is waiting, run the quick command, and go. Not affiliated with Super
   <img src="assets/screenshots/phone.png" alt="rweb on a phone: a terminal with git log and ls output, and the key bar above the browser's address bar" width="200">
 </p>
 
-**Current release: 0.2.0** (2026-11-27). It works with Rex 0.1.0-preview.25 (Rex API revisions 18 to 24),
-closes terminals on the page at once, keeps one browser's slow request from holding up another, and uses
-less memory and CPU on busy terminals. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Current release: 0.3.0** (2026-11-27). It installs from Homebrew and the AUR, checks a setup with
+`rweb doctor`, tells you when a newer release is out, and ships signed checksums; round seven's security
+review is in it. It works with Rex 0.1.0-preview.25 (Rex API revisions 18 to 24). What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 `rweb --version` names the version you have.
 
 ## Why
@@ -83,8 +83,8 @@ mkdir -p ~/.local/bin && install -m 0755 rweb-<version>-<platform>/rweb ~/.local
 ```
 
 `SHA256SUMS` is signed with rweb's release key, above (`ssh-keygen` is part of OpenSSH): the first two
-lines check the signature (`Good "file" signature for rweb-release`), the third the archive. Releases after
-0.2.0 are signed.
+lines check the signature (`Good "file" signature for rweb-release`), the third the archive. Releases from
+0.3.0 on are signed.
 
 Then, on the Rex machine:
 
@@ -138,7 +138,9 @@ parts, each reviewer reading the code without the others' conclusions. In the fi
 internal review was split by area (request handling and authentication, the Rex client, concurrency, the
 page and tooling); the fifth followed each earlier finding across every endpoint, platform and documented
 procedure, and led to the two setup commands, `rweb tailscale` and `rweb ssh`; the sixth looked at what
-can change while something waits (a paste, an upload, a child process, a list that ages). Every finding was checked
+can change while something waits (a paste, an upload, a child process, a list that ages); the seventh
+covered the update check, `rweb doctor`, signing and packaging, and tightened the page's origin check to
+its scheme and port. Every finding was checked
 against the code before anything was changed, and each fix has a test. Over the first four rounds that
 came to more than 120 findings, among them a deadlock, use-after-free races, a paste that could escape
 bracketed paste, memory a program in a terminal could grow without bound, and trust in file paths that
@@ -149,7 +151,8 @@ their verdicts, fixes and tests: [round 1](docs/release-review-2026-11-25.md),
 [round 2](docs/security-review-2026-11-25-round2.md), [round 3](docs/security-review-2026-11-25-round3.md),
 [round 4 and its live test](docs/security-review-2026-11-25-round4.md),
 [round 5](docs/security-review-2026-11-26-round5.md),
-[round 6](docs/security-review-2026-11-26-round6.md) (in the source repository).
+[round 6](docs/security-review-2026-11-26-round6.md),
+[round 7](docs/security-review-2026-11-27-round7.md) (in the source repository).
 
 For 0.2.0 the code was also audited against a checklist of Zig practice for production code
 ([docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md), in the source repository) and
@@ -225,6 +228,6 @@ which it is built. The software it contains or serves keeps its own licences:
 ## Status
 
 rweb is in daily use on Linux and macOS. Rex is a preview: rweb pins the Rex API revisions it speaks
-(see `rweb --version`; 0.2.0 speaks 18 to 24, Rex 0.1.0-preview.21 to preview.25) and is tested against
+(see `rweb --version`; 0.3.0 speaks 18 to 24, Rex 0.1.0-preview.21 to preview.25) and is tested against
 each Rex update. Release archives: macOS on Apple silicon,
 and Linux x86-64 (static, any distribution). Windows support will come later.

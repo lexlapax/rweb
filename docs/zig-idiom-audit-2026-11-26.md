@@ -557,7 +557,7 @@ Rex, in ReleaseSafe.
      p99 3.4–3.9 → 3.0–3.1 ms, 695–766 → 606–621 ms CPU. No cost beyond noise. What it would give: a trace
      of where an error came from when one escapes `main` or is dumped, and the releases are stripped (the
      owner's decision above), so such a trace would show addresses only. **Not enabled**; the measurement
-     is here for whoever revisits it, and the choice is the owner's for the next release.
+     is here for whoever revisits it, and the choice is the owner's (not taken for 0.2.0 or 0.3.0).
 
    **The five leftovers, fixed 2026-11-27** (after 0.2.0, at the owner's request):
    - **F14.** `access.constantTimeEql` is the one comparison of secrets (the token, the transfer tokens,

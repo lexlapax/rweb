@@ -57,7 +57,7 @@ The first two lines check that `SHA256SUMS` was signed with rweb's release key (
 OpenSSH; it should say `Good "file" signature for rweb-release`); the third that the archive is the one
 `SHA256SUMS` names. Take the key from this guide or the README (also `tools/release-signers` in the source
 repository), not from the release page, so that someone who could change the release could not also
-change the key. Releases signed so: from the one after 0.2.0.
+change the key. Releases signed so: from 0.3.0 on.
 
 The archive holds `rweb`, this guide and the architecture notes (`docs/`), the README and its pictures
 (`assets/`), the services of sections 5 and 6 (`contrib/systemd/rweb.service`,
@@ -394,6 +394,12 @@ if you may want it back), then restart rweb: `systemctl --user restart rweb` on 
 sessions; pages behind Tailscale reconnect by themselves, and a page through an SSH tunnel waits for a
 tap on Reconnect. The Serve entry, the secret and the token stay as they are.
 
+**Upgrading to 0.3.0.** Nothing to change: the options, files and Serve entry are the same as in 0.2.0.
+New: rweb asks GitHub once a day whether a newer release is out (above); add `--no-update-check` to the
+service's command to turn that off. `rweb doctor` checks a setup. A page reached over plain HTTP behind
+Tailscale Serve, or on another port, can no longer open a terminal: open rweb at the `https://` address
+`rweb tailscale` printed, as before.
+
 **Upgrading to 0.2.0.** Nothing to change: the options, files and Serve entry are the same as in 0.1.1.
 It speaks Rex API revisions 18 to 24, so it works with Rex 0.1.0-preview.25 at its own revision and still
 with older servers.
@@ -460,7 +466,7 @@ failure. It never prints the backend secret or the token.
 
 ```
 $ rweb doctor
-rweb doctor: checking rweb tailscale (rweb 0.2.0)
+rweb doctor: checking rweb tailscale (rweb 0.3.0)
   ok    Rex answers at /run/user/1000/rex/server.sock, API revision 24 (rweb speaks 18 to 24)
   ok    a bridge is listening on unix:/run/user/1000/rweb/bridge.sock
   ok    Tailscale: box.example.ts.net, signed in as you@example.com (/usr/bin/tailscale)
@@ -469,7 +475,7 @@ rweb doctor: checking rweb tailscale (rweb 0.2.0)
         if Tailscale Serve is not set up for rweb yet, run this once:
         sudo tailscale serve --bg --https=12443 unix:/run/user/1000/rweb/bridge.sock
         …
-  ok    rweb 0.2.0 is the latest release
+  ok    rweb 0.3.0 is the latest release
 rweb doctor: 5 passed, 0 notes, 1 failed
 ```
 

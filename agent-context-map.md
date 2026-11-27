@@ -25,7 +25,13 @@ a 4-second `echo` loop, upright again after it.
 
 ## Where things stand (2026-11-27)
 
-- **Round 7 done, not released** ([docs/security-review-2026-11-27-round7.md](docs/security-review-2026-11-27-round7.md)):
+- **0.3.0, release commit** (version, CHANGELOG heading and summary, README "Current release", the guide's
+  "Upgrading to 0.3.0", the doctor sample, "from 0.3.0 on are signed", PLAN Phase 6; docs swept for stale
+  version and status wording; Rex on laptop-mac and linux-box is 0.1.0-preview.25, API revision 24, so the
+  Rex statements stand). Release steps: `tools/release.sh` signed (owner approves in 1Password), a live run,
+  push, tag `v0.3.0`, GitHub Release with `SHA256SUMS.sig`, `tools/packaging.sh`, tap and AUR, then the
+  close-out commit with the upstream check (owner, 2026-11-27), then setup-repo on upstream binaries.
+- **Round 7 done** ([docs/security-review-2026-11-27-round7.md](docs/security-review-2026-11-27-round7.md)):
   the external scan, agy's readiness review and an internal review of `1779bea`, all items checked against the
   code. Fixed: the Origin compared on scheme, name and port with the scheme from the configuration
   (`access.pageScheme`, `requestHost`, `originMatches`; `X-Forwarded-Host` only behind Serve); redirects
@@ -39,11 +45,10 @@ a 4-second `echo` loop, upright again after it.
   on the signed 0.2.0 sums and three failure cases, `brew style`/`audit --strict` on the formula and tap; each new access
   and update test fails with its fix taken out. linux-box (clone of `a83466b`'s branch in /tmp, removed after): fmt, `zig build test` 463 + 15 skip, ReleaseSafe
   463 + 15, `web-test` 46/46, `dist`. Not run: a browser through a real Serve entry (the release's live run). **Next:** the
-  release (0.3.0: version, CHANGELOG heading, README, the guide's "Upgrading to 0.3.0", `tools/release.sh`
-  signed, GitHub Release, packaging, tap and AUR, setup-repo pin) and its live run through Serve.
+  0.3.0 release (above).
 - 0.2.0 is released (GitHub Release `v0.2.0`, commit `010e057`) and runs on the owner's four machines;
   the repository is public. Phase 5 is done; Phase 6's steps' status is in [docs/PLAN.md](docs/PLAN.md)
-  ("Phase 6"): channels, `doctor`, signed checksums and the update check are done for the next release.
+  ("Phase 6"): channels, `doctor`, signed checksums and the update check are in 0.3.0.
 - **Phase B** of [docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md) (section 4):
   **step 1 done** (typed JSON in the Rex client; allocations per call down 57 to 74 %; results and the
   `.{}`-is-a-list trap the fake hid, in the audit). `src/rex/measure.zig` measures the client

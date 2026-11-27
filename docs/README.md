@@ -2,9 +2,9 @@
 
 ## Using rweb
 
-- [User guide](user-guide.md): install; reach it through Tailscale or an SSH tunnel; run it at boot or
+- [User guide](user-guide.md): install (an archive, Homebrew or the AUR, with the signature checked); reach it through Tailscale or an SSH tunnel; run it at boot or
   login on Linux and macOS; several machines; using the page; file transfer; upgrade, stop or remove;
-  troubleshooting; every option.
+  troubleshooting with `rweb doctor`; every option.
 - [Changelog](../CHANGELOG.md): what changed in each version.
 - [Licence](../LICENSE): MIT.
 - [Third-party notices](../THIRD-PARTY-NOTICES.md): the software rweb contains or serves, with licences.

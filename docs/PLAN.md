@@ -299,23 +299,23 @@ Gates, all before any public step (**all met 2026-11-26**):
   and commit message the tailnet, host and setup-repository names became generic, commits are authored
   by the owner's GitHub no-reply address, and the README names the maintainer. The rewritten history
   went to a new public `lexlapax/rweb`, and the old private repository was deleted, so GitHub holds no
-  copy of the old objects. v0.1.1 and v0.2.0 are GitHub Releases there.
+  copy of the old objects. v0.1.1, v0.2.0 and v0.3.0 are GitHub Releases there.
 
 Where the steps below stand (2026-11-27):
 
 - Step 1: the command line was generalised in round five (`rweb tailscale`, `rweb ssh`: no owner flags,
   secrets and folders made, plain refusals with a fix) and the user guide covers Serve on Linux and
-  macOS. `rweb doctor` since 2026-11-27 (after 0.2.0): checks Rex, the files, the bridge, Tailscale and
+  macOS. `rweb doctor` since 0.3.0: checks Rex, the files, the bridge, Tailscale and
   Serve as the command it names would use them, and says what to fix.
 - Step 2: rounds five and six reviewed rweb for other people's machines (shared hosts, groups, disks,
   procedures). Done for now; repeat when step 1 or 3 changes much.
-- Step 3: made 2026-11-27, published with the next release: a Homebrew formula (release binary, macOS ARM64
+- Step 3: made 2026-11-27: a Homebrew formula (release binary, macOS ARM64
   and Linux x86-64, `brew services`), an AUR package `rweb-bin` (with a systemd user unit), and the
   services in the archive (`contrib/`); `tools/packaging.sh` makes them from a signed release
-  ([packaging/README.md](../packaging/README.md)). Published 2026-11-27 at 0.2.0: the tap
-  `lexlapax/homebrew-rweb` and the AUR package `rweb-bin`; each release updates them.
+  ([packaging/README.md](../packaging/README.md)). Published 2026-11-27 at 0.2.0, updated to 0.3.0:
+  the tap `lexlapax/homebrew-rweb` and the AUR package `rweb-bin`; each release updates them.
 - Step 4: tagged releases with checksums and notes, and the Rex revisions in `rweb --version`: done.
-  Signed checksums: since 2026-11-27, `SHA256SUMS.sig` (`ssh-keygen -Y sign`, namespace `file`, key
+  Signed checksums: from 0.3.0, `SHA256SUMS.sig` (`ssh-keygen -Y sign`, namespace `file`, key
   `rweb-release` in `tools/release-signers`, the README and the user guide; held in the owner's 1Password
   and used through its SSH agent).
 - Step 5: done 2026-11-27 (`tools/vendor/rebuild.sh`, [vendored-browser-code.md](vendored-browser-code.md)):
@@ -323,7 +323,10 @@ Where the steps below stand (2026-11-27):
   pinned esbuild. `ghostty-vt.wasm` is checked against its published package, not rebuilt from source:
   it is wterm's own module, which the pinned Ghostty does not produce.
 - Added by the owner, 2026-11-27: an update check. The bridge asks GitHub's latest-release API daily and
-  tells a newer version (log, page, `rweb doctor`); on by default, `--no-update-check` turns it off.
+  tells a newer version (log, page, `rweb doctor`); on by default, `--no-update-check` turns it off. In
+  0.3.0.
+- Added by the owner, 2026-11-27, for after 0.3.0 and before new features: a check of the upstreams rweb
+  pins (Rex, Ghostty's libghostty-vt, Zig, the vendored browser packages) for changes to account for.
 - Exit: not met (nobody else has installed it from a channel).
 
 Then:

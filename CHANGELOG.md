@@ -4,7 +4,12 @@ Versions follow [semantic versioning](https://semver.org). Newest first. `rweb -
 version, the commit it was built from, the build mode and target, the Ghostty (libghostty-vt) tag and
 the Rex API revisions it speaks.
 
-## Unreleased
+## 0.3.0 (2026-11-27)
+
+Easier to install, check and keep current: Homebrew and the AUR, `rweb doctor`, a daily check for a newer
+release, and signed checksums. Round seven's review closes a way for a plain-HTTP page on the same machine
+name to reach the bridge behind Tailscale. No options, files or Serve entries change: install over 0.2.0
+and restart rweb. The update check is on by default; `--no-update-check` turns it off.
 
 - rweb tells you when a newer version is released: once a day (first 10 minutes after it starts) it asks
   GitHub's latest-release API and, for a newer version, logs it once, puts a dot on the page's ⋯ button with
@@ -17,8 +22,8 @@ the Rex API revisions it speaks.
 - When the page reports a failure it says what happened in words ("Rex did not answer in time", "the
   terminal's output could not be reached"), not an internal error name; the name goes to rweb's log.
 - Packages: a Homebrew formula (tap `lexlapax/rweb`, macOS ARM64 and Linux x86-64, with `brew services`)
-  and an AUR package (`rweb-bin`, with a systemd user unit), both from the release archives and both
-  already serving 0.2.0;
+  and an AUR package (`rweb-bin`, with a systemd user unit), both from the release archives (from
+  0.2.0 on);
   `tools/packaging.sh VERSION` makes them from a release. The archives carry the user guide's services
   (`contrib/`).
 - Releases come with `SHA256SUMS.sig`: `SHA256SUMS` signed with rweb's release key (an Ed25519 SSH key;
