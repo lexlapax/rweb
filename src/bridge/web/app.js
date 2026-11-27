@@ -107,6 +107,19 @@ if (!term) {
   for (const n of [4, 10, 11, 12]) term.parser.registerOscHandler(n, data => data.includes('?'));
 }
 
+// The logo turns, slowly, while the terminal on screen is printing: each turn ends upright, and it keeps
+// turning only if output came during the last moments (keys.js `keepTurning`). With reduced motion asked
+// for, the CSS has no turn, so this changes nothing to see.
+let lastOutputAt = 0;
+function logoTurns() {
+  lastOutputAt = Date.now();
+  const logo = $('crumb-logo');
+  if (logo && !logo.classList.contains('turning')) logo.classList.add('turning');
+}
+$('crumb-logo').addEventListener('animationiteration', e => {
+  if (!K.keepTurning(Date.now(), lastOutputAt)) e.target.classList.remove('turning');
+});
+
 // Nothing goes out on a token-mode connection before its first message showed it is rweb (`connect`).
 function send(obj) { if (state.ws && state.ws.readyState === 1 && state.linkChecked) state.ws.send(JSON.stringify(obj)); }
 // `opened`: the bridge has said it shows state.current (an `opened` for it arrived). Until then the
@@ -432,7 +445,7 @@ function connect() {
     link.lastRx = performance.now();
     if (!link.healthy) { link.healthy = true; renderStatus(); }
     // Output is drawn only once the bridge has said it shows this page's terminal (see `ready`).
-    if (typeof ev.data !== 'string') { if (ready()) term.write(new Uint8Array(ev.data)); return; }
+    if (typeof ev.data !== 'string') { if (ready()) { term.write(new Uint8Array(ev.data)); logoTurns(); } return; }
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     try { handleMessage(m); } catch (e) { if (dbgOn) dbgSend({ev: 'handler-threw', mt: m.t, msg: String(e && e.stack || e).slice(0, 300)}); }
   };

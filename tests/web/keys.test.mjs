@@ -544,3 +544,10 @@ test('a paste that fits still fits with its terminal named', () => {
   assert.equal(K.pasteRefusal(exact, {session: 's1', block: 'b1'}), null);
   assert.notEqual(K.pasteRefusal(exact, {session: '\x01'.repeat(200), block: '\x01'.repeat(200)}), null);
 });
+
+test('the logo keeps turning only while output keeps coming', () => {
+  assert.equal(K.keepTurning(10_000, 10_000 - 100), true);
+  assert.equal(K.keepTurning(10_000, 10_000 - K.LOGO_IDLE_MS + 1), true);
+  assert.equal(K.keepTurning(10_000, 10_000 - K.LOGO_IDLE_MS), false);
+  assert.equal(K.keepTurning(10_000, 0), false); // never any output
+});

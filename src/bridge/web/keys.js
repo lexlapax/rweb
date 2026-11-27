@@ -278,6 +278,11 @@
   // (`stillView`); a switch away and back is another view, and what was asked before it is not sent.
   // The message names the terminal too (`session`, `block`), and the bridge refuses one that is not
   // for the terminal it has open for this page.
+  // The header logo keeps turning, at the end of each turn, only if terminal output came within this
+  // long: a burst of output gives a turn or two, a busy program keeps it going, and it rests upright.
+  const LOGO_IDLE_MS = 1200;
+  function keepTurning(now, lastOutputAt) { return now - lastOutputAt < LOGO_IDLE_MS; }
+
   function holdView(current, gen) { return current ? {session: current.session, block: current.block, gen} : null; }
   function stillView(held, current, gen) { return !!held && held.gen === gen && sameTerm(held, current); }
   // Whether a message that names a terminal (an `open` refusal, `closed`) is about `current`, the
@@ -371,7 +376,7 @@
   function tokenModeFrom(wasTokenMode, mode) { return wasTokenMode === true || (!!mode && mode.auth === 'token'); }
   function tokenModeFromPath(pathname) { return /^\/s\/[A-Za-z0-9_-]+\//.test(String(pathname || '')); }
 
-  const api = {linkStep, LINK_START, waitText, looksLikeRweb, tokenModeFrom, tokenModeFromPath, sameTerm, holdView, stillView, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
+  const api = {linkStep, LINK_START, waitText, looksLikeRweb, tokenModeFrom, tokenModeFromPath, sameTerm, keepTurning, LOGO_IDLE_MS, holdView, stillView, aboutTerm, openRefusal, openRetryDelay, OPEN_RETRY_MAX_MS, partitionUploads, snake, modsString, keyObject, ctrlText, applyLatched, editsBetween, editBytes, lastLines, tapLine, selectedRange, selectedText, ROW_MAIN, ROW_MORE, clampFont, fitScale, stripReplies, dragMode, dragRows, scrollKeys, cleanPaste, isPasteInput, commitIsPaste, COMMIT_TYPE_MAX, utf8Length, pasteRefusal, PASTE_MAX_BYTES, MESSAGE_MAX_BYTES, pastePreview, PREVIEW_MAX_CHARS, cleanClip, copyView, COPY_MAX_LINES, pickTerm, debugOn, FONT_MIN, FONT_MAX, FONT_DEFAULT};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RwebKeys = api;
 })(typeof window !== 'undefined' ? window : globalThis);

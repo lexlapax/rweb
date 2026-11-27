@@ -328,7 +328,9 @@ each has its own token and its own sign-in, and each `/s/<id>/` address is as se
   Text copied in the terminal (what a program put on the clipboard); Paste; Clear screen; Reset terminal;
   Download a file and Upload files (when enabled); the terminal engine (wterm, or the older xterm.js);
   Touch diagnostics; Reconnect; About rweb (rweb's page on GitHub, in a new tab, as the logo at the top
-  left also opens; no address of your page is sent with it).
+  left also opens; no address of your page is sent with it). The logo turns slowly while the terminal
+  on screen is printing and comes to rest upright a moment after it stops; it stays still if your
+  device asks for reduced motion.
 - **Pasting.** A paste reaches the program as a paste, without escape characters, so pasted text cannot
   pretend the paste ended and type the rest as commands. Text a phone keyboard inserts in one go (its
   clipboard suggestion, say) is treated as a paste too. If the text has several lines and the program has

@@ -192,6 +192,11 @@ button { min-height: 0; padding: 0 8px; font-size: 14px; }
 /* The logo before the title "rweb", shown only while no terminal is open (the separator is hidden then). */
 #crumb-home { border-radius: 4px; }
 #crumb-home:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+/* Turns while the terminal prints (app.js `logoTurns`); still for anyone who asked for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  #crumb-logo.turning { animation: logo-turn 2.4s linear infinite; }
+  @keyframes logo-turn { to { transform: rotate(360deg); } }
+}
 #crumb-logo { display: inline-block; flex: none; width: 22px; height: 22px; margin-right: 8px; vertical-align: -6px; }
 #ports { display: flex; gap: 4px; margin-left: auto; }
 .chip { font: 11px ui-monospace, Menlo, monospace; color: var(--good); border: 1px solid #2c4a33; background: #1d2a21; border-radius: 10px; padding: 2px 7px; }

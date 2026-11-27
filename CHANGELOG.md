@@ -10,6 +10,8 @@ the Rex API revisions it speaks.
 - Issues are for bug reports, through a bug report form; pull requests are turned off on GitHub.
 - The logo at the top left, and "About rweb" in the ⋯ menu, open rweb's page on GitHub in a new tab,
   without sending this page's address (it names your machine).
+- The logo turns slowly while the terminal on screen prints, and rests upright once it is quiet (still
+  with reduced motion).
 - Rex client: each answer is parsed once and read into a typed structure, and requests are written in
   one pass; a tree refresh with 50 sessions makes 63 % fewer allocations. A malformed answer from Rex is
   refused more strictly (a field of the wrong type is an error, not ignored).

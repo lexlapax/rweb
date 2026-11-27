@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (the logo and "About rweb" link to the GitHub page; Phase B step 5 next).
+Last updated: 2026-11-26 (the logo turns while the terminal prints; Phase B step 5 next).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
@@ -15,6 +15,11 @@ in a new tab with `noopener noreferrer` (the page also sends `Referrer-Policy: n
 page's address names the machine and, through a tunnel, the token's path. It is the page's only outside
 address: `assets.zig` and the server's CSP test allow exactly that link and nothing else. Checked in
 desktop Chrome on a ReleaseSafe bridge (a real click opened the GitHub page; the header unchanged).
+
+The logo also turns (one turn per 2.4 s) while the terminal on screen receives output, and stops upright
+at the end of a turn once no output came for 1.2 s (`keys.js` `keepTurning`, tested); none with
+`prefers-reduced-motion`. Checked in desktop Chrome on a ReleaseSafe bridge: still at rest, turning during
+a 4-second `echo` loop, upright again after it.
 ## Where things stand (2026-11-26, end of the day)
 
 - 0.1.1 is released (GitHub Release `v0.1.1`, commit `1846885`) and runs on the owner's four machines;
