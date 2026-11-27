@@ -57,7 +57,7 @@ mechanical changes above), **part fixed**, or **open**.
 
 | id | area | severity | what | status | where now |
 |---|---|---|---|---|---|
-| F1 | allocators | should-fix | `init.gpa` in a ReleaseSafe build is `std.heap.SafeAllocator` over the page allocator (std `start.zig`); nobody chose it or measured it | open (Phase B 2) | `src/bridge/main.zig:155` |
+| F1 | allocators | should-fix | `init.gpa` in a ReleaseSafe build is `std.heap.SafeAllocator` over the page allocator (std `start.zig`); nobody chose it or measured it | **decided in Phase B step 2** (2026-11-26): kept, now stated and checked at compile time | `src/bridge/main.zig:155` |
 | F2 | performance | should-fix | `readMessage` allocates and frees a buffer for every message, so once per chunk of terminal output | open (Phase B 3) | `src/rex/ws.zig:517-577` |
 | F3 | performance | should-fix | live output is copied per viewer per chunk, and a frame grows by exact-size `realloc` (quadratic, bounded by the 64 KiB frame) | open (Phase B 3) | `src/bridge/hub.zig:229-250` |
 | F4 | performance | should-fix | a reply is built with `valueAlloc`, then `push` copies it and the first copy is freed; a redraw (up to 16 MiB) is copied the same way | open (Phase B 3) | `src/bridge/hub.zig:186-188`, `:1238`; 17 `valueAlloc` in `hub.zig` |
@@ -234,6 +234,39 @@ Rex, in ReleaseSafe.
    hour, system calls per MiB of output (`strace -c` on Linux), keystroke round trip at the median
    and the 99th percentile. Write the choice and the numbers in `docs/`, and say what safety is
    given up if the choice is not the safe allocator.
+
+   **Done 2026-11-26: the safe allocator stays**, now a stated decision (a comment where `main` takes
+   it, and a compile-time error for a build mode that would get another allocator).
+
+   The fixed workload is `src/bridge/bench.zig` (`RWEB_BENCH=1 RWEB_BENCH_ALLOC=safe|smp|c zig build test
+   -Doptimize=ReleaseSafe -Dtest-filter=bench:`): the real Rex client, hub and server on the chosen
+   allocator, in one process with the fake Rex and three simulated browsers (those on `smp_allocator` in
+   every run). It sends 32 MiB of terminal output to one viewer and then to three, then types 1,000
+   words of a few characters each (one every 10 ms at most, under the bridge's 200-messages-a-second
+   flood limit), timing each until its echo arrives. Three runs per allocator on each machine.
+
+   | | safe (`SafeAllocator`) | `smp_allocator` | C allocator |
+   |---|---|---|---|
+   | macOS: total CPU | 1,219–1,294 ms | 1,151–1,186 ms | 1,137–1,173 ms |
+   | macOS: 32 MiB to 3 viewers | 129–134 ms wall | 127–131 ms | 121–125 ms |
+   | macOS: key round trip, median / p99 | 3.09–3.12 / 3.47–3.68 ms | 3.08–3.14 / 3.48–3.62 ms | 3.07–3.16 / 3.43–3.56 ms |
+   | macOS: page faults | ~48,700 | ~46,300 | ~31,000 |
+   | Linux (musl): total CPU | 1,285–1,361 ms | 1,219–1,242 ms | 1,188–1,199 ms |
+   | Linux: CPU while typing | 810–845 ms | 714–720 ms | 659–704 ms |
+   | Linux: key round trip, median / p99 | 1.67–1.70 / 2.79–2.85 ms | 1.70–1.73 / 2.78–2.80 ms | 1.66–1.74 / 2.76–2.81 ms |
+   | Linux: page faults | ~121,000 | ~114,500 | ~117,900 |
+   | Linux: resident after 3 s idle | 82–86 MB | 79–83 MB | 81–84 MB |
+
+   The safe allocator costs 5 to 12 % more CPU in all (15 to 25 % while typing), at the same latency
+   and memory. What another allocator would give up: use-after-free and double-free detection in the
+   shipped binary (a crash instead of corrupted memory). For a bridge that holds the owner's full Rex
+   access, kept.
+
+   Limits of the measurement: the process's memory is mostly the fake Rex holding the output, so peak
+   memory does not tell the allocators apart; system calls were not counted (`strace` is not installed
+   on the Linux host, and installing it goes through the owner's setup repository); "after an hour" was
+   3 seconds. The round trip of a key (about 3 ms on macOS, 1.7 ms on Linux) is the same with every
+   allocator: it is waits elsewhere, for step 5 to look at.
 
 3. **Allocations per frame and per keystroke (F2, F3, F4, F16, F23).** A read buffer kept per
    connection; live frames with their capacity taken once, or a ring per viewer; `pushOwned` for

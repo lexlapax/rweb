@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (Phase B step 1, typed JSON in the Rex client, done and measured; step 2 next).
+Last updated: 2026-11-26 (Phase B step 2: the safe allocator kept, from measurements; step 3 next).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
@@ -15,8 +15,10 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 - **Phase B** of [docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md) (section 4):
   **step 1 done** (typed JSON in the Rex client; allocations per call down 57 to 74 %; results and the
   `.{}`-is-a-list trap the fake hid, in the audit). `src/rex/measure.zig` measures the client
-  (`RWEB_MEASURE=1`). **Next: step 2**, the release allocator chosen from measurements, which first needs
-  the fixed workload (output volume, viewers, typed keys) the audit describes.
+  (`RWEB_MEASURE=1`). **Step 2 done**: the release allocator stays std's `SafeAllocator`, now stated in `main` and
+  checked at compile time; measured with the fixed workload `src/bridge/bench.zig` (`RWEB_BENCH=1`):
+  5 to 12 % more CPU than `smp`/C, same latency and memory. **Next: step 3**, allocations per frame and
+  per keystroke, measured with the same workload.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

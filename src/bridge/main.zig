@@ -16,6 +16,12 @@ pub const layout = @import("layout.zig");
 pub const proc = @import("proc.zig");
 const build_options = @import("build_options");
 
+comptime {
+    // std's start code gives main its `SafeAllocator` in Debug and ReleaseSafe only; ReleaseFast and
+    // ReleaseSmall would get the C allocator. The decision above is for the safe one.
+    if (builtin.mode != .debug and builtin.mode != .safe) @compileError("rweb is built in Debug or ReleaseSafe: its allocator decision (main) assumes std's SafeAllocator");
+}
+
 /// What `rweb --version` prints: the version, the commit, how it was built, and what it works with.
 pub fn versionText() []const u8 {
     return std.fmt.comptimePrint(
@@ -153,6 +159,12 @@ fn handleStopSignals(b: *const server.Bound) void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    // The release allocator is a decision, not a default (docs/zig-idiom-audit-2026-11-26.md, Phase B
+    // step 2): std's `SafeAllocator` over the page allocator, which is what `init.gpa` is in the
+    // ReleaseSafe build the archives use. It turns a use-after-free or double free into a crash. It
+    // was measured against `smp_allocator` and the C allocator (src/bridge/bench.zig): 5 to 12 % more
+    // CPU, the same latency and memory; kept for the bridge's safety. The comptime check below makes a
+    // build mode that would hand this a different allocator fail to compile instead of changing it.
     const gpa = init.gpa;
     const io = init.io;
 
@@ -1186,4 +1198,5 @@ test {
     _ = cli;
     _ = layout;
     _ = proc;
+    _ = @import("bench.zig");
 }
