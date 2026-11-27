@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     // Not `standardOptimizeOption`: its preferred mode would take `-Doptimize` away, which every
     // build of this repository passes. `--release` alone means ReleaseSafe, the mode releases ship.
-    const optimize_help = "Debug (the default: Ghostty runs ~400x slower, for tests only), ReleaseSafe (what releases ship; also --release), ReleaseFast or ReleaseSmall";
+    const optimize_help = "Debug (the default: Ghostty runs ~400x slower, for tests only) or ReleaseSafe (what releases ship; also --release); ReleaseFast and ReleaseSmall are refused when rweb compiles, since its allocator decision assumes std's SafeAllocator";
     const optimize: std.lang.Optimize = b.option(std.lang.Optimize, "optimize", optimize_help) orelse switch (b.graph.release_mode) {
         .off => .debug,
         .any, .safe => .safe,

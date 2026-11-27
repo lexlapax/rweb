@@ -23,11 +23,27 @@ at the end of a turn once no output came for 1.2 s (`keys.js` `keepTurning`, tes
 `prefers-reduced-motion`. Checked in desktop Chrome on a ReleaseSafe bridge: still at rest, turning during
 a 4-second `echo` loop, upright again after it.
 
-## Where things stand (2026-11-26, end of the day)
+## Where things stand (2026-11-27)
 
-- 0.1.1 is released (GitHub Release `v0.1.1`, commit `1846885`) and runs on the owner's four machines;
-  the repository is public. Phase 5 is done; Phase 6's gates are met and its steps' status is in
-  [docs/PLAN.md](docs/PLAN.md) ("Phase 6"): no channel, `doctor` or signed checksums yet.
+- **Round 7 done, not released** ([docs/security-review-2026-11-27-round7.md](docs/security-review-2026-11-27-round7.md)):
+  the external scan, agy's readiness review and an internal review of `1779bea`, all items checked against the
+  code. Fixed: the Origin compared on scheme, name and port with the scheme from the configuration
+  (`access.pageScheme`, `requestHost`, `originMatches`; `X-Forwarded-Host` only behind Serve); redirects
+  refused by the update check; doctor's Tailscale text filtered and its failures in words; packaging.sh and
+  dist.sh stop on any failed step; Homebrew installs the notices; private details out of the tree; the docs
+  items. Recorded, not fixed: macOS `getaddrinfo` cannot be cancelled (doctor may wait past 10 s). The tap's
+  formula change is committed locally in `~/projects/lexlapax/homebrew-rweb`, not pushed. Checks on
+  laptop-mac (Zig 0.17.1, no `REX_SOCKET`): `zig fmt --check src build.zig tools`, `git diff --check`, `zig build test`
+  464 pass + 14 skip, the same with `-Doptimize=ReleaseSafe --test-timeout 60s` 464 + 14, `zig build fuzz` (all targets
+  once), the Origin target fuzzed 120 s with no failure, `zig build dist`, `tools/release-base.test.sh` 7 ok, packaging.sh
+  on the signed 0.2.0 sums and three failure cases, `brew style`/`audit --strict` on the formula and tap; each new access
+  and update test fails with its fix taken out. linux-box (clone of `a83466b`'s branch in /tmp, removed after): fmt, `zig build test` 463 + 15 skip, ReleaseSafe
+  463 + 15, `web-test` 46/46, `dist`. Not run: a browser through a real Serve entry (the release's live run). **Next:** the
+  release (0.3.0: version, CHANGELOG heading, README, the guide's "Upgrading to 0.3.0", `tools/release.sh`
+  signed, GitHub Release, packaging, tap and AUR, setup-repo pin) and its live run through Serve.
+- 0.2.0 is released (GitHub Release `v0.2.0`, commit `010e057`) and runs on the owner's four machines;
+  the repository is public. Phase 5 is done; Phase 6's steps' status is in [docs/PLAN.md](docs/PLAN.md)
+  ("Phase 6"): channels, `doctor`, signed checksums and the update check are done for the next release.
 - **Phase B** of [docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md) (section 4):
   **step 1 done** (typed JSON in the Rex client; allocations per call down 57 to 74 %; results and the
   `.{}`-is-a-list trap the fake hid, in the audit). `src/rex/measure.zig` measures the client
@@ -91,8 +107,8 @@ a 4-second `echo` loop, upright again after it.
   rebuild byte-identical from integrity-checked npm packages on macOS and Linux; `ghostty-vt.wasm` is
   wterm's own module (69 exports of its own; the pinned Ghostty's wasm build exports its C API), so it is
   checked against its package, not built (the owner asked to try; stopped and reported as agreed). Run
-  in this session at the owner's word after assistant-sandbox's rules declined network work; since
-  2026-11-27 setup-repo's `assistant-sandbox job` (no agent, open internet, named folders only) runs it
+  in this session at the owner's word after the sandbox's rules declined network work; since
+  2026-11-27 setup-repo's sandbox job profile (no agent, open internet, named folders only) runs it
   in a sandbox: all eight identical there too, `@esbuild/linux-arm64` pinned from that run (owner's yes).
   Signed checksums done: `tools/release.sh` signs `SHA256SUMS` as `SHA256SUMS.sig` (`ssh-keygen -Y sign`,
   namespace `file`) and verifies against `tools/release-signers` (key `rweb-release`, Ed25519, made by the
@@ -116,9 +132,8 @@ a 4-second `echo` loop, upright again after it.
   `mode` frame carries `update`, the page shows a dot on ⋯ and an item (link built by the page from
   `crumb-home`), `rweb doctor` checks once and prints the upgrade command by install path. Checked: unit
   tests with a local HTTP server (answer, 404, too big, never answering), hub test, web test, real HTTPS to
-  GitHub from macOS and from the static Linux build, the dot and menu item in desktop Chrome. **Then, per the owner:** everything release-ready, the owner's review round 7, fixes, release.
-- Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
-  whether the build should refuse group- or world-writable `zig-pkg` folders.
+  GitHub from macOS and from the static Linux build, the dot and menu item in desktop Chrome. Round 7 followed (above).
+- Small item left: whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.
 - Rex (2026-11-26, later): laptop-mac rebooted and its server now runs revision 24 (`server.version`);
   rweb's live suite passed against it.
@@ -267,7 +282,7 @@ fixes by mechanism, follow-up review of `449812a`, tests, checks, what is not ve
 ## 2026-11-26: Zig idiom pass (owner: "did you follow the Zig ethos")
 
 - **What:** an idiom audit of the whole source and the owner's research note
-  (`tools/zig-idioms-audit-checklist`, in the research repository) run as a 38-item checklist. Record:
+  (`tools/zig-idioms-audit-checklist`, in the owner's knowledge base) run as a 38-item checklist. Record:
   docs/zig-idiom-audit-2026-11-26.md (verdict: no rewrite; findings F1 to F24 with status; the checklist
   item by item: 21 pass, 16 need a fix, 1 not applicable; Phase B). Rules: AGENTS.md "Zig practice".
 - **Changed now (no behaviour change):** the pinned Zig's current names: `@backingInt` /
@@ -646,13 +661,13 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - 2026-11-22, Phase 3: desktop-mac `zig build test` 107 pass + 1 skip (live), `ReleaseSafe` too; `zig
   build web-test` 8 pass; linux-box 145 pass + 1 skip (scratch copy removed). Chrome checks of the
   page at desktop and 400 px wide (throwaway session, destroyed); `rex ls` shows only `calm-isle`
-  and `drifting-tundra`.
+  and the owner's own session.
 - 2026-11-22, final Phase 2 runs: desktop-mac `zig build test` with `REX_SOCKET`: 102 pass + 1 skip;
   linux-box (scratch copy, removed) 140 pass + 1 skip; `rex ls` shows only `calm-isle` and
-  `drifting-tundra`. Phone typing confirmed by the shell's own screen.
+  the owner's own session. Phone typing confirmed by the shell's own screen.
 - 2026-11-22, linux-box: scratch copy, `zig build test` with `REX_SOCKET`: 97 pass + 1 skip incl.
   Linux peer-uid and a live bridge test on Rex rev 19; copy removed; `rex ls` only
-  `drifting-tundra`.
+  the owner's own session.
 - 2026-11-22: bridge server tests (each access refusal over real HTTP, WebSocket end to end,
   observe-only over the wire, unix socket 0600/0700 and peer refusal); `zig build test` 89 pass +
   7 skip, six runs in a row.
@@ -668,9 +683,9 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
   session killed with `rex session kill`; `rex ls` shows only `calm-isle`.
 - 2026-11-22, linux-box: owner-authorized real Rex restart through the library (live test in
   `mirror.zig`): recovery as designed, 60/60 pass; scratch copy removed; `rex ls` shows only
-  `drifting-tundra` (restored with a new shell, as in Phase 0).
+  the owner's own session (restored with a new shell, as in Phase 0).
 - 2026-11-22, linux-box: fresh `/tmp` clone of `04ea5f4`; `zig build test` 53 pass + 6 skip; with
-  `REX_SOCKET` 59/59 pass; clone removed; `rex ls` shows only `drifting-tundra`.
+  `REX_SOCKET` 59/59 pass; clone removed; `rex ls` shows only the owner's own session.
 - 2026-11-22, desktop-mac: typed calls, fuzz targets: `zig build test` 53 pass + 6 skip, also
   `ReleaseSafe`; with `REX_SOCKET` all pass (live ownership/typed-call test); `rex ls` shows only
   `calm-isle` afterwards. Details in docs/phase1-result.md.
@@ -731,7 +746,7 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 - desktop-mac: Rex.app preview.21 on 2026-11-20 (Sparkle, outside setup-repo), no boot-time Rex server;
   Tailscale.app (sandboxed, no unix-socket Serve backend).
 - Tailscale 1.104.7 on linux-box (unix-socket Serve backends need ≥ 1.94; setting one needs root).
-  Serve ports in use: 443 (Ovis), 9443 (Ovis canary), 8443 (desktop-mac).
+  Serve: rweb has a port of its own; other services use others.
 - Zig 0.17.1 (`/usr/bin/zig`) on linux-box. libghostty-vt: Ghostty tag `vt-1.0.1` (needs ≥ 0.17.0),
   package hash `ghostty-1.4.1-dev-5UdBC4lkpgUYGLDYGJQcJoa9zOGZNB3qVMgMoS9CUH5O`; snapshot format 1.
 - Deployment order for Phase 4: linux-box, then gateway-box, then desktop-mac.
@@ -772,6 +787,6 @@ Phone layout reworked (slide-over menu). Tip: run tests with output to a file; p
 
 - **2026-11-23: file transfer built** ([docs/file-transfer.md](docs/file-transfer.md)): off unless `--enable-file-transfer`; downloads through Rex's `download_begin` + `rex.data.bytes.v1` (works, verified byte-identical live), uploads written by the bridge itself into `--upload-dir` because Rex's `upload_begin` stages then deletes the file for non-app clients (measured). One-time 30 s tokens issued over the Origin-checked socket; `GET/PUT /xfer/<token>`; sanitized never-overwriting names, 0600, quoted path pasted with a trailing space; picker in the ⋯ menu. `zig build test` with `REX_SOCKET`: 147 pass + 1 skip; web-test 14; fuzz; ReleaseSafe builds. Live browser test on desktop-mac with throwaway session/folder, all removed. Found and fixed on the way: two arena-copy leaks in `api.zig`, `app.js` code placed after `main()` (now guarded by a test). Next: the linux-box unix-socket check through real Serve.
 
-- **2026-11-23: linux-box verified** (docs/security-hardening-2026-11-23.md §6): scratch clone built there, `zig build test` with live Rex preview.22/rev 19: 194 pass + 1 skip; found and fixed a Linux-only compile error (owner check now uses `statx`). Same-user forgery on the unix socket refused at accept. Serve to a unix socket needs root, so that one chain is **not run** (the owner's `sudo`; the two commands are in §6). Loopback TCP with the secret prefix verified end to end through linux-box's real Serve (200 from another node, 403 for its own address, 404 forged, 431 for 70 headers, 403 wrong Host, WebSocket connects). Everything removed from linux-box; `rex ls` shows only `drifting-tundra`, Serve has its original three entries.
+- **2026-11-23: linux-box verified** (docs/security-hardening-2026-11-23.md §6): scratch clone built there, `zig build test` with live Rex preview.22/rev 19: 194 pass + 1 skip; found and fixed a Linux-only compile error (owner check now uses `statx`). Same-user forgery on the unix socket refused at accept. Serve to a unix socket needs root, so that one chain is **not run** (the owner's `sudo`; the two commands are in §6). Loopback TCP with the secret prefix verified end to end through linux-box's real Serve (200 from another node, 403 for its own address, 404 forged, 431 for 70 headers, 403 wrong Host, WebSocket connects). Everything removed from linux-box; `rex ls` shows only the owner's own session, Serve has its original three entries.
 
 - **2026-11-23: deployment module written in setup-repo** (commit `8becbde`, local, not pushed; `modules/rweb`, `docs/runbooks/rweb.md`, task `work-rweb-deployment`). Pins rweb commit `713a418c80cf…`, builds it on each host with a recorded checksum, makes the backend secret, runs the bridge at boot (systemd user unit with lingering on linux-box, LaunchAgent on desktop-mac) on `127.0.0.1:7695`, and `rweb-serve on` adds the Serve entry `https://<host>:12443 -> http://127.0.0.1:7695/<secret>`. Tested in throwaway homes on both hosts and through real Serve on desktop-mac; nothing applied to the live hosts. Needs from the owner: push rweb (the pin must exist on both hosts), pull + `bin/mls apply rweb` + `rweb-serve on` on each host.

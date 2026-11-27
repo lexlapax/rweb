@@ -1,5 +1,5 @@
-# A template: tools/packaging.sh fills in @VERSION@ and the archive's SHA-256 from a release's SHA256SUMS;
-# the result is the AUR package rweb-bin (with its .SRCINFO from `makepkg --printsrcinfo`).
+#: A template: tools/packaging.sh fills in @VERSION@ and the archive's SHA-256 from a release's SHA256SUMS;
+#: the result is the AUR package rweb-bin (with its .SRCINFO from `makepkg --printsrcinfo`).
 # Maintainer: Sandeep Puri <381394+lexlapax@users.noreply.github.com>
 pkgname=rweb-bin
 pkgver=@VERSION@

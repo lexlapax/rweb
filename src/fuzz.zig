@@ -277,19 +277,33 @@ test "fuzz access decision" {
     }.run, .{});
 }
 
-test "fuzz originMatchesHost never matches a different host" {
+test "fuzz originMatches: a match is the page's scheme and the very host asked for" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
             var buf: [128]u8 = undefined;
             const n = smith.slice(&buf);
-            const half = n / 2;
-            if (access.originMatchesHost(buf[0..half], buf[half..n])) {
-                // Whatever matched must end in the host, case-insensitively.
-                const o = buf[0..half];
-                const h = buf[half..n];
-                try testing.expect(h.len > 0 and o.len >= h.len);
-                try testing.expect(std.ascii.eqlIgnoreCase(o[o.len - h.len ..], h));
-            }
+            if (n == 0) return;
+            const scheme: access.Scheme = if (buf[0] & 1 == 0) .http else .https;
+            const half = (n + 1) / 2;
+            const o = buf[1..half];
+            const h = buf[half..n];
+            if (!access.originMatches(scheme, o, h)) return;
+            // The origin is the page's scheme and an authority; that authority and the host are the
+            // same text, in any case, once a written default port is dropped from either.
+            const prefix = switch (scheme) {
+                .http => "http://",
+                .https => "https://",
+            };
+            const default = switch (scheme) {
+                .http => ":80",
+                .https => ":443",
+            };
+            try testing.expect(o.len > prefix.len and std.ascii.eqlIgnoreCase(o[0..prefix.len], prefix));
+            const a = o[prefix.len..];
+            const bare_a = if (std.mem.endsWith(u8, a, default)) a[0 .. a.len - default.len] else a;
+            const bare_h = if (std.mem.endsWith(u8, h, default)) h[0 .. h.len - default.len] else h;
+            try testing.expect(bare_h.len > 0 and std.ascii.eqlIgnoreCase(bare_a, bare_h));
+            try testing.expect(std.mem.indexOfAny(u8, a, "/?#@ \t") == null);
         }
     }.run, .{});
 }

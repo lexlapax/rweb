@@ -39,8 +39,15 @@ the round's document records those runs.
 - [Round 6](security-review-2026-11-26-round6.md): readiness and rescan of the round-5 fixes and the
   upload and `tailscale` changes made after them; fixed by one question, what can change while something
   waits.
+- [Round 7](security-review-2026-11-27-round7.md): the security scan and readiness review of everything
+  since round 6 (0.2.0, `rweb doctor`, the update check, signing and packages) and an internal review; the
+  Origin compared on scheme and port, redirects refused.
 - [Zig idiom audit](zig-idiom-audit-2026-11-26.md): the code against Zig's own practice, a 38-item
-  checklist, what was changed and what is left for after 0.1.1.
+  checklist, and Phase B, done in 0.2.0 and after.
+- [Vendored browser code](vendored-browser-code.md): where each vendored file comes from and how
+  `tools/vendor/rebuild.sh` rebuilds them byte for byte.
+- [Packaging](../packaging/README.md): the Homebrew tap and the AUR package, and how each release
+  updates them.
 
 ## Why it is built this way
 

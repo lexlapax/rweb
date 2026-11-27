@@ -40,7 +40,10 @@ for dir in "$stage"/*/; do
   members=$name
   for f in $files; do members="$members $name/$f"; done
   # shellcheck disable=SC2086 # the member list is meant to split
-  (cd "$dist/work" && tarc $members) | gzip -n -9 > "$dist/$name.tar.gz"
+  # Two steps, not a pipeline: a pipeline's status is gzip's, so a failed tar would still make an archive.
+  (cd "$dist/work" && tarc $members) > "$dist/$name.tar"
+  gzip -n -9 < "$dist/$name.tar" > "$dist/$name.tar.gz"
+  rm "$dist/$name.tar"
 done
 rm -rf "$dist/work" "$stage"
 cd "$dist"

@@ -152,7 +152,7 @@ each fix permanent with a test that fails without it.
 
 Built from a scratch clone in `/tmp` of `1e6e873`, everything below removed afterwards (no bridge process, no
 file under `/tmp` or `/run/user/1000`, Serve back to the original three entries, `rex ls` shows only
-`drifting-tundra`).
+the owner's own session).
 
 - **Tests.** `REX_SOCKET=… zig build test`: 194 of 195 pass (the skip is the restart test), including the live
   tests against linux-box's Rex. This found a real bug the macOS run could not: the owner check for secret and

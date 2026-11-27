@@ -39,7 +39,7 @@ parts = [
     ("UTF-8 decoder by Bjoern Hoehrmann (through uucode)", "MIT", "Linked into the binary.", "tools/licenses/uucode-LICENSE_Bjoern_Hoehrmann"),
     ("Zig standard library and runtime", "MIT", "Compiled into the binary.", f"{zr}/LICENSE"),
     ("musl libc", "MIT", "Linked into the Linux binary only.", f"{zr}/lib/zig/libc/musl/COPYRIGHT"),
-    ("xterm.js 6.0.0 and its fit addon", "MIT", "Served by the binary to the browser.", "src/bridge/web/vendor/LICENSE-xterm.txt"),
+    ("xterm.js 6.0.0 and @xterm/addon-fit 0.11.0", "MIT", "Served by the binary to the browser.", "src/bridge/web/vendor/LICENSE-xterm.txt"),
     ("wterm 0.6.0", "Apache-2.0", "Served by the binary to the browser. `wterm.js` is a bundle of `@wterm/dom`, `@wterm/core` and `@wterm/ghostty` 0.6.0 and carries, base64-encoded inside it, a second WebAssembly module from those packages (55,081 bytes, SHA-256 `471458b178f3dae014ce4e87278b4bdc4f33220be2bd6ca36ad7de8b2f6de57f`).", "src/bridge/web/vendor/LICENSE-wterm.txt"),
 ]
 out = ["# Third-party notices", "",

@@ -22,6 +22,10 @@ pub const release_page = "https://github.com/lexlapax/rweb/releases/tag/v";
 pub const first_check_ms: u64 = 10 * 60 * 1000;
 pub const interval_ms: u64 = 24 * 60 * 60 * 1000;
 pub const max_spread_ms: u64 = 60 * 60 * 1000;
+/// The deadline for one check. It holds while connecting, in TLS and while reading, and on Linux (Zig's
+/// own resolver) while looking up the name. On macOS std looks the name up with the system's
+/// `getaddrinfo`, which cannot be cancelled, so a stalled resolver holds a check until it gives up; the
+/// bridge's checker runs in a task of its own, and only `rweb doctor` waits that long.
 pub const timeout_ms: u64 = 10 * 1000;
 pub const max_answer = 64 * 1024;
 
@@ -81,6 +85,17 @@ pub fn parseLatest(arena: Allocator, body: []const u8) error{ BadAnswer, OutOfMe
 
 pub const CheckError = error{ Timeout, Failed, BadAnswer, OutOfMemory, Canceled };
 
+/// A failed check in words, for `rweb doctor` and the log.
+pub fn errorText(e: CheckError) []const u8 {
+    return switch (e) {
+        error.Timeout => "no answer within 10 s",
+        error.Failed => "the request failed, or GitHub did not answer with the release",
+        error.BadAnswer => "GitHub's answer was not a release",
+        error.OutOfMemory => "out of memory",
+        error.Canceled => "cancelled",
+    };
+}
+
 /// Ask `url` once for the latest release, within `timeout_ms`. `current` names this rweb in the
 /// User-Agent.
 pub fn checkOnce(gpa: Allocator, io: Io, url: []const u8, current: Version) CheckError!?Version {
@@ -120,6 +135,9 @@ fn fetch(gpa: Allocator, io: Io, url: []const u8, current: Version) CheckError!?
         .location = .{ .url = url },
         .response_writer = &w,
         .keep_alive = false,
+        // A redirect is not followed: std would follow one to any host, plain HTTP included, and the
+        // answer is wanted from GitHub's API over HTTPS only. A 3xx is just not 200 below.
+        .redirect_behavior = .unhandled,
         .headers = .{ .user_agent = .{ .override = ua } },
         .extra_headers = &.{
             .{ .name = "accept", .value = "application/vnd.github+json" },
@@ -172,7 +190,7 @@ pub const Checker = struct {
     fn checkAndTell(c: *Checker) error{Canceled}!void {
         const latest = checkOnce(c.gpa, c.io, c.url, c.current) catch |e| {
             if (e == error.Canceled) return error.Canceled;
-            log.debug("update check failed: {t}; the next is in a day", .{e});
+            log.debug("update check failed: {s}; the next is in a day", .{errorText(e)});
             return;
         } orelse return;
         if (!latest.newerThan(c.current)) return;
@@ -218,14 +236,17 @@ test "update: the next check is a day later, plus up to an hour" {
     try testing.expect(nextDue(0, std.math.maxInt(u64)) <= interval_ms + max_spread_ms);
 }
 
-/// A one-shot HTTP server on 127.0.0.1 that answers the first request with `status` and `body`, or never
-/// answers (`hang`), for the checker's tests.
+/// A one-shot HTTP server on 127.0.0.1 that answers the first request with `status`, `extra` header
+/// lines and `body`, or never answers (`hang`), for the checker's tests. `asked` is set once a request
+/// has arrived.
 const TestServer = struct {
     server: Io.net.Server,
     port: u16,
     status: []const u8,
     body: []const u8,
     hang: bool = false,
+    extra: []const u8 = "",
+    asked: std.atomic.Value(bool) = .init(false),
 
     fn init(io: Io, status: []const u8, body: []const u8, hang: bool) !TestServer {
         const addr: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
@@ -242,13 +263,14 @@ const TestServer = struct {
             const line = r.interface.takeDelimiterInclusive('\n') catch return;
             if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
         }
+        t.asked.store(true, .release);
         if (t.hang) {
             io.sleep(.fromSeconds(60), .awake) catch {}; // until the test cancels it
             return;
         }
         var wbuf: [1024]u8 = undefined;
         var w = conn.writer(io, &wbuf);
-        w.interface.print("HTTP/1.1 {s}\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}", .{ t.status, t.body.len, t.body }) catch return;
+        w.interface.print("HTTP/1.1 {s}\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n{s}\r\n{s}", .{ t.status, t.body.len, t.extra, t.body }) catch return;
         w.interface.flush() catch {}; // the test reads what arrived
     }
 };
@@ -283,6 +305,29 @@ test "update: one check reads the answer, refuses errors and big answers" {
         defer task.cancel(io);
         try testing.expectError(error.Failed, checkOnce(gpa, io, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/latest", .{s.port}), current));
     }
+}
+
+test "update: a redirect is not followed, and where it points is never asked" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const current: Version = .{ .major = 0, .minor = 2, .patch = 0 };
+    // Where the redirect points: it would answer with a newer release.
+    var there = try TestServer.init(io, "200 OK", "{\"tag_name\":\"v9.9.9\"}", false);
+    defer there.server.deinit(io);
+    var there_task = try io.concurrent(TestServer.serveOne, .{ &there, io });
+    defer there_task.cancel(io);
+    var url_buf: [64]u8 = undefined;
+    var loc_buf: [96]u8 = undefined;
+    for ([_][]const u8{ "301 Moved Permanently", "302 Found", "307 Temporary Redirect", "308 Permanent Redirect" }) |status| {
+        var s = try TestServer.init(io, status, "", false);
+        defer s.server.deinit(io);
+        s.extra = try std.fmt.bufPrint(&loc_buf, "location: http://127.0.0.1:{d}/latest\r\n", .{there.port});
+        var task = try io.concurrent(TestServer.serveOne, .{ &s, io });
+        defer task.cancel(io);
+        try testing.expectError(error.Failed, checkOnce(gpa, io, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/latest", .{s.port}), current));
+        try testing.expect(s.asked.load(.acquire));
+    }
+    try testing.expect(!there.asked.load(.acquire));
 }
 
 test "update: a server that never answers is given up after the deadline" {

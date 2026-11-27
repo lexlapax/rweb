@@ -214,8 +214,7 @@ Status 2026-11-23: exit met for linux-box and desktop-mac; what changed from thi
   binary needs libc++ linked statically (likely a musl target); check before packaging.
 - A `rweb` module in `setup-repo`: pinned version and checksum, a systemd user unit on Linux
   (ordered after Rex's user server) and a LaunchAgent on macOS, the bridge's socket path, and the
-  Tailscale Serve mapping as an operator step on a port not already in use (443, 8443 and 9443
-  are taken).
+  Tailscale Serve mapping as an operator step on a port no other service uses.
 - On macOS the bridge starts a personal Rex server (with the bundled CLI, as an `ssh://` client
   does) when none is running; it never changes Rex's listeners or config.
 - Start after login and reboot behaviour verified on linux-box, then gateway-box, then desktop-mac.
@@ -245,12 +244,12 @@ Record: [security-review-2026-11-26-round5.md](security-review-2026-11-26-round5
    affiliated with Superlogical)". Evidence: trademark policies (Docker, Linux Foundation, Rust,
    Mozilla, PSF) allow "name for X" and restrict X-prefixed names, so `rex…` names would risk a
    forced rename in Phase 6; `rweb` is free on Homebrew, Arch/AUR, Debian, npm and PyPI (only a Rust
-   library crate shares it); it follows the `tmate` pattern. Research drafts are proposals for the
-   research repo (`tools/rex-client-name-collisions`, `tools/cli-tool-naming-trademark`).
+   library crate shares it); it follows the `tmate` pattern. The research behind it is kept
+   in the owner's knowledge base.
    Original brief: settle the name before the first versioned release, from external research
    (collisions in Homebrew, Arch/AUR, Debian, crates.io, npm, PyPI and GitHub; Rex trademark;
    short, easy to type and remember). A rename touches the repo, binary, setup-repo module, unit and
-   LaunchAgent names, config paths, browser storage keys, the `rweb-test-` rule and atlas; plan
+   LaunchAgent names, config paths, browser storage keys, the `rweb-test-` rule and the owner's repository index; plan
    it as one change with a migration of both live hosts.
 1. **Version** (done 2026-11-25: `build.zig.zon` 0.1.0, `CHANGELOG.md`, `rweb --version` on stdout with
    commit from `-Dcommit` or git, `unknown` in an export without either; the bridge reports the
@@ -300,9 +299,9 @@ Gates, all before any public step (**all met 2026-11-26**):
   and commit message the tailnet, host and setup-repository names became generic, commits are authored
   by the owner's GitHub no-reply address, and the README names the maintainer. The rewritten history
   went to a new public `lexlapax/rweb`, and the old private repository was deleted, so GitHub holds no
-  copy of the old objects. v0.1.1 is a GitHub Release there.
+  copy of the old objects. v0.1.1 and v0.2.0 are GitHub Releases there.
 
-Where the steps below stand (2026-11-26):
+Where the steps below stand (2026-11-27):
 
 - Step 1: the command line was generalised in round five (`rweb tailscale`, `rweb ssh`: no owner flags,
   secrets and folders made, plain refusals with a fix) and the user guide covers Serve on Linux and

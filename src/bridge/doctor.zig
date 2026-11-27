@@ -198,22 +198,22 @@ fn checkTailscale(arena: Allocator, io: Io, parsed: cli.Parsed, secret: ?[]const
     };
 
     const status = main.runTailscale(arena, io, &.{ ts, "status", "--json" }) catch |e|
-        return r.fail("Tailscale: `{s} status` did not answer ({t})", .{ ts, e });
+        return failedRun(r, "Tailscale: `{s} status`", ts, e);
     if (status.term != .exited or status.term.exited != 0)
         return r.fail("Tailscale: `{s} status` failed; is tailscaled running?", .{ts});
     const node = parseStatus(arena, status.stdout) catch
         return r.fail("Tailscale: `{s} status --json` gave something rweb cannot read", .{ts});
     if (!std.mem.eql(u8, node.backend_state, "Running"))
-        return r.fail("Tailscale is not connected (state {s}): sign in with `tailscale up` or the Tailscale app", .{node.backend_state});
+        return r.fail("Tailscale is not connected (state {f}): sign in with `tailscale up` or the Tailscale app", .{tsText(node.backend_state)});
     const dns = node.dns_name orelse return r.fail("Tailscale: this node has no MagicDNS name; turn on MagicDNS for the tailnet", .{});
     if (node.tagged) {
         if (parsed.owner_from_tailscale)
-            r.fail("Tailscale: {s} is a tagged device, so it has no owner login; pass --owner LOGIN and --allow-host {s}", .{ dns, dns })
+            r.fail("Tailscale: {f} is a tagged device, so it has no owner login; pass --owner LOGIN and --allow-host {f}", .{ tsText(dns), tsText(dns) })
         else
-            r.ok("Tailscale: {s}, a tagged device (the owner is named with --owner)", .{dns});
+            r.ok("Tailscale: {f}, a tagged device (the owner is named with --owner)", .{tsText(dns)});
     } else if (main.ownerFromStatus(arena, status.stdout)) |login| {
-        r.ok("Tailscale: {s}, signed in as {s} ({s})", .{ dns, login, ts });
-    } else |_| r.ok("Tailscale: {s} ({s})", .{ dns, ts });
+        r.ok("Tailscale: {f}, signed in as {f} ({s})", .{ tsText(dns), tsText(login), ts });
+    } else |_| r.ok("Tailscale: {f} ({s})", .{ tsText(dns), ts });
     if (node.cert_domains == 0)
         r.fail("Tailscale: HTTPS certificates are off for the tailnet; turn them on (admin console, DNS, HTTPS Certificates)", .{})
     else
@@ -225,16 +225,16 @@ fn checkTailscale(arena: Allocator, io: Io, parsed: cli.Parsed, secret: ?[]const
         .tcp => |port| .{ .tcp = .{ .port = port, .secret = secret } },
     };
     const serve = main.runTailscale(arena, io, &.{ ts, "serve", "status", "--json" }) catch |e|
-        return r.fail("Tailscale Serve: `{s} serve status` did not answer ({t})", .{ ts, e });
+        return failedRun(r, "Tailscale Serve: `{s} serve status`", ts, e);
     if (serve.term != .exited or serve.term.exited != 0)
         return r.fail("Tailscale Serve: `{s} serve status` failed", .{ts});
     const found = findServe(arena, serve.stdout, target) catch
         return r.fail("Tailscale Serve: `{s} serve status --json` gave something rweb cannot read", .{ts});
     switch (found) {
         .entry => |e| {
-            if (e.funnel) r.fail("Tailscale Serve: https://{s}/ also has Funnel on, which opens it to the internet; rweb refuses those requests, but turn Funnel off: tailscale funnel --https={s} off", .{ e.host_port, portOf(e.host_port) }) else r.ok("Tailscale Serve: https://{s}/ forwards to this bridge", .{e.host_port});
+            if (e.funnel) r.fail("Tailscale Serve: https://{f}/ also has Funnel on, which opens it to the internet; rweb refuses those requests, but turn Funnel off: tailscale funnel --https={f} off", .{ tsText(e.host_port), tsText(portOf(e.host_port)) }) else r.ok("Tailscale Serve: https://{f}/ forwards to this bridge", .{tsText(e.host_port)});
         },
-        .old_secret => |hp| r.fail("Tailscale Serve: https://{s}/ forwards to 127.0.0.1 with another secret than {s}; run the `tailscale serve` line below again", .{ hp, parsed.backend_secret_file orelse "the backend secret file" }),
+        .old_secret => |hp| r.fail("Tailscale Serve: https://{f}/ forwards to 127.0.0.1 with another secret than {s}; run the `tailscale serve` line below again", .{ tsText(hp), parsed.backend_secret_file orelse "the backend secret file" }),
         .none => r.fail("Tailscale Serve: nothing forwards to this bridge", .{}),
     }
     if (found != .entry) {
@@ -249,12 +249,26 @@ fn checkTailscale(arena: Allocator, io: Io, parsed: cli.Parsed, secret: ?[]const
     }
 }
 
+/// Text from Tailscale's answers (names, logins, states), printed so that no control byte in it reaches
+/// the terminal (`xfer.Clean`): a wrapper named with --tailscale, or a login, could carry one.
+fn tsText(s: []const u8) xfer.Clean {
+    return .{ .s = s };
+}
+
+/// A `tailscale` run that failed, said in words where rweb knows them (the spawn's own errors are
+/// many and are named as they are).
+fn failedRun(r: *Report, comptime what: []const u8, ts: []const u8, e: anyerror) void {
+    if (e == error.Timeout) return r.fail(what ++ " did not answer within 10 s", .{ts});
+    if (e == error.StreamTooLong) return r.fail(what ++ " wrote more than rweb reads (1 MiB)", .{ts});
+    r.fail(what ++ " could not be run ({t})", .{ ts, e });
+}
+
 /// Whether a newer rweb is released, asked once (`update.checkOnce`), and how to upgrade this one.
 fn checkRelease(gpa: Allocator, io: Io, r: *Report) !void {
     const current = update.Version.parse(build_options.version) orelse return;
     const latest = update.checkOnce(gpa, io, update.latest_url, current) catch |e| {
         if (e == error.OutOfMemory) return error.OutOfMemory;
-        return r.warn("could not ask GitHub for rweb's latest release ({t}); it is asked again next time", .{e});
+        return r.warn("could not ask GitHub for rweb's latest release: {s}; it is asked again next time", .{update.errorText(e)});
     } orelse return r.warn("GitHub names no released version of rweb", .{});
     if (!latest.newerThan(current)) return r.ok("rweb {f} is the latest release", .{current});
     var pbuf: [4096]u8 = undefined;
@@ -439,4 +453,10 @@ test "doctor says how to upgrade by where rweb is installed" {
     try testing.expect(std.mem.indexOf(u8, upgradeHow("/home/linuxbrew/.linuxbrew/Cellar/rweb/0.2.0/bin/rweb"), "brew upgrade") != null);
     try testing.expect(std.mem.indexOf(u8, upgradeHow("/usr/bin/rweb"), "rweb-bin") != null);
     try testing.expect(std.mem.indexOf(u8, upgradeHow("/home/me/.local/bin/rweb"), "archive") != null);
+}
+
+test "doctor prints Tailscale's text without control characters" {
+    var buf: [64]u8 = undefined;
+    const got = try std.fmt.bufPrint(&buf, "{f}", .{tsText("box\x1b]0;owned\x07.example.ts.net\x9b2J")});
+    try std.testing.expectEqualStrings("box?]0;owned?.example.ts.net?2J", got);
 }

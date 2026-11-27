@@ -1886,8 +1886,24 @@ test "server: a WebSocket needs a matching Origin" {
     // No Origin at all: refused.
     try testing.expectError(error.UpgradeRefused, rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), path, null, ""));
     try testing.expectEqual(@backingInt(access.Refusal.no_origin), rig.srv.last_refusal.load(.acquire));
+    // An HTTPS page on the same host and port: not this page, which is served over plain HTTP.
+    try testing.expectError(error.UpgradeRefused, rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), path, null, "Origin: https://localhost\r\n"));
+    try testing.expectEqual(@backingInt(access.Refusal.bad_origin), rig.srv.last_refusal.load(.acquire));
     // The page's own origin: accepted.
     const c = try rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), path, null, "Origin: http://localhost\r\n");
+    c.deinit(testing.allocator);
+}
+
+test "server: behind Serve, a plain-HTTP page of the same name opens no WebSocket" {
+    const rig = try Rig.init(.{}, owner_cfg, .{ .tcp_loopback = 0 });
+    defer rig.deinit();
+    const who = "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.9\r\nX-Forwarded-Host: box.tail1234.ts.net\r\n";
+    for ([_][]const u8{ "http://box.tail1234.ts.net", "http://box.tail1234.ts.net:443", "https://box.tail1234.ts.net:8443" }) |o| {
+        var hb: [256]u8 = undefined;
+        try testing.expectError(error.UpgradeRefused, rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), "/ws", null, try std.fmt.bufPrint(&hb, "{s}Origin: {s}\r\n", .{ who, o })));
+        try testing.expectEqual(@backingInt(access.Refusal.bad_origin), rig.srv.last_refusal.load(.acquire));
+    }
+    const c = try rex.ws.Conn.connectStream(testing.allocator, testing.io, try rig.tcp(), "/ws", null, who ++ "Origin: https://box.tail1234.ts.net\r\n");
     c.deinit(testing.allocator);
 }
 

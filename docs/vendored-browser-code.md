@@ -31,13 +31,9 @@ one line per file, `same` or `DIFFERENT`, and exits 0 only when all are the same
 esbuild runs as its own binary from npm (`@esbuild/darwin-arm64`, `@esbuild/linux-x64` or
 `@esbuild/linux-arm64`, all pinned); another platform needs its `@esbuild/...` package added to the lock.
 
-On the owner's machines the check can run in a sandbox with no agent, so nothing it downloads reaches a
-session that can read private data (setup-repo's `assistant-sandbox job`; its output comes back as a
-proposal for review):
-
-```sh
-assistant-sandbox job --data ~/projects/lexlapax/rweb --name rweb-vendor-rebuild -- sh tools/vendor/rebuild.sh
-```
+Since the script downloads from npm, run it where nothing it fetches can reach private data: a sandbox
+or container that holds only a copy of the checkout (`sh tools/vendor/rebuild.sh` there). On the owner's
+machines a sandbox with no agent runs it, and its output comes back for review.
 
 ## Result
 
@@ -65,6 +61,7 @@ registry's, and was recorded at the owner's word.
 
 ## How it was run
 
-The owner chose to run the script in the working session (2026-11-27) after `assistant-sandbox`'s web
-profile declined to: its session rules forbid reaching other hosts. The script prints only names, package
+The owner chose to run the script in the working session (2026-11-27) after the sandbox's web profile
+declined to: its rules forbid reaching other hosts. Since then a sandbox profile for jobs like this one
+has run it on Linux ARM64. The script prints only names, package
 paths, hashes and integrities; no downloaded file was opened.

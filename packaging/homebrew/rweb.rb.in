@@ -1,6 +1,6 @@
-# Homebrew formula for rweb, from its signed release archives. A template: tools/packaging.sh fills in
-# @VERSION@ and the archives' SHA-256 from a release's SHA256SUMS; the result goes to the tap
-# (lexlapax/homebrew-rweb, Formula/rweb.rb).
+#: Homebrew formula for rweb, from its signed release archives. A template: tools/packaging.sh fills in
+#: @VERSION@ and the archives' SHA-256 from a release's SHA256SUMS; the result goes to the tap
+#: (lexlapax/homebrew-rweb, Formula/rweb.rb).
 class Rweb < Formula
   desc "Web client for Rex terminal sessions, reached through Tailscale Serve or SSH"
   homepage "https://github.com/lexlapax/rweb"
@@ -22,7 +22,9 @@ class Rweb < Formula
 
   def install
     bin.install "rweb"
-    doc.install "README.md", "CHANGELOG.md", "docs/user-guide.md", "docs/architecture.md"
+    # The notices of the code in the binary, and the docs where README.md links to them.
+    doc.install "README.md", "CHANGELOG.md", "THIRD-PARTY-NOTICES.md"
+    (doc/"docs").install "docs/user-guide.md", "docs/architecture.md"
   end
 
   service do

@@ -102,7 +102,7 @@ Do not claim a phase exit that was not observed.
 
 ## Zig practice (owner, 2026-11-26)
 
-The reference is the owner's research note `tools/zig-idioms-audit-checklist` (in the research repository)
+The reference is the owner's note `tools/zig-idioms-audit-checklist` (in the owner's knowledge base)
 and [docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md), which records how this code
 stands against it and what is still open.
 

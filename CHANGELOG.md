@@ -30,6 +30,21 @@ the Rex API revisions it speaks.
 - Building: the page's files are compressed and given their validators at build time, not on the first
   request.
 
+From the seventh review (details: `docs/security-review-2026-11-27-round7.md`, in the source repository):
+
+- A WebSocket or an upload is accepted only from rweb's own page in scheme and port as well as in name.
+  Behind Tailscale the page is HTTPS, so a plain-HTTP page on port 80 of the same machine name (another
+  service there, say) can no longer open a terminal with your identity; through an SSH tunnel the page is
+  plain HTTP on the tunnel's port. A token sent from any other origin is refused uncompared, as before.
+- Without Tailscale in front (a token), rweb reads only `Host` for the name a request is for, never
+  `X-Forwarded-Host`, which anyone could send there.
+- The update check follows no redirect: only GitHub's own answer, over HTTPS, counts.
+- `rweb doctor` prints what it reads from Tailscale (names, logins, states) without control characters,
+  and says a failed check in words.
+- The Homebrew formula installs `THIRD-PARTY-NOTICES.md` and keeps the docs where the README links them.
+- `tools/packaging.sh` stops on any failed step and checks what it made (the version, every SHA-256) before
+  it says so.
+
 ## 0.2.0 (2026-11-27)
 
 Works with Rex 0.1.0-preview.25, is quicker to react and lighter on busy terminals, and is the result of a
@@ -265,6 +280,32 @@ From the fifth review (details: `docs/security-review-2026-11-26-round5.md`, in 
 - Behind a token, rweb answers only for `127.0.0.1`, `localhost` and `[::1]` unless `--allow-host` says
   otherwise, and refuses a token that arrives from another website, even a right one (a link on another
   site cannot sign you in; type or bookmark the address).
+- Wrong tokens are limited: after 10 in a minute, wrong tokens get 429 until the minute ends. A right
+  token is never refused, and a web page on another site cannot use up the allowance.
+- **Upgrade note:** a token must be at least 32 characters (0.1.0 accepted 16), in a token file and with
+  `--token`.
+- **Upgrade note:** no group is trusted. A folder or program its group can write to is refused, on Linux
+  and macOS, even when the group holds only you; the message gives the `chmod g-w` that fixes it. macOS's
+  `admin` group passes only for folders above an item and for programs. A secret, token, upload folder or
+  socket folder may have no access list entry for any group.
+- **Upgrade note:** only local disks are trusted. A secret, token, upload folder, socket folder or
+  `tailscale` program on a network disk (NFS, SMB), a FUSE filesystem, a disk image, a disk a user
+  mounted or a filesystem rweb does not know is refused. With a home folder on a network disk, use
+  `--config-dir`.
+- Links on a checked path are followed only when root or you own them and the folder they sit in has
+  passed its checks; the item itself is never opened through a link.
+- This machine's own Tailscale addresses are read again every minute while rweb runs, so a request from
+  a new address of the machine is refused too. Startup messages no longer suggest `--allow-own-address`.
+- Docs: the user guide is written around the two commands, with the options in "Advanced: every option";
+  what "your login" covers (every device and account signed in to Tailscale as you); how to stop or
+  remove rweb; the tunnel's known limit (plain HTTP on loopback cannot prove who is answering: use it
+  only on devices nobody else uses).
+- README: "About this project" says the project was built with AI coding assistants.
+- Release archives include the README's logo (`assets/logo/`); the third-party notices record what is
+  known about each vendored file's provenance.
+
+From the sixth review (details: `docs/security-review-2026-11-26-round6.md`, in the source repository):
+
 - An upload is written in a folder of rweb's own inside the upload folder (`.rweb-partial/`), flushed to
   disk, and only then given its real name in the upload folder, so a stop, a crash or a power cut never
   leaves a file there that looks whole and is not. If rweb is stopped in the middle, the next start
@@ -289,29 +330,6 @@ From the fifth review (details: `docs/security-review-2026-11-26-round5.md`, in 
   until it does: an address the machine may have gained meanwhile cannot slip past the rule that refuses
   requests from the machine itself. Not with `--own-address` alone (a list you gave does not go out of date)
   or `--allow-own-address`.
-- Wrong tokens are limited: after 10 in a minute, wrong tokens get 429 until the minute ends. A right
-  token is never refused, and a web page on another site cannot use up the allowance.
-- **Upgrade note:** a token must be at least 32 characters (0.1.0 accepted 16), in a token file and with
-  `--token`.
-- **Upgrade note:** no group is trusted. A folder or program its group can write to is refused, on Linux
-  and macOS, even when the group holds only you; the message gives the `chmod g-w` that fixes it. macOS's
-  `admin` group passes only for folders above an item and for programs. A secret, token, upload folder or
-  socket folder may have no access list entry for any group.
-- **Upgrade note:** only local disks are trusted. A secret, token, upload folder, socket folder or
-  `tailscale` program on a network disk (NFS, SMB), a FUSE filesystem, a disk image, a disk a user
-  mounted or a filesystem rweb does not know is refused. With a home folder on a network disk, use
-  `--config-dir`.
-- Links on a checked path are followed only when root or you own them and the folder they sit in has
-  passed its checks; the item itself is never opened through a link.
-- This machine's own Tailscale addresses are read again every minute while rweb runs, so a request from
-  a new address of the machine is refused too. Startup messages no longer suggest `--allow-own-address`.
-- Docs: the user guide is written around the two commands, with the options in "Advanced: every option";
-  what "your login" covers (every device and account signed in to Tailscale as you); how to stop or
-  remove rweb; the tunnel's known limit (plain HTTP on loopback cannot prove who is answering: use it
-  only on devices nobody else uses).
-- README: "About this project" says the project was built with AI coding assistants.
-- Release archives include the README's logo (`assets/logo/`); the third-party notices record what is
-  known about each vendored file's provenance.
 
 ## 0.1.0 (2026-11-25, built and installed; not published)
 

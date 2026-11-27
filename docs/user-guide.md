@@ -380,8 +380,8 @@ size (default 256). Turn it on only if you want the browser to have that reach. 
 ## 11. Upgrade, roll back, stop or remove
 
 **Knowing when to upgrade.** Once a day, starting 10 minutes after it starts, rweb asks GitHub's API for
-its latest release (one HTTPS request to `api.github.com`, answered within 10 seconds; only the version is
-read). When a newer version is out it says so once in its log, puts a dot on the page's ⋯ button with an
+its latest release (one HTTPS request to `api.github.com`, given up after 10 seconds; only the version is
+read; it follows no redirect). When a newer version is out it says so once in its log, puts a dot on the page's ⋯ button with an
 item, "rweb X.Y.Z is available", that opens the release notes, and `rweb doctor` reports it with the
 upgrade command for how rweb was installed. It never downloads or installs anything. What GitHub learns
 from it: this machine's address, that it runs rweb, and which version. To turn it off, start rweb with
@@ -437,6 +437,11 @@ rm -rf ~/.config/rweb/run                                  # macOS: the folder o
 rm ~/.local/bin/rweb
 ```
 
+Installed with Homebrew: `brew services stop rweb && brew uninstall rweb` in place of the service and
+binary lines (`brew untap lexlapax/rweb` too, when nothing else comes from it). From the AUR:
+`systemctl --user disable --now rweb` and `sudo pacman -R rweb-bin`. The Serve entry and the files in
+`~/.config/rweb` are removed as above either way.
+
 `tailscale serve --https=12443 off` removes only that entry; `tailscale serve reset` removes every Serve
 entry on the machine, rweb's or not. When you have only tried rweb in a terminal, stop it with Ctrl-C and
 remove the Serve entry the same way, or set up the service from section 5 or 6.
@@ -447,8 +452,10 @@ Start with `rweb doctor`. It checks a setup the way `rweb tailscale` would use i
 an SSH tunnel; add the options you start rweb with, such as `--config-dir`) and says what to fix: Rex
 (running, answering, an API revision rweb speaks), the backend secret or token file and the upload folder
 (the same checks as at startup), whether a bridge is listening, and for Tailscale whether it is signed
-in, has HTTPS certificates on, and has a Serve entry that forwards to this bridge with Funnel off. It
-changes nothing and exits 1 when a check fails. A file rweb makes at its first start is a note, not a
+in, has HTTPS certificates on, and has a Serve entry that forwards to this bridge with Funnel off. Last, it
+asks GitHub whether a newer rweb is released, as the bridge does once a day (section 11), and says how to
+upgrade this one; `--no-update-check` leaves that out. On macOS, when name lookups hang, that last check
+can take as long as the system's resolver does before it gives up. It changes nothing and exits 1 when a check fails. A file rweb makes at its first start is a note, not a
 failure. It never prints the backend secret or the token.
 
 ```
@@ -462,7 +469,8 @@ rweb doctor: checking rweb tailscale (rweb 0.2.0)
         if Tailscale Serve is not set up for rweb yet, run this once:
         sudo tailscale serve --bg --https=12443 unix:/run/user/1000/rweb/bridge.sock
         …
-rweb doctor: 4 passed, 0 notes, 1 failed
+  ok    rweb 0.2.0 is the latest release
+rweb doctor: 5 passed, 0 notes, 1 failed
 ```
 
 Logs: `journalctl --user -u rweb -n 50` (Linux service), `~/Library/Logs/rweb.log` (macOS LaunchAgent).
@@ -559,6 +567,8 @@ and hold at least 32 letters, digits, `-` or `_`.
 - **What the page may do.** `--observe-only`, `--history-lines N` (default 1000),
   `--enable-file-transfer`, `--upload-dir PATH`, `--max-transfer-mb N` (section 10).
 - **Diagnostics.** `--enable-lab`, `--debug-input` (logs what browsers send, typed text included).
+- **The update check.** `--no-update-check`: rweb does not ask GitHub, once a day, whether a newer rweb is
+  released (section 11), and `rweb doctor` leaves that check out.
 - **For tests only, never in a service.** `--token TOKEN` (visible in the process list), `--random-token`
   (a token for one run, shown only in a terminal), `--allow-own-address` and
   `--allow-forgeable-loopback-identity` (each removes a protection; `rweb --help` says which).

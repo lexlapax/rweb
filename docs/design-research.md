@@ -125,8 +125,7 @@ From the owner's `setup-repo` repository:
 - **desktop-mac:** Rex.app, updated by Sparkle outside setup-repo, at `0.1.0-preview.21` on
   2026-11-20 (a different API revision from linux-box). macOS has no boot-time Rex server; one
   starts with Rex.app or on the first `ssh://` client. FileVault needs a disk unlock after reboot.
-- **Tailscale Serve ports already in use:** 443 → Ovis on linux-box and desktop-mac, 9443 → Ovis
-  canary, 8443 on desktop-mac, ttyd kept as a rollback. Linux Serve changes are run by the operator
-  with `sudo`.
+- **Tailscale Serve:** other services already use some HTTPS ports on both machines, so rweb takes a
+  port of its own. Linux Serve changes are run by the operator with `sudo`.
 - Remote Rex.app clients reach linux-box over `ssh://`, so a browser and a desktop client can
   both be attached to one block, and the desktop client may own it.

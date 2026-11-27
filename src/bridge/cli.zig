@@ -32,7 +32,8 @@ pub const usage =
     \\      token in <config>/token. Prints the `ssh` line for your laptop.
     \\  rweb doctor [tailscale|ssh] [options]
     \\      Checks Rex, Tailscale and Serve, the files and the bridge as that command
-    \\      (default tailscale) with those options would use them, and says what to fix.
+    \\      (default tailscale) with those options would use them, and says what to fix;
+    \\      then asks GitHub whether a newer rweb is released (not with --no-update-check).
     \\      Changes nothing. Exits 1 when a check fails.
     \\  rweb --version
     \\
@@ -641,6 +642,11 @@ test "doctor checks what the command after it would use, `rweb tailscale` when n
     // Options alone check `rweb tailscale` with them.
     const opts = (try parseEnv(a, &.{ "doctor", "--no-update-check" }, linux_env, &d)).doctor;
     try testing.expect(opts.command == .tailscale and !opts.update_check);
+    // The bridge itself: on unless turned off.
+    try testing.expect((try parseEnv(a, &.{"tailscale"}, linux_env, &d)).run.update_check);
+    try testing.expect(!(try parseEnv(a, &.{ "tailscale", "--no-update-check" }, linux_env, &d)).run.update_check);
+    try testing.expect(!(try parseEnv(a, &.{ "ssh", "--no-update-check" }, linux_env, &d)).run.update_check);
+    try testing.expect((try parseEnv(a, &.{ "doctor", "ssh" }, linux_env, &d)).doctor.update_check);
     // Its options are checked as the command's are.
     try testing.expectError(error.UnknownOption, parseEnv(a, &.{ "doctor", "ssh", "--nope" }, linux_env, &d));
     try testing.expectEqual(Help.version, (try parseEnv(a, &.{ "doctor", "--version" }, linux_env, &d)).help);

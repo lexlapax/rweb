@@ -38,7 +38,7 @@ Where this and the code differ, the code wins.
   `zig build test` 53 pass, 6 skip, 13 s; with `REX_SOCKET=/run/user/1000/rex/server.sock`
   59/59 pass, including every live test and the ownership observations, identical to
   desktop-mac's. Only throwaway `rweb-test-live-*` sessions were created and destroyed; `rex ls`
-  showed only the owner's `drifting-tundra` afterwards. Nothing was installed or changed there.
+  showed only the owner's own session afterwards. Nothing was installed or changed there.
 
 ## Findings
 

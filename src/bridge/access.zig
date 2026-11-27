@@ -17,10 +17,15 @@
 //!   `X-Forwarded-For`, or one that is not an address, is refused too.
 //! - A security-relevant header that appears twice is ambiguous (which one did the proxy set?):
 //!   refused.
-//! - With `allowed_hosts`, the `Host` (or `X-Forwarded-Host`) of every request must be one of
-//!   them, so a page reaching the bridge through a rebound DNS name gets nothing.
-//! - A WebSocket upgrade must carry an `Origin` whose host is `X-Forwarded-Host` (or `Host`
-//!   when no proxy sits in front), so a page on another site cannot open one.
+//! - With `allowed_hosts`, the authority every request asked for must be one of them, so a page
+//!   reaching the bridge through a rebound DNS name gets nothing. Behind Serve (an owner rule) that is
+//!   `X-Forwarded-Host`, which Serve sets; with no proxy in front (token only) it is `Host`, and an
+//!   `X-Forwarded-Host` is not read, since anyone could have sent it (`requestHost`).
+//! - A WebSocket upgrade or a PUT must carry the page's own `Origin`: the scheme the configuration
+//!   says pages are served over (HTTPS behind Serve, HTTP on loopback or an SSH tunnel: `pageScheme`),
+//!   the same host name and the same port, a missing port being the scheme's default
+//!   (`originMatches`). So neither a page on another site nor a plain-HTTP page on port 80 of the
+//!   same name can open one.
 //! - A test or loopback deployment may also require a shared token.
 
 const std = @import("std");
@@ -165,7 +170,7 @@ pub const TokenCheck = enum {
 pub fn checkToken(cfg: Config, request: Request) TokenCheck {
     const want = cfg.token orelse return .none;
     if (request.header("rweb-token") orelse request.query_token) |got| {
-        if (fromAnotherOrigin(request)) return .cross_site;
+        if (fromAnotherOrigin(cfg, request)) return .cross_site;
         return if (constantTimeEql(want, got)) .right else .wrong;
     }
     var any = false;
@@ -185,15 +190,43 @@ pub fn checkToken(cfg: Config, request: Request) TokenCheck {
 /// Whether a browser says the request comes from a page of another origin: an `Origin` that is not
 /// this host's, or `Sec-Fetch-Site` other than `same-origin` (this page) or `none` (typed, a
 /// bookmark). `same-site` is another origin too: another port on this host.
-pub fn fromAnotherOrigin(request: Request) bool {
+pub fn fromAnotherOrigin(cfg: Config, request: Request) bool {
     if (request.header("sec-fetch-site")) |site| {
         if (!std.ascii.eqlIgnoreCase(site, "same-origin") and !std.ascii.eqlIgnoreCase(site, "none")) return true;
     }
     if (request.header("origin")) |origin| {
-        const host = request.header("x-forwarded-host") orelse request.header("host") orelse return true;
-        if (!originMatchesHost(origin, host)) return true;
+        const host = requestHost(cfg, request) orelse return true;
+        if (!originMatches(pageScheme(cfg), origin, host)) return true;
     }
     return false;
+}
+
+/// The scheme the bridge's pages reach the browser over, from the configuration and never from a
+/// header: HTTPS behind Tailscale Serve (an owner rule; Serve has no plain-HTTP mode rweb uses), plain
+/// HTTP for a token deployment (loopback, or an SSH tunnel to it).
+pub const Scheme = enum {
+    http,
+    https,
+
+    pub fn defaultPort(s: Scheme) u16 {
+        return switch (s) {
+            .http => 80,
+            .https => 443,
+        };
+    }
+};
+
+pub fn pageScheme(cfg: Config) Scheme {
+    return if (cfg.owner != null) .https else .http;
+}
+
+/// The authority (`host[:port]`) the browser asked for. Behind Serve (an owner rule) it is
+/// `X-Forwarded-Host`, which Serve sets after removing any copy the client sent, or `Host` when
+/// there is none. With no proxy in front it is `Host` only: an `X-Forwarded-Host` there could come
+/// from anyone, a page reached through a rebound name included.
+pub fn requestHost(cfg: Config, request: Request) ?[]const u8 {
+    if (cfg.owner != null) return request.header("x-forwarded-host") orelse request.header("host");
+    return request.header("host");
 }
 
 /// Every check but the token's.
@@ -235,15 +268,16 @@ pub fn decideAllButToken(cfg: Config, request: Request) Decision {
         if (!seen) return .{ .deny = .bad_forwarded_for };
     }
 
-    const host = request.header("x-forwarded-host") orelse request.header("host");
+    const scheme = pageScheme(cfg);
+    const host = requestHost(cfg, request);
     if (cfg.allowed_hosts.len > 0) {
         const h = host orelse return .{ .deny = .bad_host };
-        if (!hostAllowed(cfg.allowed_hosts, h)) return .{ .deny = .bad_host };
+        if (!hostAllowed(cfg.allowed_hosts, h, scheme)) return .{ .deny = .bad_host };
     }
 
     if (request.is_websocket_upgrade or request.requires_origin) {
         const origin = request.header("origin") orelse return .{ .deny = .no_origin };
-        if (!originMatchesHost(origin, host orelse return .{ .deny = .bad_origin })) return .{ .deny = .bad_origin };
+        if (!originMatches(scheme, origin, host orelse return .{ .deny = .bad_origin })) return .{ .deny = .bad_origin };
     }
     return .allow;
 }
@@ -271,17 +305,38 @@ fn duplicatedSecurityHeader(headers: []const Header) bool {
     return false;
 }
 
-/// `host[:port]` against a list of allowed hosts, each a bare name (any port) or `name:port` (that
-/// port only; `[v6]:port` for an IPv6 address). A host with no port is on port 80.
-pub fn hostAllowed(allowed: []const []const u8, host: []const u8) bool {
-    const got = splitHost(host) orelse return false;
+/// A request's `host[:port]` against a list of allowed hosts, each a bare name (any port) or
+/// `name:port` (that port only; `[v6]:port` for an IPv6 address). A host with no port is on the
+/// scheme's default port.
+pub fn hostAllowed(allowed: []const []const u8, host: []const u8, scheme: Scheme) bool {
+    const got = authority(host, scheme) orelse return false;
     for (allowed) |a| {
         const want = splitHost(a) orelse continue;
         if (!std.ascii.eqlIgnoreCase(want.name, got.name)) continue;
-        if (want.port) |p| if (!std.mem.eql(u8, p, got.port orelse "80")) continue;
+        if (want.port) |p| if ((parsePort(p) orelse continue) != got.port) continue;
         return true;
     }
     return false;
+}
+
+/// A browser's `host[:port]` (a `Host`, or an origin's authority) as a name and the port it means:
+/// the scheme's default when none is written. Null when it is not one: no name, a port that is not
+/// 1 to 65535 in plain digits without a leading zero, or an IPv6 address without brackets.
+const Authority = struct { name: []const u8, port: u16 };
+
+fn authority(text: []const u8, scheme: Scheme) ?Authority {
+    const s = splitHost(text) orelse return null;
+    if (s.name.len == 0) return null;
+    if (text[0] != '[' and std.mem.indexOfScalar(u8, s.name, ':') != null) return null;
+    return .{ .name = s.name, .port = if (s.port) |p| parsePort(p) orelse return null else scheme.defaultPort() };
+}
+
+fn parsePort(p: []const u8) ?u16 {
+    // As browsers write a port: digits only (parseInt would also take `+` and `_`), no leading zero.
+    if (p.len == 0 or p.len > 5 or p[0] == '0') return null;
+    for (p) |c| if (!std.ascii.isDigit(c)) return null;
+    const n = std.fmt.parseInt(u16, p, 10) catch return null;
+    return if (n == 0) null else n;
 }
 
 /// `name[:port]`, `[v6][:port]` or a bare IPv6 address, split; null when brackets do not close.
@@ -350,17 +405,22 @@ pub fn sameAddress(a: Ip, b: Ip) bool {
     };
 }
 
-/// `Origin: https://host[:port]` against a `Host`-style `host[:port]`.
-pub fn originMatchesHost(origin: []const u8, host: []const u8) bool {
-    const rest = if (std.mem.startsWith(u8, origin, "https://"))
-        origin["https://".len..]
-    else if (std.mem.startsWith(u8, origin, "http://"))
-        origin["http://".len..]
-    else
-        return false;
-    // Nothing after the authority: an origin has no path.
-    if (std.mem.indexOfAny(u8, rest, "/?#@") != null) return false;
-    return host.len > 0 and std.ascii.eqlIgnoreCase(rest, host);
+/// An `Origin` against the authority the request asked for (`requestHost`): the same scheme (the
+/// one the configuration serves pages over), host name (in any case) and port, where a missing port is
+/// the scheme's default. `https://box` is `box:443`, so it is not `box:80`'s page, and `http://box` is
+/// not `box`'s page behind Serve.
+pub fn originMatches(scheme: Scheme, origin: []const u8, host: []const u8) bool {
+    const prefix = switch (scheme) {
+        .http => "http://",
+        .https => "https://",
+    };
+    if (origin.len < prefix.len or !std.ascii.eqlIgnoreCase(origin[0..prefix.len], prefix)) return false;
+    const rest = origin[prefix.len..];
+    // Nothing but the authority: an origin has no path, query, fragment, user or spaces.
+    if (std.mem.indexOfAny(u8, rest, "/?#@ \t") != null) return false;
+    const o = authority(rest, scheme) orelse return false;
+    const h = authority(host, scheme) orelse return false;
+    return o.port == h.port and std.ascii.eqlIgnoreCase(o.name, h.name);
 }
 
 /// Whether two secrets are equal, taking the same time wherever they first differ (their lengths are
@@ -474,15 +534,70 @@ test "websocket upgrades need an Origin that matches the forwarded host" {
     try testing.expectEqual(Decision.allow, decide(base_cfg, req(&none)));
 }
 
-test "originMatchesHost is strict" {
-    try testing.expect(originMatchesHost("https://a.example", "a.example"));
-    try testing.expect(originMatchesHost("http://127.0.0.1:7690", "127.0.0.1:7690"));
-    try testing.expect(!originMatchesHost("https://a.example", "a.example:8443"));
-    try testing.expect(!originMatchesHost("https://a.example/x", "a.example"));
-    try testing.expect(!originMatchesHost("https://user@a.example", "a.example"));
-    try testing.expect(!originMatchesHost("null", "a.example"));
-    try testing.expect(!originMatchesHost("ftp://a.example", "a.example"));
-    try testing.expect(!originMatchesHost("https://a.example.evil.com", "a.example"));
+test "an Origin must match on scheme, name and port" {
+    const yes = struct {
+        fn f(scheme: Scheme, origin: []const u8, host: []const u8) !void {
+            try testing.expect(originMatches(scheme, origin, host));
+        }
+    }.f;
+    const no = struct {
+        fn f(scheme: Scheme, origin: []const u8, host: []const u8) !void {
+            try testing.expect(!originMatches(scheme, origin, host));
+        }
+    }.f;
+    // Serve's page, on 443 and on another HTTPS port; a default port written or not.
+    try yes(.https, "https://box.tail1234.ts.net", "box.tail1234.ts.net");
+    try yes(.https, "https://box.tail1234.ts.net:8443", "box.tail1234.ts.net:8443");
+    try yes(.https, "https://box.tail1234.ts.net:443", "box.tail1234.ts.net");
+    try yes(.https, "https://box.tail1234.ts.net", "box.tail1234.ts.net:443");
+    try yes(.https, "HTTPS://BOX.tail1234.ts.net", "box.TAIL1234.ts.net");
+    // The tunnel's page: IPv4, a name and IPv6 loopback.
+    try yes(.http, "http://127.0.0.1:7690", "127.0.0.1:7690");
+    try yes(.http, "http://localhost:7690", "localhost:7690");
+    try yes(.http, "http://[::1]:7690", "[::1]:7690");
+    try yes(.http, "http://localhost", "localhost:80");
+    // Cross-scheme, both ways: a plain-HTTP page on port 80 of Serve's name, and an HTTPS page on
+    // the tunnel's port.
+    try no(.https, "http://box.tail1234.ts.net", "box.tail1234.ts.net");
+    try no(.https, "http://box.tail1234.ts.net:443", "box.tail1234.ts.net");
+    try no(.http, "https://127.0.0.1:7690", "127.0.0.1:7690");
+    try no(.http, "https://localhost", "localhost");
+    // Wrong ports, and a default port of the other scheme.
+    try no(.https, "https://box.tail1234.ts.net", "box.tail1234.ts.net:8443");
+    try no(.https, "https://box.tail1234.ts.net:8443", "box.tail1234.ts.net");
+    try no(.https, "https://box.tail1234.ts.net:80", "box.tail1234.ts.net");
+    try no(.http, "http://127.0.0.1:7691", "127.0.0.1:7690");
+    try no(.http, "http://[::1]:7691", "[::1]:7690");
+    try no(.http, "http://[::1]:7690", "127.0.0.1:7690");
+    // Other names.
+    try no(.https, "https://box.tail1234.ts.net.evil.com", "box.tail1234.ts.net");
+    try no(.https, "https://evil.example", "box.tail1234.ts.net");
+    // Malformed origins and hosts.
+    for ([_][]const u8{
+        "",                  "null",               "https://",
+        "https://:443",      "https://box:",       "https://box:abc",
+        "https://box:+443",  "https://box:4_43",   "https://box:0",
+        "https://box:65536", "https://box:000443", "https://box:0443",
+        "https://box/",      "https://box/x",      "https://box?x",
+        "https://box#x",     "https://user@box",   "https://box ",
+        "https://box\t",     "ftp://box",          "https:/box",
+        "https//box",        "https://[::1",       "https://[::1]x",
+        "https://::1",
+    }) |bad| try no(.https, bad, "box");
+    try no(.http, "http://::1", "::1");
+    try no(.https, "https://box", "");
+    try no(.https, "https://box", "box:");
+    try no(.https, "https://box", "box:99999");
+}
+
+test "the scheme and the forwarded host come from the configuration, not from headers" {
+    try testing.expectEqual(Scheme.https, pageScheme(base_cfg));
+    try testing.expectEqual(Scheme.http, pageScheme(.{ .token = "t" }));
+    try testing.expectEqual(Scheme.https, pageScheme(.{ .owner = owner, .token = "t" }));
+    const fwd = [_]Header{ .{ .name = "Host", .value = "127.0.0.1:7690" }, .{ .name = "X-Forwarded-Host", .value = "evil.example" } };
+    // Behind Serve the forwarded host is the one asked for; with no proxy, only Host is.
+    try testing.expectEqualStrings("evil.example", requestHost(base_cfg, req(&fwd)).?);
+    try testing.expectEqualStrings("127.0.0.1:7690", requestHost(.{ .token = "t" }, req(&fwd)).?);
 }
 
 test "unix peers: only the allowed uids" {
@@ -574,13 +689,13 @@ test "a token is compared only after every other check, and only from this origi
 
 test "an allowed host with a port allows that port only" {
     const loop = [_][]const u8{ "127.0.0.1:7700", "localhost:7700", "[::1]:7700" };
-    for ([_][]const u8{ "127.0.0.1:7700", "LOCALHOST:7700", "[::1]:7700" }) |h| try testing.expect(hostAllowed(&loop, h));
-    for ([_][]const u8{ "127.0.0.1:7701", "127.0.0.1", "localhost", "[::1]", "evil.example:7700", "[::1", "[::1]x" }) |h| try testing.expect(!hostAllowed(&loop, h));
+    for ([_][]const u8{ "127.0.0.1:7700", "LOCALHOST:7700", "[::1]:7700" }) |h| try testing.expect(hostAllowed(&loop, h, .http));
+    for ([_][]const u8{ "127.0.0.1:7701", "127.0.0.1", "localhost", "[::1]", "evil.example:7700", "[::1", "[::1]x" }) |h| try testing.expect(!hostAllowed(&loop, h, .http));
     // Without a port, any port (an SSH tunnel's local port is not known to rweb).
     const any = [_][]const u8{ "127.0.0.1", "localhost", "[::1]" };
-    for ([_][]const u8{ "127.0.0.1:7700", "localhost:1234", "[::1]:7700", "[::1]", "localhost" }) |h| try testing.expect(hostAllowed(&any, h));
-    try testing.expect(!hostAllowed(&any, "evil.example"));
-    try testing.expect(hostAllowed(&.{"localhost:80"}, "localhost"));
+    for ([_][]const u8{ "127.0.0.1:7700", "localhost:1234", "[::1]:7700", "[::1]", "localhost" }) |h| try testing.expect(hostAllowed(&any, h, .http));
+    try testing.expect(!hostAllowed(&any, "evil.example", .http));
+    try testing.expect(hostAllowed(&.{"localhost:80"}, "localhost", .http));
 }
 
 test "the own-address rule compares addresses, and fails closed" {
@@ -644,10 +759,10 @@ test "a host list refuses any other Host, on every request" {
     // The forwarded host wins over Host, so a proxy-supplied name cannot be bypassed by Host.
     const mixed = [_]Header{ login, xff, .{ .name = "Host", .value = "box.tail1234.ts.net" }, .{ .name = "X-Forwarded-Host", .value = "evil.example" } };
     try expectDeny(.bad_host, cfg, req(&mixed));
-    try testing.expect(hostAllowed(&.{"a.example"}, "a.example"));
-    try testing.expect(hostAllowed(&.{"::1"}, "[::1]:8080"));
-    try testing.expect(!hostAllowed(&.{"a.example"}, "a.example.evil.com"));
-    try testing.expect(!hostAllowed(&.{"a.example"}, ""));
+    try testing.expect(hostAllowed(&.{"a.example"}, "a.example", .https));
+    try testing.expect(hostAllowed(&.{"::1"}, "[::1]:8080", .http));
+    try testing.expect(!hostAllowed(&.{"a.example"}, "a.example.evil.com", .https));
+    try testing.expect(!hostAllowed(&.{"a.example"}, "", .https));
 }
 
 test "a PUT needs the page's own Origin, as a WebSocket does" {
@@ -700,4 +815,66 @@ test "own addresses that could not be confirmed refuse every request the rule wo
     // Not when the owner has said requests from this node are fine: the list is not used then.
     stale.allow_own_address = true;
     try testing.expectEqual(Decision.allow, decide(stale, req(&h)));
+}
+
+test "round 7: a page of another scheme or port is refused on every path that checks Origin" {
+    const login = Header{ .name = "Tailscale-User-Login", .value = owner };
+    const xff = Header{ .name = "X-Forwarded-For", .value = "100.64.0.9" };
+    const fwd = Header{ .name = "X-Forwarded-Host", .value = "box.tail1234.ts.net" };
+    // Behind Serve: the HTTPS page passes; a plain-HTTP page on port 80 of the same name, or an HTTPS
+    // page on another port, opens no socket and makes no PUT.
+    for ([_]bool{ true, false }) |upgrade| {
+        const good = [_]Header{ login, xff, fwd, .{ .name = "Origin", .value = "https://box.tail1234.ts.net" } };
+        var r = req(&good);
+        r.is_websocket_upgrade = upgrade;
+        r.requires_origin = !upgrade;
+        try testing.expectEqual(Decision.allow, decide(base_cfg, r));
+        for ([_][]const u8{ "http://box.tail1234.ts.net", "https://box.tail1234.ts.net:8443", "http://box.tail1234.ts.net:443" }) |o| {
+            const bad = [_]Header{ login, xff, fwd, .{ .name = "Origin", .value = o } };
+            r = req(&bad);
+            r.is_websocket_upgrade = upgrade;
+            r.requires_origin = !upgrade;
+            try expectDeny(.bad_origin, base_cfg, r);
+        }
+    }
+    // Token mode (no proxy): the tunnel's HTTP page passes, an HTTPS page on the same port does not,
+    // over IPv4 and IPv6 loopback.
+    const cfg: Config = .{ .token = "tok123", .allowed_hosts = &.{ "127.0.0.1:7700", "[::1]:7700" } };
+    for ([_][2][]const u8{ .{ "127.0.0.1:7700", "http://127.0.0.1:7700" }, .{ "[::1]:7700", "http://[::1]:7700" } }) |hp| {
+        const good = [_]Header{ .{ .name = "Host", .value = hp[0] }, .{ .name = "Origin", .value = hp[1] }, .{ .name = "rweb-token", .value = "tok123" } };
+        var r = req(&good);
+        r.is_websocket_upgrade = true;
+        try testing.expectEqual(Decision.allow, decide(cfg, r));
+        r.is_websocket_upgrade = false;
+        r.requires_origin = true;
+        try testing.expectEqual(Decision.allow, decide(cfg, r));
+        var https_origin: [64]u8 = undefined;
+        const ho = try std.fmt.bufPrint(&https_origin, "https://{s}", .{hp[0]});
+        const bad = [_]Header{ .{ .name = "Host", .value = hp[0] }, .{ .name = "Origin", .value = ho }, .{ .name = "rweb-token", .value = "tok123" } };
+        r = req(&bad);
+        r.requires_origin = true;
+        try expectDeny(.bad_origin, cfg, r);
+        // The token sign-in guard: a header or query token from that page is refused, uncompared.
+        try testing.expectEqual(TokenCheck.cross_site, checkToken(cfg, req(&bad)));
+        try testing.expectEqual(TokenCheck.cross_site, checkToken(cfg, .{ .headers = bad[0..2], .query_token = "tok123" }));
+    }
+    // Command-line sign-in is unchanged: the printed address typed or opened, with no Origin.
+    const typed = [_]Header{ .{ .name = "Host", .value = "127.0.0.1:7700" }, .{ .name = "Sec-Fetch-Site", .value = "none" } };
+    try testing.expectEqual(Decision.allow, decide(cfg, .{ .headers = &typed, .query_token = "tok123" }));
+    // An X-Forwarded-Host with no proxy in front is not read: it neither lets a rebound name in nor
+    // makes the tunnel's own page look foreign.
+    const rebound = [_]Header{ .{ .name = "Host", .value = "evil.example:7700" }, .{ .name = "X-Forwarded-Host", .value = "127.0.0.1:7700" } };
+    try expectDeny(.bad_host, cfg, .{ .headers = &rebound, .query_token = "tok123" });
+    try testing.expectEqual(Decision{ .deny = .bad_host }, decideLoginPage(cfg, req(&rebound)));
+    const odd = [_]Header{ .{ .name = "Host", .value = "127.0.0.1:7700" }, .{ .name = "X-Forwarded-Host", .value = "evil.example" }, .{ .name = "Origin", .value = "http://127.0.0.1:7700" } };
+    var r = req(&odd);
+    r.is_websocket_upgrade = true;
+    r.query_token = "tok123";
+    try testing.expectEqual(Decision.allow, decide(cfg, r));
+    // A host with a default port written out is the same host.
+    try testing.expect(hostAllowed(&.{"box:443"}, "box", .https));
+    try testing.expect(!hostAllowed(&.{"box:443"}, "box", .http));
+    try testing.expect(hostAllowed(&.{"localhost:80"}, "localhost", .http));
+    try testing.expect(!hostAllowed(&.{"box:443"}, "box:4430", .https));
+    try testing.expect(!hostAllowed(&.{"box"}, "box:x", .https));
 }
