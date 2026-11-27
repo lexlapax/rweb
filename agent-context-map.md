@@ -103,8 +103,11 @@ a 4-second `echo` loop, upright again after it.
   Channels made (owner 2026-11-27: Homebrew from the release binary; Linux: archive + systemd unit, AUR,
   Homebrew on Linux): `packaging/` templates, `tools/packaging.sh VERSION` (refuses an unsigned release),
   `contrib/` services in the archive. Checked: brew style/audit/fetch in a temporary trusted tap (removed),
-  makepkg on linux-box. To publish at the release: create `lexlapax/homebrew-rweb` (owner's word), the AUR
-  package (owner's account). Update checker done (owner 2026-11-27: on by default,
+  makepkg on linux-box. Prepared for the published 0.2.0 (2026-11-27): a local tap repository
+  `~/projects/lexlapax/homebrew-rweb` (formula and README; style, audit and fetch pass) and a local AUR
+  repository `~/projects/lexlapax/aur-rweb-bin` (PKGBUILD, rweb.service as its own source, .SRCINFO;
+  makepkg builds it on linux-box). To publish: the GitHub repository `lexlapax/homebrew-rweb` (owner's word)
+  and the AUR package (the owner's AUR account and SSH key). Update checker done (owner 2026-11-27: on by default,
   `--no-update-check` turns it off): `src/bridge/update.zig` (GitHub latest-release API, 10 min after start
   then daily + up to 1 h spread, `Io.Select` 10 s deadline, 64 KiB cap, tag/draft/prerelease only), the hub's
   `mode` frame carries `update`, the page shows a dot on ⋯ and an item (link built by the page from

@@ -19,9 +19,12 @@ sum() { awk -v f="rweb-$version-$1.tar.gz" '$2 == f { print $1 }' "$rel/SHA256SU
 mac=$(sum macos-arm64)
 linux=$(sum linux-x86_64)
 [ -n "$mac" ] && [ -n "$linux" ] || die "SHA256SUMS lacks an archive for macos-arm64 or linux-x86_64"
-fill() { sed -e "s/@VERSION@/$version/g" -e "s/@SHA256_MACOS_ARM64@/$mac/g" -e "s/@SHA256_LINUX_X86_64@/$linux/g" "$1"; }
+unit=$(shasum -a 256 "$top/packaging/aur/rweb.service" 2>/dev/null || sha256sum "$top/packaging/aur/rweb.service")
+unit=${unit%% *}
+fill() { sed -e "s/@VERSION@/$version/g" -e "s/@SHA256_MACOS_ARM64@/$mac/g" -e "s/@SHA256_LINUX_X86_64@/$linux/g" -e "s/@SHA256_AUR_SERVICE@/$unit/g" "$1"; }
 mkdir -p "$rel/packaging/homebrew" "$rel/packaging/aur"
-fill "$top/packaging/homebrew/rweb.rb.in" | sed '/^# A template/,/^# (lexlapax/d' > "$rel/packaging/homebrew/rweb.rb"
+fill "$top/packaging/homebrew/rweb.rb.in" | sed '/^# Homebrew formula for rweb/,/^# (lexlapax/d' > "$rel/packaging/homebrew/rweb.rb"
 fill "$top/packaging/aur/PKGBUILD.in" | sed '/^# A template/,/^# the result is/d' > "$rel/packaging/aur/PKGBUILD"
+cp "$top/packaging/aur/rweb.service" "$rel/packaging/aur/rweb.service"
 ! grep -q '@[A-Z0-9_]*@' "$rel/packaging/homebrew/rweb.rb" "$rel/packaging/aur/PKGBUILD" || die "a placeholder was left unfilled"
-echo "made $rel/packaging/homebrew/rweb.rb and $rel/packaging/aur/PKGBUILD for rweb $version"
+echo "made $rel/packaging/homebrew/rweb.rb and $rel/packaging/aur/{PKGBUILD,rweb.service} for rweb $version"
