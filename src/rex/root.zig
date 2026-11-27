@@ -23,4 +23,5 @@ test {
     _ = input;
     _ = api;
     _ = transfer;
+    _ = @import("measure.zig");
 }

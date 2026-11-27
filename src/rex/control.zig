@@ -107,9 +107,13 @@ pub const Response = struct {
 
 const Pending = struct {
     done: Io.Event = .unset,
-    /// Raw response message, or null if the connection was lost first.
-    text: ?[]u8 = null,
+    /// The response, parsed once by the reader (`dispatch`), or null if the connection was lost
+    /// first. Whoever takes it frees it.
+    parsed: ?std.json.Parsed(std.json.Value) = null,
 };
+
+/// A request payload that is JSON text already (for callers that build their own).
+pub const RawJson = struct { json: ?[]const u8 };
 
 pub const Control = struct {
     gpa: Allocator,
@@ -418,6 +422,12 @@ pub const Control = struct {
 
     /// As `call`, waiting at most `timeout_ms` for the answer.
     pub fn callTimeout(c: *Control, method: []const u8, payload_json: ?[]const u8, timeout_ms: u32) !Response {
+        return c.callValue(method, RawJson{ .json = payload_json }, timeout_ms);
+    }
+
+    /// Call `method` with `payload` written as JSON (any value `std.json.Stringify` can write; null
+    /// optional fields are left out), or a `RawJson`. The request is written in one pass.
+    pub fn callValue(c: *Control, method: []const u8, payload: anytype, timeout_ms: u32) !Response {
         const gpa = c.gpa;
         var pend: Pending = .{};
         var idbuf: [24]u8 = undefined;
@@ -441,27 +451,22 @@ pub const Control = struct {
         // Runs last: once `calls` is back down, `close` may free everything.
         defer c.endCall();
         // Whatever way this returns: forget the call, and free a response that arrived after
-        // we stopped waiting (the dispatcher writes `pend.text` under `mu`).
+        // we stopped waiting (the dispatcher writes `pend.parsed` under `mu`).
         defer {
             c.mu.lockUncancelable(c.io);
             _ = c.pending.remove(id);
-            const leftover = pend.text;
-            pend.text = null;
+            var leftover = pend.parsed;
+            pend.parsed = null;
             c.mu.unlock(c.io);
-            if (leftover) |t| gpa.free(t);
+            if (leftover) |*l| l.deinit();
         }
         var writing = true;
         defer if (writing) c.releaseWriter();
 
-        const method_json = try std.json.Stringify.valueAlloc(gpa, method, .{});
-        defer gpa.free(method_json);
-        const req = try gpa.print("{{\"type\":\"request\",\"id\":\"{s}\",\"method\":{s}{s}{s}}}", .{
-            id,
-            method_json,
-            if (payload_json != null) ",\"payload\":" else "",
-            payload_json orelse "",
-        });
-        defer gpa.free(req);
+        var out: std.Io.Writer.Allocating = try .initCapacity(gpa, 256);
+        defer out.deinit();
+        writeRequest(&out.writer, id, method, payload) catch return error.OutOfMemory; // only the buffer's growth can fail
+        const req = out.written();
         if (req.len > max_message) return error.MessageTooLarge;
         // The request must be written within the call's own timeout: a Rex that stops reading
         // gets its connection shut (by the write's deadline) rather than holding this task.
@@ -481,13 +486,10 @@ pub const Control = struct {
         };
         c.mu.lockUncancelable(c.io);
         _ = c.pending.remove(id);
-        const taken = pend.text;
-        pend.text = null;
+        const taken = pend.parsed;
+        pend.parsed = null;
         c.mu.unlock(c.io);
-        const text = taken orelse return error.ConnectionLost;
-        defer gpa.free(text);
-
-        var parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+        var parsed = taken orelse return error.ConnectionLost;
         errdefer parsed.deinit();
         if (parsed.value != .object) return error.BadResponse; // `dispatch` checked; cheap to keep
         const o = parsed.value.object;
@@ -506,6 +508,31 @@ pub const Control = struct {
             };
         };
         return r;
+    }
+
+    /// `{"type":"request","id":...,"method":...,"payload":...}`, the payload left out when it is a
+    /// `RawJson` with no text.
+    fn writeRequest(w: *std.Io.Writer, id: []const u8, method: []const u8, payload: anytype) std.Io.Writer.Error!void {
+        var s: std.json.Stringify = .{ .writer = w, .options = .{ .emit_null_optional_fields = false } };
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write("request");
+        try s.objectField("id");
+        try s.write(id);
+        try s.objectField("method");
+        try s.write(method);
+        if (@TypeOf(payload) == RawJson) {
+            if (payload.json) |raw| {
+                try s.objectField("payload");
+                try s.beginWriteRaw();
+                try w.writeAll(raw);
+                s.endWriteRaw();
+            }
+        } else {
+            try s.objectField("payload");
+            try s.write(payload);
+        }
+        try s.endObject();
     }
 
     fn releaseWriter(c: *Control) void {
@@ -596,8 +623,10 @@ pub const Control = struct {
 
     fn dispatch(c: *Control, text: []const u8) !void {
         const gpa = c.gpa;
+        // Parsed once, here: a response's tree is handed to the waiting call as it is.
         var parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
-        defer parsed.deinit();
+        var handed = false;
+        defer if (!handed) parsed.deinit();
         if (parsed.value != .object) return;
         const o = parsed.value.object;
         const ty = o.get("type") orelse return;
@@ -605,15 +634,15 @@ pub const Control = struct {
         if (std.mem.eql(u8, ty.string, "response")) {
             const id = o.get("id") orelse return;
             if (id != .string) return;
-            const copy = try gpa.dupe(u8, text);
             c.mu.lockUncancelable(c.io);
             defer c.mu.unlock(c.io);
-            if (c.pending.get(id.string)) |p| {
-                // A second response for the same id replaces an unclaimed first one.
-                if (p.text) |old| gpa.free(old);
-                p.text = copy;
-                p.done.set(c.io);
-            } else gpa.free(copy); // a late answer to a call that timed out
+            // Not there: a late answer to a call that timed out; it is freed by the `defer`.
+            const p = c.pending.get(id.string) orelse return;
+            // A second response for the same id replaces an unclaimed first one.
+            if (p.parsed) |*old| old.deinit();
+            p.parsed = parsed;
+            handed = true;
+            p.done.set(c.io);
         } else if (std.mem.eql(u8, ty.string, "event")) {
             const seq: u64 = if (o.get("seq")) |s| (if (s == .integer and s.integer >= 0) @intCast(s.integer) else 0) else 0;
             const is_dropped = blk: {
@@ -956,8 +985,8 @@ test "control: a second response for the same id frees the first" {
     try c.dispatch("{\"type\":\"response\",\"id\":\"7\",\"payload\":{\"n\":1}}");
     try c.dispatch("{\"type\":\"response\",\"id\":\"7\",\"payload\":{\"n\":2}}");
     _ = c.pending.remove("7");
-    try testing.expect(std.mem.indexOf(u8, pend.text.?, "\"n\":2") != null);
-    testing.allocator.free(pend.text.?);
+    try testing.expectEqual(@as(i64, 2), pend.parsed.?.value.object.get("payload").?.object.get("n").?.integer);
+    pend.parsed.?.deinit();
 }
 
 test "control: close waits for a call still waiting for its answer" {

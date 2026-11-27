@@ -61,7 +61,7 @@ mechanical changes above), **part fixed**, or **open**.
 | F2 | performance | should-fix | `readMessage` allocates and frees a buffer for every message, so once per chunk of terminal output | open (Phase B 3) | `src/rex/ws.zig:517-577` |
 | F3 | performance | should-fix | live output is copied per viewer per chunk, and a frame grows by exact-size `realloc` (quadratic, bounded by the 64 KiB frame) | open (Phase B 3) | `src/bridge/hub.zig:229-250` |
 | F4 | performance | should-fix | a reply is built with `valueAlloc`, then `push` copies it and the first copy is freed; a redraw (up to 16 MiB) is copied the same way | open (Phase B 3) | `src/bridge/hub.zig:186-188`, `:1238`; 17 `valueAlloc` in `hub.zig` |
-| F5 | comptime | should-fix | Rex replies: parsed in `dispatch`, copied, parsed again in `callTimeout`, deep-copied by `cloneValue`, then picked apart by hand; events get a third parse; request bodies are glued from escaped pieces | open (Phase B 1) | `src/rex/control.zig:490`, `:599`; `src/rex/api.zig:114`, `:583`; `src/rex/rex1.zig:182`; `src/rex/wire.zig:31`; `src/bridge/hub.zig:466`; `src/bridge/main.zig:731`, `:759` |
+| F5 | comptime | should-fix | Rex replies: parsed in `dispatch`, copied, parsed again in `callTimeout`, deep-copied by `cloneValue`, then picked apart by hand; events get a third parse; request bodies are glued from escaped pieces | **fixed in Phase B step 1** (2026-11-26; section 4) | `src/rex/control.zig:490`, `:599`; `src/rex/api.zig:114`, `:583`; `src/rex/rex1.zig:182`; `src/rex/wire.zig:31`; `src/bridge/hub.zig:466`; `src/bridge/main.zig:731`, `:759` |
 | F6 | comptime | should-fix | message type matched by a chain of `eql`; `classOf` ended in `else => .free` | **fixed in round five**: `stringToEnum` and an exhaustive switch; both class functions list every tag, and a comptime loop refuses a tag that is under a mirror's lock and free | `src/bridge/protocol.zig:91-92`; `src/bridge/hub.zig:667-692` |
 | F7 | errors | should-fix | allocation failures swallowed with a wrong state left behind | **part fixed in round five**: the hub needs no memory to close, restart or drop a terminal (lists linked through `Terminal.link`, a `closed` frame kept from the open, a reserved queue slot). **Open**: a connection whose tracking `append` fails is served untracked, so `stop` cannot shut it | fixed: `src/bridge/hub.zig:266-283`, `:1519-1532`, `:1553-1640`; open: `src/bridge/server.zig:643` |
 | F8 | C interop | should-fix | two `peerUid` functions, the server's with hard-coded socket constants | **fixed in round five**: one function, std's constants, the returned length checked | `src/rex/ws.zig:199-220`; called at `src/bridge/server.zig:574`, `:732` |
@@ -183,6 +183,49 @@ Rex, in ReleaseSafe.
    `session.list` and per `terminal.write` (a counting allocator in a test); the time of a tree
    refresh with 50 sessions. The fuzz targets for the welcome and the message body must still pass,
    and each typed struct gets a test with a missing, a wrong-typed and an extra field.
+
+   **Done 2026-11-26.** What changed:
+   - `control.zig`: the reader parses a reply once and hands the parsed tree to the waiting call
+     (before: it copied the text and the call parsed it again). A request is written in one pass by
+     `std.json.Stringify` (`callValue`), its payload a struct or raw JSON text.
+   - `api.zig`: every answer is read into a type in `api.Payload` by one `decode` (`parseFromValueLeaky`,
+     unknown fields ignored, any mismatch `BadShape`); `cloneValue` and the hand-written field picking
+     are gone; requests are anonymous structs, not glued strings. std parses a JSON tree with an
+     explicit stack and the typed read goes only as deep as the type, so the depth guard went too.
+   - Not done here: events are still kept as raw text and read by the hub (a third parse, F5's last part);
+     `rex1.zig` is untouched (it parses the data stream's own messages, not Rex's control JSON).
+
+   Measured with `src/rex/measure.zig` (`RWEB_MEASURE=1 zig build test -Doptimize=ReleaseSafe`), the
+   client against the fake with 50 sessions, per call. Allocations and bytes are the same on macOS
+   (Apple silicon) and Linux (x86-64, musl); times are macOS's, three runs each (the Linux host was too
+   busy for stable times).
+
+   | call | allocations before → after | bytes before → after | time before → after |
+   |---|---|---|---|
+   | `session.list`, 50 sessions | 30 → 13 | 171,348 → 67,504 | 100–118 µs → 79–81 µs |
+   | `session.list_blocks` | 27 → 10 | 14,351 → 6,451 | 22–26 µs → 22 µs |
+   | `block.event` (a paste) | 31 → 8 | 9,511 → 4,008 | 22–25 µs → 23–24 µs |
+   | `terminal.resize` | 27 → 8 | 8,429 → 4,008 | 18–22 µs → 20–21 µs |
+   | tree refresh (list and 50 × blocks) | 1,380 → 513 | 889,111 → 390,180 | 974–1,083 µs → 880–914 µs |
+
+   A call's time is mostly the round trip over the socket, so small calls did not get faster; the
+   memory work did drop by 57 to 74 % in allocations and 53 to 61 % in bytes. `api.zig` went from 927 to
+   about 800 lines with the new tests; `control.zig` grew by 30 (the request writer).
+
+   Found on the way:
+   - An empty anonymous literal `.{}` is a tuple, and `std.json` writes it as `[]`. The first version
+     sent `"payload":[]` and `"args":[]`; Rex refuses those (`cannot unmarshal array`), the fake took
+     them. Now `no_args` (an empty struct) is sent, a test pins both forms, and **the fake refuses a
+     payload or `args` that is not an object**, as Rex does. Found only by the live tests against a real
+     Rex: the fake had been more lenient than Rex.
+   - The fake answered a missing folder with `"entries":""` (a `[]u8` is written as a string); fixed.
+   - std.json reads a list of small numbers into a text field as bytes, and a numeric string into an
+     integer field. Neither matters for Rex's answers; the tests' wrong-type cases avoid them.
+
+   Checks: macOS `zig build test` 334 passed, 11 skipped; with the live Rex (0.1.0-preview.21, revision
+   18) in ReleaseSafe 342 passed, 3 skipped; Linux with the live Rex (preview.22, revision 19) in
+   ReleaseSafe 411 passed, 4 skipped; web tests 44/44; `zig fmt --check` clean; `rex ls` unchanged on
+   both. Each answer type has a test with an extra, a missing and a wrong-typed field.
 
 2. **The release allocator, decided from measurements (F1).** Candidates: `SafeAllocator` as now
    (use-after-free and double-free checks in the shipped binary), `std.heap.smp_allocator` in

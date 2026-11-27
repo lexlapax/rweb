@@ -11,15 +11,11 @@ pub const Error = error{
     /// Rex answered with an error, or the call did not get an answer (the connection is down,
     /// it timed out); `Api.last_error` says which.
     RexError,
-    /// The answer did not have the shape this client expects (or nests deeper than
-    /// `max_json_depth`).
+    /// The answer did not have the shape this client expects (a field missing, or of another type).
     BadShape,
     /// The task making the call was cancelled.
     Canceled,
 } || Allocator.Error;
-
-/// Deepest JSON nesting copied out of an answer; deeper is `BadShape`.
-pub const max_json_depth = 64;
 
 /// A result with its memory.
 pub fn Owned(comptime T: type) type {
@@ -38,18 +34,18 @@ pub const Session = struct { session_id: []const u8, label: []const u8 };
 pub const Block = struct {
     block_id: []const u8,
     label: []const u8,
-    flavor: ?[]const u8,
-    creator_name: ?[]const u8,
+    flavor: ?[]const u8 = null,
+    creator_name: ?[]const u8 = null,
     /// `placed` or `detached`.
     placement: []const u8,
-    window_id: ?[]const u8,
-    owner: ?[]const u8,
+    window_id: ?[]const u8 = null,
+    owner: ?[]const u8 = null,
 };
 
 pub const Created = struct { session_id: []const u8, window_id: []const u8, block_id: []const u8 };
 pub const NewTerminal = struct { window_id: []const u8, block_id: []const u8 };
 
-pub const BlockOwner = struct { block_id: []const u8, owner: ?[]const u8 };
+pub const BlockOwner = struct { block_id: []const u8, owner: ?[]const u8 = null };
 
 pub const ProcessInfo = struct {
     /// Null while the program runs.
@@ -65,6 +61,51 @@ pub const OwnMode = enum { take, request };
 /// How long the calls a browser waits on interactively (directory listings, the start of a
 /// download, terminal info) wait for Rex, instead of the connection's 30 seconds.
 pub const quick_call_timeout_ms: u32 = 5_000;
+
+/// The answers this client reads, as Rex sends them: fields it does not read are ignored, a field
+/// it needs that is missing or of another type makes the answer `BadShape`.
+pub const Payload = struct {
+    pub const SessionList = struct { sessions: ?[]Session };
+    pub const SessionCreate = struct {
+        session_id: []const u8,
+        initial_windows: []const struct { window_id: []const u8, block_ids: []const []const u8 },
+    };
+    pub const BlockList = struct { blocks: ?[]Block };
+    pub const NewWindow = struct { window_id: []const u8, block_ids: []const []const u8 };
+    pub const Format = struct { content: []const u8 };
+    pub const Process = struct {
+        last_exit: ?struct { exit_code: ?i64 = null } = null,
+        foreground: ?struct { name: ?[]const u8 = null, cwd: ?[]const u8 = null } = null,
+        child: ?struct { pid: ?i64 = null } = null,
+    };
+    pub const DownloadBegin = struct { ticket: []const u8, name: []const u8, path: ?[]const u8 = null, size: ?i64 = null };
+    pub const ListDir = struct {
+        entries: ?[]const struct { name: ?[]const u8 = null, file: ?bool = null } = null,
+        truncated: ?bool = null,
+        path: ?[]const u8 = null,
+        home: ?[]const u8 = null,
+        status: ?[]const u8 = null,
+    };
+    pub const Clipboard = struct { data: ?[]const u8 = null };
+    pub const Title = struct { title: ?[]const u8 = null };
+    pub const Pwd = struct { pwd: ?[]const u8 = null };
+    pub const ProgramStatus = struct { records: ?[]const struct { state: ?[]const u8 = null, msg: ?[]const u8 = null, title: ?[]const u8 = null, progress: ?i64 = null } = null };
+    pub const Ports = struct { ports: ?[]const struct { port: ?i64 = null } = null };
+    pub const Ownership = struct { blocks: []const BlockOwner };
+};
+
+/// Read `payload` as a `T` into `arena` (strings copied), unknown fields ignored; any mismatch is
+/// `BadShape`.
+pub fn decode(comptime T: type, arena: Allocator, payload: std.json.Value) Error!T {
+    return std.json.parseFromValueLeaky(T, arena, payload, .{ .ignore_unknown_fields = true }) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.BadShape,
+    };
+}
+
+/// An empty JSON object. (`.{}` would be an empty tuple, which `std.json` writes as `[]`, and Rex
+/// refuses a list where it wants an object.)
+const no_args: struct {} = .{};
 
 pub const Api = struct {
     gpa: Allocator,
@@ -84,18 +125,12 @@ pub const Api = struct {
 
     // ---- plumbing ----
 
-    fn q(a: *Api, value: []const u8) ![]u8 {
-        return std.json.Stringify.valueAlloc(a.gpa, value, .{});
-    }
-
-    /// Call and, on success, copy the payload into an arena so the response can be freed.
-    fn run(a: *Api, method: []const u8, body: ?[]const u8) Error!Owned(std.json.Value) {
-        return a.runTimeout(method, body, a.ctl.opts.call_timeout_ms);
-    }
-
-    /// As `run`, waiting at most `timeout_ms` for the answer.
-    fn runTimeout(a: *Api, method: []const u8, body: ?[]const u8, timeout_ms: u32) Error!Owned(std.json.Value) {
-        var r = a.ctl.callTimeout(method, body, timeout_ms) catch |e| switch (e) {
+    /// Call `method` with `payload` (written by `std.json.Stringify`; null optional fields are left
+    /// out) and read the answer's payload as a `T`, unknown fields ignored. Strings are copied into
+    /// the result's arena, so the reply is freed before this returns. A payload that is not a `T`
+    /// (a field missing or of another type) is `BadShape`. `T == void` reads nothing.
+    fn callTyped(a: *Api, comptime T: type, method: []const u8, payload: anytype, timeout_ms: u32) Error!Owned(T) {
+        var r = a.ctl.callValue(method, payload, timeout_ms) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => {
@@ -111,8 +146,25 @@ pub const Api = struct {
         }
         var arena = std.heap.ArenaAllocator.init(a.gpa);
         errdefer arena.deinit();
-        const v = try cloneValue(arena.allocator(), r.payload orelse .{ .object = .empty }, 0);
-        return .{ .arena = arena, .value = v };
+        if (T == void) return .{ .arena = arena, .value = {} };
+        const value = try decode(T, arena.allocator(), r.payload orelse .{ .object = .empty });
+        return .{ .arena = arena, .value = value };
+    }
+
+    /// As `callTyped` with the connection's own timeout.
+    fn callT(a: *Api, comptime T: type, method: []const u8, payload: anytype) Error!Owned(T) {
+        return a.callTyped(T, method, payload, a.ctl.opts.call_timeout_ms);
+    }
+
+    /// A call whose answer carries nothing this client uses.
+    fn callVoid(a: *Api, method: []const u8, payload: anytype) Error!void {
+        var r = try a.callT(void, method, payload);
+        r.deinit();
+    }
+
+    /// For the tests that reach Rex with a method of their choosing.
+    fn run(a: *Api, method: []const u8, body: ?[]const u8) Error!Owned(void) {
+        return a.callT(void, method, @import("control.zig").RawJson{ .json = body });
     }
 
     fn setLastError(a: *Api, comptime fmt: []const u8, args: anytype) void {
@@ -120,213 +172,97 @@ pub const Api = struct {
         a.last_error = a.gpa.print(fmt, args) catch null;
     }
 
-    fn sessionBody(a: *Api, sid: []const u8, rest: []const u8) ![]u8 {
-        const s = try a.q(sid);
-        defer a.gpa.free(s);
-        return a.gpa.print("{{\"session_id\":{s}{s}}}", .{ s, rest });
-    }
-
-    fn blockBody(a: *Api, sid: []const u8, bid: []const u8, rest: []const u8) ![]u8 {
-        const s = try a.q(sid);
-        defer a.gpa.free(s);
-        const b = try a.q(bid);
-        defer a.gpa.free(b);
-        return a.gpa.print("{{\"session_id\":{s},\"block_id\":{s}{s}}}", .{ s, b, rest });
+    /// A payload's result moved into an `Owned` of another type (same arena).
+    fn into(comptime U: type, res: anytype, value: U) Owned(U) {
+        return .{ .arena = res.arena, .value = value };
     }
 
     // ---- sessions ----
 
     pub fn sessions(a: *Api) Error!Owned([]Session) {
-        var res = try a.run("session.list", null);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const items = try arr(res.value, "sessions");
-        const out = try arena.allocator().alloc(Session, items.len);
-        for (items, out) |it, *o| o.* = .{
-            .session_id = try dupe(arena.allocator(), try str(it, "session_id")),
-            .label = try dupe(arena.allocator(), try str(it, "label")),
-        };
-        return .{ .arena = arena, .value = out };
+        const res = try a.callT(Payload.SessionList, "session.list", no_args);
+        return into([]Session, res, res.value.sessions orelse &.{});
     }
 
     /// A session with one window holding one shell.
     pub fn createSession(a: *Api, label: ?[]const u8) Error!Owned(Created) {
-        const lab = if (label) |l| try a.gpa.print("\"label\":{f},", .{std.json.fmt(l, .{})}) else null;
-        defer if (lab) |x| a.gpa.free(x);
-        const fixed = try a.gpa.print("{{{s}\"initial_windows\":[{{\"layout\":{{\"block\":{{\"flavor\":\"{s}\"}}}}}}]}}", .{ lab orelse "", shell_flavor });
-        defer a.gpa.free(fixed);
-        var res = try a.run("session.create", fixed);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const w = try arr(res.value, "initial_windows");
-        if (w.len != 1) return error.BadShape;
-        const ids = try arr(w[0], "block_ids");
-        if (ids.len != 1 or ids[0] != .string) return error.BadShape;
-        const value: Created = .{
-            .session_id = try dupe(arena.allocator(), try str(res.value, "session_id")),
-            .window_id = try dupe(arena.allocator(), try str(w[0], "window_id")),
-            .block_id = try dupe(arena.allocator(), ids[0].string),
-        };
-        return .{ .arena = arena, .value = value };
+        var res = try a.callT(Payload.SessionCreate, "session.create", .{
+            .label = label,
+            .initial_windows = .{.{ .layout = .{ .block = .{ .flavor = shell_flavor } } }},
+        });
+        errdefer res.deinit();
+        const w = res.value.initial_windows;
+        if (w.len != 1 or w[0].block_ids.len != 1) return error.BadShape;
+        return into(Created, res, .{ .session_id = res.value.session_id, .window_id = w[0].window_id, .block_id = w[0].block_ids[0] });
     }
 
     pub fn renameSession(a: *Api, sid: []const u8, label: []const u8) Error!void {
-        const l = try a.q(label);
-        defer a.gpa.free(l);
-        const rest = try a.gpa.print(",\"label\":{s}", .{l});
-        defer a.gpa.free(rest);
-        const body = try a.sessionBody(sid, rest);
-        defer a.gpa.free(body);
-        var r = try a.run("session.set_label", body);
-        r.deinit();
+        return a.callVoid("session.set_label", .{ .session_id = sid, .label = label });
     }
 
     pub fn destroySession(a: *Api, sid: []const u8) Error!void {
-        const body = try a.sessionBody(sid, "");
-        defer a.gpa.free(body);
-        var r = try a.run("session.destroy", body);
-        r.deinit();
+        return a.callVoid("session.destroy", .{ .session_id = sid });
     }
 
     /// Receive session-level events for the whole server (not `block_event`s) and get the
     /// session list. Must be repeated after every reconnect as a new client.
     pub fn attachAll(a: *Api) Error!void {
-        var r = try a.run("session.attach_all", "{\"event_scope\":\"session\"}");
-        r.deinit();
+        return a.callVoid("session.attach_all", .{ .event_scope = "session" });
     }
 
     /// Attach this connection to a session, so its events and data connections work.
     pub fn attach(a: *Api, sid: []const u8) Error!void {
-        const body = try a.sessionBody(sid, "");
-        defer a.gpa.free(body);
-        var r = try a.run("session.attach", body);
-        r.deinit();
+        return a.callVoid("session.attach", .{ .session_id = sid });
     }
 
     pub fn detach(a: *Api, sid: []const u8) Error!void {
-        const body = try a.sessionBody(sid, "");
-        defer a.gpa.free(body);
-        var r = try a.run("session.detach", body);
-        r.deinit();
+        return a.callVoid("session.detach", .{ .session_id = sid });
     }
 
     // ---- blocks ----
 
     pub fn blocks(a: *Api, sid: []const u8) Error!Owned([]Block) {
-        const body = try a.sessionBody(sid, "");
-        defer a.gpa.free(body);
-        var res = try a.run("session.list_blocks", body);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const al = arena.allocator();
-        const items = try arr(res.value, "blocks");
-        const out = try al.alloc(Block, items.len);
-        for (items, out) |it, *o| o.* = .{
-            .block_id = try dupe(al, try str(it, "block_id")),
-            .label = try dupe(al, try str(it, "label")),
-            .flavor = try dupeOpt(al, optStr(it, "flavor")),
-            .creator_name = try dupeOpt(al, optStr(it, "creator_name")),
-            .placement = try dupe(al, try str(it, "placement")),
-            .window_id = try dupeOpt(al, optStr(it, "window_id")),
-            .owner = try dupeOpt(al, optStr(it, "owner")),
-        };
-        return .{ .arena = arena, .value = out };
+        const res = try a.callT(Payload.BlockList, "session.list_blocks", .{ .session_id = sid });
+        return into([]Block, res, res.value.blocks orelse &.{});
     }
 
     /// A new window holding a shell. It becomes the active window only if `focus`.
     pub fn newTerminal(a: *Api, sid: []const u8, focus: bool) Error!Owned(NewTerminal) {
-        const rest = try a.gpa.print(",\"focus\":{s},\"layout\":{{\"block\":{{\"flavor\":\"{s}\"}}}}", .{ if (focus) "true" else "false", shell_flavor });
-        defer a.gpa.free(rest);
-        const body = try a.sessionBody(sid, rest);
-        defer a.gpa.free(body);
-        var res = try a.run("session.new_window", body);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const ids = try arr(res.value, "block_ids");
-        if (ids.len != 1 or ids[0] != .string) return error.BadShape;
-        const value: NewTerminal = .{
-            .window_id = try dupe(arena.allocator(), try str(res.value, "window_id")),
-            .block_id = try dupe(arena.allocator(), ids[0].string),
-        };
-        return .{ .arena = arena, .value = value };
+        var res = try a.callT(Payload.NewWindow, "session.new_window", .{ .session_id = sid, .focus = focus, .layout = .{ .block = .{ .flavor = shell_flavor } } });
+        errdefer res.deinit();
+        if (res.value.block_ids.len != 1) return error.BadShape;
+        return into(NewTerminal, res, .{ .window_id = res.value.window_id, .block_id = res.value.block_ids[0] });
     }
 
     pub fn closeBlock(a: *Api, sid: []const u8, bid: []const u8) Error!void {
-        const b = try a.q(bid);
-        defer a.gpa.free(b);
-        const rest = try a.gpa.print(",\"block_id\":{s}", .{b});
-        defer a.gpa.free(rest);
-        const body = try a.sessionBody(sid, rest);
-        defer a.gpa.free(body);
-        var r = try a.run("block.close", body);
-        r.deinit();
+        return a.callVoid("block.close", .{ .session_id = sid, .block_id = bid });
     }
 
     pub fn renameBlock(a: *Api, sid: []const u8, bid: []const u8, label: []const u8) Error!void {
-        const l = try a.q(label);
-        defer a.gpa.free(l);
-        const b = try a.q(bid);
-        defer a.gpa.free(b);
-        const rest = try a.gpa.print(",\"block_id\":{s},\"label\":{s}", .{ b, l });
-        defer a.gpa.free(rest);
-        const body = try a.sessionBody(sid, rest);
-        defer a.gpa.free(body);
-        var r = try a.run("session.set_block_label", body);
-        r.deinit();
+        return a.callVoid("session.set_block_label", .{ .session_id = sid, .block_id = bid, .label = label });
     }
 
     // ---- terminal ----
 
     /// Ask for a size. It applies at once if the caller owns the block or nobody does.
     pub fn resize(a: *Api, sid: []const u8, bid: []const u8, cols: u16, rows: u16) Error!void {
-        const rest = try a.gpa.print(",\"args\":{{\"columns\":{d},\"rows\":{d}}}", .{ cols, rows });
-        defer a.gpa.free(rest);
-        const body = try a.blockBody(sid, bid, rest);
-        defer a.gpa.free(body);
-        var r = try a.run("com.superlogical.terminal.resize", body);
-        r.deinit();
+        return a.callVoid("com.superlogical.terminal.resize", .{ .session_id = sid, .block_id = bid, .args = .{ .columns = cols, .rows = rows } });
     }
 
     /// The screen and scrollback as `text`, `html` or `vt`. Caller frees with `deinit`.
     pub fn format(a: *Api, sid: []const u8, bid: []const u8, kind: []const u8) Error!Owned([]const u8) {
-        const k = try a.q(kind);
-        defer a.gpa.free(k);
-        const rest = try a.gpa.print(",\"args\":{{\"format\":{s}}}", .{k});
-        defer a.gpa.free(rest);
-        const body = try a.blockBody(sid, bid, rest);
-        defer a.gpa.free(body);
-        var res = try a.run("com.superlogical.terminal.format", body);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const value = try dupe(arena.allocator(), try str(res.value, "content"));
-        return .{ .arena = arena, .value = value };
+        const res = try a.callT(Payload.Format, "com.superlogical.terminal.format", .{ .session_id = sid, .block_id = bid, .args = .{ .format = kind } });
+        return into([]const u8, res, res.value.content);
     }
 
     pub fn process(a: *Api, sid: []const u8, bid: []const u8) Error!Owned(ProcessInfo) {
-        const body = try a.blockBody(sid, bid, ",\"args\":{}");
-        defer a.gpa.free(body);
-        var res = try a.run("com.superlogical.terminal.process", body);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        var info: ProcessInfo = .{ .exit_code = null, .foreground_name = null, .child_pid = null };
-        if (res.value == .object) {
-            if (res.value.object.get("last_exit")) |le| if (le == .object) if (le.object.get("exit_code")) |c| if (c == .integer) {
-                info.exit_code = c.integer;
-            };
-            if (res.value.object.get("foreground")) |fg| if (fg == .object) {
-                info.foreground_name = try dupeOpt(arena.allocator(), optStr(fg, "name"));
-            };
-            if (res.value.object.get("child")) |ch| if (ch == .object) if (ch.object.get("pid")) |p| if (p == .integer) {
-                info.child_pid = p.integer;
-            };
-        }
-        return .{ .arena = arena, .value = info };
+        const res = try a.callT(Payload.Process, "com.superlogical.terminal.process", .{ .session_id = sid, .block_id = bid, .args = no_args });
+        const v = res.value;
+        return into(ProcessInfo, res, .{
+            .exit_code = if (v.last_exit) |le| le.exit_code else null,
+            .foreground_name = if (v.foreground) |fg| fg.name else null,
+            .child_pid = if (v.child) |ch| ch.pid else null,
+        });
     }
 
     // ---- files ----
@@ -337,36 +273,17 @@ pub const Api = struct {
     /// Ask Rex to open `path` (absolute, `~/...`, or relative to the terminal's foreground
     /// process) for download. `ref` is `download:` and a new lower-case UUID.
     pub fn downloadBegin(a: *Api, sid: []const u8, bid: []const u8, ref: []const u8, path: []const u8) Error!Owned(DownloadTicket) {
-        const args = std.json.Stringify.valueAlloc(a.gpa, .{ .ref = ref, .path = path }, .{}) catch return error.OutOfMemory;
-        defer a.gpa.free(args);
-        const rest = try a.gpa.print(",\"args\":{s}", .{args});
-        defer a.gpa.free(rest);
-        const body = try a.blockBody(sid, bid, rest);
-        defer a.gpa.free(body);
-        var res = try a.runTimeout("com.superlogical.terminal.download_begin", body, a.quick_timeout_ms);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const al = arena.allocator();
-        const ticket = try ticketOf(res.value);
-        const size_v = if (res.value == .object) res.value.object.get("size") else null;
-        const size: u64 = if (size_v) |sv| (if (sv == .integer and sv.integer >= 0) @intCast(sv.integer) else 0) else 0;
-        // Allocate first, then move the arena into the result: a literal would copy it empty.
-        const name = try dupe(al, try str(res.value, "name"));
-        const path_out = try dupe(al, optStr(res.value, "path") orelse "");
-        return .{ .arena = arena, .value = .{ .ticket = ticket, .name = name, .path = path_out, .size = size } };
+        var res = try a.callTyped(Payload.DownloadBegin, "com.superlogical.terminal.download_begin", .{ .session_id = sid, .block_id = bid, .args = .{ .ref = ref, .path = path } }, a.quick_timeout_ms);
+        errdefer res.deinit();
+        const v = res.value;
+        const ticket = wire.decodeTicket(v.ticket) catch return error.BadShape;
+        const size: u64 = if (v.size) |n| (if (n >= 0) @intCast(n) else 0) else 0;
+        return into(DownloadTicket, res, .{ .ticket = ticket, .name = v.name, .path = v.path orelse "", .size = size });
     }
 
     /// Paste `text` into the terminal, as if the user had pasted it (no Enter is sent).
     pub fn paste(a: *Api, sid: []const u8, bid: []const u8, text: []const u8) Error!void {
-        const payload = std.json.Stringify.valueAlloc(a.gpa, .{ .text = text }, .{}) catch return error.OutOfMemory;
-        defer a.gpa.free(payload);
-        const rest = try a.gpa.print(",\"event\":{{\"type\":\"paste\",\"payload\":{s}}}", .{payload});
-        defer a.gpa.free(rest);
-        const body = try a.blockBody(sid, bid, rest);
-        defer a.gpa.free(body);
-        var res = try a.run("block.event", body);
-        res.deinit();
+        return a.callVoid("block.event", .{ .session_id = sid, .block_id = bid, .event = .{ .type = "paste", .payload = .{ .text = text } } });
     }
 
     pub const DirEntry = struct { name: []const u8, dir: bool };
@@ -374,129 +291,101 @@ pub const Api = struct {
 
     /// List a directory (empty `path`: the terminal's working directory), files included.
     pub fn listDir(a: *Api, sid: []const u8, bid: []const u8, path: []const u8) Error!Owned(Dir) {
-        const args = std.json.Stringify.valueAlloc(a.gpa, .{ .path = path, .files = true, .limit = 1000 }, .{}) catch return error.OutOfMemory;
-        defer a.gpa.free(args);
-        const rest = try a.gpa.print(",\"args\":{s}", .{args});
-        defer a.gpa.free(rest);
-        const body = try a.blockBody(sid, bid, rest);
-        defer a.gpa.free(body);
-        var res = try a.runTimeout("com.superlogical.terminal.list_dir", body, a.quick_timeout_ms);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const al = arena.allocator();
-        var list: std.ArrayList(DirEntry) = .empty;
-        if (res.value == .object) if (res.value.object.get("entries")) |es| if (es == .array) for (es.array.items) |e| {
-            const name = optStr(e, "name") orelse continue;
-            const is_file = if (e == .object) (if (e.object.get("file")) |f| f == .bool and f.bool else false) else false;
-            try list.append(al, .{ .name = try dupe(al, name), .dir = !is_file });
+        var res = try a.callTyped(Payload.ListDir, "com.superlogical.terminal.list_dir", .{ .session_id = sid, .block_id = bid, .args = .{ .path = path, .files = true, .limit = 1000 } }, a.quick_timeout_ms);
+        errdefer res.deinit();
+        const v = res.value;
+        const in = v.entries orelse &.{};
+        // An entry without a name is skipped.
+        const out = try res.arena.allocator().alloc(DirEntry, in.len);
+        var n: usize = 0;
+        for (in) |e| if (e.name) |name| {
+            out[n] = .{ .name = name, .dir = !(e.file orelse false) };
+            n += 1;
         };
-        const trunc = if (res.value == .object) (if (res.value.object.get("truncated")) |t| t == .bool and t.bool else false) else false;
-        const path_out = try dupe(al, optStr(res.value, "path") orelse "");
-        const home = try dupe(al, optStr(res.value, "home") orelse "");
-        const status = try dupe(al, optStr(res.value, "status") orelse "ok");
-        const entries = try list.toOwnedSlice(al);
-        return .{ .arena = arena, .value = .{ .path = path_out, .home = home, .status = status, .entries = entries, .truncated = trunc } };
-    }
-
-    fn ticketOf(v: std.json.Value) Error![16]u8 {
-        const t = optStr(v, "ticket") orelse return error.BadShape;
-        return wire.decodeTicket(t) catch error.BadShape;
+        return into(Dir, res, .{ .path = v.path orelse "", .home = v.home orelse "", .status = v.status orelse "ok", .entries = out[0..n], .truncated = v.truncated orelse false });
     }
 
     /// Clear the screen and scrollback (`clear`) or return the terminal to its starting state (`reset`).
     pub fn termAction(a: *Api, sid: []const u8, bid: []const u8, action: []const u8) Error!void {
-        const body = try a.blockBody(sid, bid, ",\"args\":{}");
-        defer a.gpa.free(body);
-        var res = try a.run(if (std.mem.eql(u8, action, "clear")) "com.superlogical.terminal.clear" else "com.superlogical.terminal.reset", body);
-        res.deinit();
+        const method = if (std.mem.eql(u8, action, "clear")) "com.superlogical.terminal.clear" else "com.superlogical.terminal.reset";
+        return a.callVoid(method, .{ .session_id = sid, .block_id = bid, .args = no_args });
     }
 
     /// The newest text a program in the terminal copied (up to 48 KiB), or null if nothing was copied.
     pub fn clipboard(a: *Api, sid: []const u8, bid: []const u8) Error!?Owned([]const u8) {
-        const body = try a.blockBody(sid, bid, ",\"args\":{}");
-        defer a.gpa.free(body);
-        var res = a.run("com.superlogical.terminal.clipboard_read", body) catch |e| {
+        var res = a.callT(Payload.Clipboard, "com.superlogical.terminal.clipboard_read", .{ .session_id = sid, .block_id = bid, .args = no_args }) catch |e| {
             if (e == error.RexError) return null; // not_found: nothing copied yet
             return e;
         };
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const data = optStr(res.value, "data") orelse return null;
-        const value = try dupe(arena.allocator(), data);
-        return .{ .arena = arena, .value = value };
+        const data = res.value.data orelse {
+            res.deinit();
+            return null;
+        };
+        return into([]const u8, res, data);
     }
 
     /// What a terminal is showing the person: its title, working directory, foreground program and
     /// listening ports. Each piece is optional; a piece Rex can't give is left out.
     pub const TermInfo = struct { state: ?[]const u8 = null, status_msg: ?[]const u8 = null, progress: ?i64 = null, title: ?[]const u8 = null, pwd: ?[]const u8 = null, program: ?[]const u8 = null, exit_code: ?i64 = null, ports: []const u16 = &.{} };
 
-    /// Every piece is a separate call, each with the quick timeout; a piece Rex refuses or does
-    /// not answer in time is left out. Cancellation and running out of memory end it.
+    /// Every piece is a separate call, each with the quick timeout; a piece Rex refuses, does not
+    /// answer in time or answers in another shape is left out. Cancellation and running out of
+    /// memory end it.
     pub fn termInfo(a: *Api, sid: []const u8, bid: []const u8) Error!Owned(TermInfo) {
         var arena = std.heap.ArenaAllocator.init(a.gpa);
         errdefer arena.deinit();
         const al = arena.allocator();
         var info: TermInfo = .{};
-        const body = try a.blockBody(sid, bid, ",\"args\":{}");
-        defer a.gpa.free(body);
-        if (a.runTimeout("com.superlogical.terminal.title", body, a.quick_timeout_ms)) |r| {
+        const body = .{ .session_id = sid, .block_id = bid, .args = no_args };
+        const t = a.quick_timeout_ms;
+        if (a.callTyped(Payload.Title, "com.superlogical.terminal.title", body, t)) |r| {
             var res = r;
             defer res.deinit();
-            info.title = try dupeOpt(al, optStr(res.value, "title"));
+            info.title = try dupeOpt(al, res.value.title);
         } else |e| try passThrough(e);
-        if (a.runTimeout("com.superlogical.terminal.pwd", body, a.quick_timeout_ms)) |r| {
+        if (a.callTyped(Payload.Pwd, "com.superlogical.terminal.pwd", body, t)) |r| {
             var res = r;
             defer res.deinit();
-            info.pwd = try dupeOpt(al, optStr(res.value, "pwd"));
+            info.pwd = try dupeOpt(al, res.value.pwd);
         } else |e| try passThrough(e);
-        if (a.runTimeout("com.superlogical.terminal.process", body, a.quick_timeout_ms)) |r| {
+        if (a.callTyped(Payload.Process, "com.superlogical.terminal.process", body, t)) |r| {
             var res = r;
             defer res.deinit();
-            const v = res.value;
-            if (v == .object) {
-                if (v.object.get("last_exit")) |le| if (le == .object) if (le.object.get("exit_code")) |c| if (c == .integer) {
-                    info.exit_code = c.integer;
-                };
-                if (v.object.get("foreground")) |fg| if (fg == .object) {
-                    info.program = try dupeOpt(al, optStr(fg, "name"));
-                    // A shell that never reports its folder: the program's own folder is the same place.
-                    if (info.pwd == null) info.pwd = try dupeOpt(al, optStr(fg, "cwd"));
-                };
+            if (res.value.last_exit) |le| info.exit_code = le.exit_code;
+            if (res.value.foreground) |fg| {
+                info.program = try dupeOpt(al, fg.name);
+                // A shell that never reports its folder: the program's own folder is the same place.
+                if (info.pwd == null) info.pwd = try dupeOpt(al, fg.cwd);
             }
         } else |e| try passThrough(e);
-        if (a.runTimeout("com.superlogical.terminal.program_status", body, a.quick_timeout_ms)) |r| {
+        if (a.callTyped(Payload.ProgramStatus, "com.superlogical.terminal.program_status", body, t)) |r| {
             var res = r;
             defer res.deinit();
             // The most urgent record wins: error, then blocked, then working, then done.
             var best: u8 = 0;
-            if (res.value == .object) if (res.value.object.get("records")) |recs| if (recs == .array) for (recs.array.items) |rec| {
-                const st = optStr(rec, "state") orelse continue;
+            for (res.value.records orelse &.{}) |rec| {
+                const st = rec.state orelse continue;
                 const rank: u8 = if (std.mem.eql(u8, st, "error")) 4 else if (std.mem.eql(u8, st, "blocked")) 3 else if (std.mem.eql(u8, st, "working")) 2 else if (std.mem.eql(u8, st, "done")) 1 else 0;
                 if (rank >= best and rank > 0) {
                     best = rank;
                     info.state = try dupeOpt(al, st);
-                    info.status_msg = try dupeOpt(al, optStr(rec, "msg") orelse optStr(rec, "title"));
-                    info.progress = if (rec.object.get("progress")) |pg| (if (pg == .integer) pg.integer else null) else null;
+                    info.status_msg = try dupeOpt(al, rec.msg orelse rec.title);
+                    info.progress = rec.progress;
                 }
-            };
+            }
         } else |e| try passThrough(e);
-        if (a.runTimeout("com.superlogical.terminal.ports", body, a.quick_timeout_ms)) |r| {
+        if (a.callTyped(Payload.Ports, "com.superlogical.terminal.ports", body, t)) |r| {
             var res = r;
             defer res.deinit();
-            if (res.value == .object) if (res.value.object.get("ports")) |ps| if (ps == .array) {
-                var list: std.ArrayList(u16) = .empty;
-                for (ps.array.items) |it| {
-                    if (it != .object) continue;
-                    const pv = it.object.get("port") orelse continue;
-                    if (pv != .integer or pv.integer < 1 or pv.integer > 65535) continue;
-                    const port: u16 = @intCast(pv.integer);
-                    if (std.mem.indexOfScalar(u16, list.items, port) == null) try list.append(al, port);
-                    if (list.items.len >= 8) break;
-                }
-                info.ports = try list.toOwnedSlice(al);
-            };
+            var list: std.ArrayList(u16) = .empty;
+            for (res.value.ports orelse &.{}) |it| {
+                const pv = it.port orelse continue;
+                if (pv < 1 or pv > 65535) continue;
+                const port: u16 = @intCast(pv);
+                if (std.mem.indexOfScalar(u16, list.items, port) == null) try list.append(al, port);
+                if (list.items.len >= 8) break;
+            }
+            info.ports = try list.toOwnedSlice(al);
         } else |e| try passThrough(e);
         return .{ .arena = arena, .value = info };
     }
@@ -513,28 +402,10 @@ pub const Api = struct {
     }
 
     fn ownership(a: *Api, method: []const u8, sid: []const u8, bid: []const u8, mode: ?[]const u8) Error!Owned(BlockOwner) {
-        const b = try a.q(bid);
-        defer a.gpa.free(b);
-        const rest = try a.gpa.print(",\"block_ids\":[{s}]{s}{s}{s}", .{
-            b,
-            if (mode != null) ",\"mode\":\"" else "",
-            mode orelse "",
-            if (mode != null) "\"" else "",
-        });
-        defer a.gpa.free(rest);
-        const body = try a.sessionBody(sid, rest);
-        defer a.gpa.free(body);
-        var res = try a.run(method, body);
-        defer res.deinit();
-        var arena = std.heap.ArenaAllocator.init(a.gpa);
-        errdefer arena.deinit();
-        const items = try arr(res.value, "blocks");
-        if (items.len != 1) return error.BadShape;
-        const value: BlockOwner = .{
-            .block_id = try dupe(arena.allocator(), try str(items[0], "block_id")),
-            .owner = try dupeOpt(arena.allocator(), optStr(items[0], "owner")),
-        };
-        return .{ .arena = arena, .value = value };
+        var res = try a.callT(Payload.Ownership, method, .{ .session_id = sid, .block_ids = .{bid}, .mode = mode });
+        errdefer res.deinit();
+        if (res.value.blocks.len != 1) return error.BadShape;
+        return into(BlockOwner, res, res.value.blocks[0]);
     }
 };
 
@@ -546,60 +417,8 @@ fn passThrough(e: Error) Error!void {
     }
 }
 
-// ---- JSON helpers: strict about shape, so a Rex change fails loudly here ----
-
-fn arr(v: std.json.Value, name: []const u8) Error![]const std.json.Value {
-    if (v != .object) return error.BadShape;
-    const x = v.object.get(name) orelse return error.BadShape;
-    return switch (x) {
-        .array => |a| a.items,
-        .null => &.{}, // Rex writes "array or null"
-        else => error.BadShape,
-    };
-}
-
-fn str(v: std.json.Value, name: []const u8) Error![]const u8 {
-    if (v != .object) return error.BadShape;
-    const x = v.object.get(name) orelse return error.BadShape;
-    return if (x == .string) x.string else error.BadShape;
-}
-
-fn optStr(v: std.json.Value, name: []const u8) ?[]const u8 {
-    if (v != .object) return null;
-    const x = v.object.get(name) orelse return null;
-    return if (x == .string) x.string else null;
-}
-
-fn dupe(al: Allocator, s: []const u8) Allocator.Error![]const u8 {
-    return al.dupe(u8, s);
-}
-
 fn dupeOpt(al: Allocator, s: ?[]const u8) Allocator.Error!?[]const u8 {
     return if (s) |x| try al.dupe(u8, x) else null;
-}
-
-/// A deep copy of `v` into `al`. Recursion is bounded: nesting deeper than `max_json_depth` is
-/// `BadShape` (a hostile answer cannot use up the stack).
-fn cloneValue(al: Allocator, v: std.json.Value, depth: u32) Error!std.json.Value {
-    return switch (v) {
-        .null, .bool, .integer, .float => v,
-        .number_string => |s| .{ .number_string = try al.dupe(u8, s) },
-        .string => |s| .{ .string = try al.dupe(u8, s) },
-        .array => |a| blk: {
-            if (depth >= max_json_depth) return error.BadShape;
-            var out = try std.json.Array.initCapacity(al, a.items.len);
-            for (a.items) |i| out.appendAssumeCapacity(try cloneValue(al, i, depth + 1));
-            break :blk .{ .array = out };
-        },
-        .object => |o| blk: {
-            if (depth >= max_json_depth) return error.BadShape;
-            var out: std.json.ObjectMap = .empty;
-            try out.ensureTotalCapacity(al, o.count());
-            var it = o.iterator();
-            while (it.next()) |e| out.putAssumeCapacity(try al.dupe(u8, e.key_ptr.*), try cloneValue(al, e.value_ptr.*, depth + 1));
-            break :blk .{ .object = out };
-        },
-    };
 }
 
 // ---- tests ----
@@ -747,21 +566,88 @@ test "live: every typed call on a throwaway session, and what ownership does (ne
     try testing.expect(released.value.owner == null);
 }
 
-test "api: cloneValue stops at max_json_depth" {
-    const a = testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const al = arena.allocator();
-    for ([_]usize{ max_json_depth, max_json_depth + 1, 5000 }) |depth| {
-        var text: std.ArrayList(u8) = .empty;
-        defer text.deinit(a);
-        try text.appendNTimes(a, '[', depth);
-        try text.appendNTimes(a, ']', depth);
-        const v = try std.json.parseFromSliceLeaky(std.json.Value, al, text.items, .{});
-        if (depth <= max_json_depth) {
-            _ = try cloneValue(al, v, 0);
-        } else try testing.expectError(error.BadShape, cloneValue(al, v, 0));
+/// `decode(T, json)` in a test arena: the value, or the error.
+fn decodeText(comptime T: type, arena: Allocator, text: []const u8) Error!T {
+    const v = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch return error.BadShape;
+    return decode(T, arena, v);
+}
+
+test "api: every answer type takes a well-formed answer, ignores an extra field, and refuses a missing or wrong-typed one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const ar = arena_state.allocator();
+    // For each type: an answer as Rex sends it (with an extra field, which is ignored), one with a
+    // field it needs left out, and one with a field of another type. For a type whose every field is
+    // optional, "missing" is the empty object and must pass.
+    const Case = struct { ok: []const u8, missing: []const u8, wrong: []const u8 };
+    inline for (.{
+        .{ Payload.SessionList, Case{ .ok = "{\"sessions\":[{\"session_id\":\"s\",\"label\":\"l\",\"new\":1}],\"x\":true}", .missing = "{}", .wrong = "{\"sessions\":[{\"session_id\":5,\"label\":\"l\"}]}" } },
+        .{ Payload.SessionCreate, Case{ .ok = "{\"session_id\":\"s\",\"initial_windows\":[{\"window_id\":\"w\",\"block_ids\":[\"b\"],\"x\":0}]}", .missing = "{\"initial_windows\":[]}", .wrong = "{\"session_id\":\"s\",\"initial_windows\":\"w\"}" } },
+        .{ Payload.BlockList, Case{ .ok = "{\"blocks\":[{\"block_id\":\"b\",\"label\":\"l\",\"placement\":\"placed\",\"owner\":null,\"x\":[]}]}", .missing = "{\"blocks\":[{\"block_id\":\"b\",\"label\":\"l\"}]}", .wrong = "{\"blocks\":[{\"block_id\":\"b\",\"label\":\"l\",\"placement\":\"placed\",\"owner\":7}]}" } },
+        .{ Payload.NewWindow, Case{ .ok = "{\"window_id\":\"w\",\"block_ids\":[\"b\"],\"x\":1}", .missing = "{\"window_id\":\"w\"}", .wrong = "{\"window_id\":\"w\",\"block_ids\":[1]}" } },
+        // std.json reads a list of small numbers into a text field as bytes, and a numeric string into an
+        // integer field: both harmless here, so the wrong types below are numbers, booleans or objects.
+        .{ Payload.Format, Case{ .ok = "{\"content\":\"text\",\"x\":1}", .missing = "{}", .wrong = "{\"content\":5}" } },
+        .{ Payload.DownloadBegin, Case{ .ok = "{\"ticket\":\"t\",\"name\":\"n\",\"size\":3,\"x\":1}", .missing = "{\"ticket\":\"t\"}", .wrong = "{\"ticket\":\"t\",\"name\":\"n\",\"size\":true}" } },
+        .{ Payload.Ownership, Case{ .ok = "{\"blocks\":[{\"block_id\":\"b\",\"owner\":\"c\",\"x\":1}]}", .missing = "{}", .wrong = "{\"blocks\":[{\"block_id\":\"b\",\"owner\":true}]}" } },
+    }) |pair| {
+        const T = pair[0];
+        const c: Case = pair[1];
+        _ = try decodeText(T, ar, c.ok);
+        try testing.expectError(error.BadShape, decodeText(T, ar, c.missing));
+        try testing.expectError(error.BadShape, decodeText(T, ar, c.wrong));
     }
+    // Types whose every field is optional: the empty object passes; a field of another type does not.
+    inline for (.{
+        .{ Payload.Process, "{\"last_exit\":{\"exit_code\":{}}}" },
+        .{ Payload.ListDir, "{\"entries\":\"\"}" },
+        .{ Payload.Clipboard, "{\"data\":1}" },
+        .{ Payload.Title, "{\"title\":{}}" },
+        .{ Payload.Pwd, "{\"pwd\":true}" },
+        .{ Payload.ProgramStatus, "{\"records\":[{\"progress\":\"half\"}]}" },
+        .{ Payload.Ports, "{\"ports\":[{\"port\":true}]}" },
+    }) |pair| {
+        _ = try decodeText(pair[0], ar, "{\"extra\":true}");
+        try testing.expectError(error.BadShape, decodeText(pair[0], ar, pair[1]));
+    }
+    // Not an object at all, and a hostile nesting where a list is wanted.
+    try testing.expectError(error.BadShape, decodeText(Payload.SessionList, ar, "[1,2]"));
+    var deep: std.ArrayList(u8) = .empty;
+    try deep.appendSlice(ar, "{\"sessions\":");
+    try deep.appendNTimes(ar, '[', 5000);
+    try deep.appendNTimes(ar, ']', 5000);
+    try deep.append(ar, '}');
+    try testing.expectError(error.BadShape, decodeText(Payload.SessionList, ar, deep.items));
+    // What the result holds is a copy: it outlives the parsed answer.
+    const kept = blk: {
+        var tmp = std.heap.ArenaAllocator.init(testing.allocator);
+        defer tmp.deinit();
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, tmp.allocator(), "{\"content\":\"still here\"}", .{});
+        break :blk try decode(Payload.Format, ar, v);
+    };
+    try testing.expectEqualStrings("still here", kept.content);
+}
+
+test "api: an empty payload or args is written as an object, never as a list" {
+    const a = testing.allocator;
+    // The trap: an empty anonymous literal is a tuple, written as a list, which Rex refuses.
+    const as_tuple = try std.json.Stringify.valueAlloc(a, .{ .args = .{} }, .{});
+    defer a.free(as_tuple);
+    try testing.expectEqualStrings("{\"args\":[]}", as_tuple);
+    const as_object = try std.json.Stringify.valueAlloc(a, .{ .args = no_args }, .{});
+    defer a.free(as_object);
+    try testing.expectEqualStrings("{\"args\":{}}", as_object);
+    const bare = try std.json.Stringify.valueAlloc(a, no_args, .{});
+    defer a.free(bare);
+    try testing.expectEqualStrings("{}", bare);
+    // And the fake now refuses a list where Rex does.
+    const r = try ApiRig.init(a);
+    defer r.deinit(a);
+    try testing.expectError(error.RexError, r.api.callVoid("session.list", .{}));
+    try testing.expect(std.mem.indexOf(u8, r.api.last_error.?, "payload must be an object") != null);
+    try testing.expectError(error.RexError, r.api.callVoid("com.superlogical.terminal.process", .{ .session_id = r.sid, .block_id = r.bid, .args = .{} }));
+    try testing.expect(std.mem.indexOf(u8, r.api.last_error.?, "args must be an object") != null);
+    try r.api.resize(r.sid, r.bid, 90, 30); // a call with real args still goes through
 }
 
 test "api: a call that gets no answer says why, and does not keep an older message" {

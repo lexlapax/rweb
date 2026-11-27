@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (Phase 6 gates met and recorded in PLAN; next: the Zig audit's Phase B).
+Last updated: 2026-11-26 (Phase B step 1, typed JSON in the Rex client, done and measured; step 2 next).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
@@ -12,9 +12,11 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 - 0.1.1 is released (GitHub Release `v0.1.1`, commit `1846885`) and runs on the owner's four machines;
   the repository is public. Phase 5 is done; Phase 6's gates are met and its steps' status is in
   [docs/PLAN.md](docs/PLAN.md) ("Phase 6"): no channel, `doctor` or signed checksums yet.
-- **Next: Phase B** of [docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md)
-  (section 4), in its order, each step measured before and after in `ReleaseSafe`: the fixed workload
-  first (it is part of step 2), then typed JSON in the Rex client.
+- **Phase B** of [docs/zig-idiom-audit-2026-11-26.md](docs/zig-idiom-audit-2026-11-26.md) (section 4):
+  **step 1 done** (typed JSON in the Rex client; allocations per call down 57 to 74 %; results and the
+  `.{}`-is-a-list trap the fake hid, in the audit). `src/rex/measure.zig` measures the client
+  (`RWEB_MEASURE=1`). **Next: step 2**, the release allocator chosen from measurements, which first needs
+  the fixed workload (output volume, viewers, typed keys) the audit describes.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

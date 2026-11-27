@@ -609,7 +609,18 @@ pub const Fake = struct {
             if (!std.mem.eql(u8, ty, "request")) continue;
             const id = strField(req.object, "id") orelse return closeWith(c, 1002, "protocol error");
             const method = strField(req.object, "method") orelse return closeWith(c, 1002, "protocol error");
-            const payload: std.json.ObjectMap = if (req.object.get("payload")) |p| (if (p == .object) p.object else no_object) else no_object;
+            // As Rex: a payload, and its `args`, must be JSON objects when present (Rex decodes them into
+            // structs and answers `bad_request` otherwise; an empty list is not an empty object).
+            const pv = req.object.get("payload");
+            if (pv != null and pv.? != .object) {
+                try f.respondError(c, id, "bad_request", 400, "payload must be an object");
+                continue;
+            }
+            const payload: std.json.ObjectMap = if (pv) |x| x.object else no_object;
+            if (payload.get("args")) |a| if (a != .object) {
+                try f.respondError(c, id, "bad_request", 400, "args must be an object");
+                continue;
+            };
             try f.call(c, id, method, payload, &attached, arena_state.allocator());
         }
     }
@@ -747,7 +758,7 @@ pub const Fake = struct {
         } else if (std.mem.eql(u8, method, "com.superlogical.terminal.list_dir")) {
             const args = if (p.get("args")) |a| (if (a == .object) a.object else no_object) else no_object;
             const path = strField(args, "path") orelse "";
-            const missing = .{ .path = path, .home = "", .status = "missing", .entries = &[_]u8{}, .truncated = false };
+            const missing = .{ .path = path, .home = "", .status = "missing", .entries = &[_][]const u8{}, .truncated = false }; // `[]`: a `[]u8` would be written as a string
             const real = (if (path.len == 0) f.files_root else f.servedPath(arena, path)) orelse return f.respond(c, id, missing);
             var dir = Io.Dir.cwd().openDir(f.io, real, .{ .iterate = true }) catch return f.respond(c, id, missing);
             defer dir.close(f.io);
