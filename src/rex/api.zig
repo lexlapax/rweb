@@ -811,3 +811,60 @@ test "fake: downloads and listings are served only from the fake's own folder" {
     defer none.deinit();
     try testing.expectEqualStrings("missing", none.value.status);
 }
+
+/// Every answer type read from a sample, in an arena on `a`.
+fn decodeEach(a: Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    inline for (.{
+        .{ Payload.SessionList, "{\"sessions\":[{\"session_id\":\"s\",\"label\":\"l\"},{\"session_id\":\"t\",\"label\":\"m\"}]}" },
+        .{ Payload.SessionCreate, "{\"session_id\":\"s\",\"initial_windows\":[{\"window_id\":\"w\",\"block_ids\":[\"b\"]}]}" },
+        .{ Payload.BlockList, "{\"blocks\":[{\"block_id\":\"b\",\"label\":\"l\",\"placement\":\"placed\",\"flavor\":\"f\",\"owner\":\"o\"}]}" },
+        .{ Payload.NewWindow, "{\"window_id\":\"w\",\"block_ids\":[\"b\"]}" },
+        .{ Payload.Format, "{\"content\":\"text\"}" },
+        .{ Payload.Process, "{\"last_exit\":{\"exit_code\":1},\"foreground\":{\"name\":\"vim\",\"cwd\":\"/tmp\"},\"child\":{\"pid\":7}}" },
+        .{ Payload.DownloadBegin, "{\"ticket\":\"t\",\"name\":\"n\",\"path\":\"/p\",\"size\":3}" },
+        .{ Payload.ListDir, "{\"entries\":[{\"name\":\"a\",\"file\":true},{\"name\":\"d\"}],\"path\":\"/\",\"home\":\"/h\",\"status\":\"ok\",\"truncated\":false}" },
+        .{ Payload.Clipboard, "{\"data\":\"copied\"}" },
+        .{ Payload.Title, "{\"title\":\"t\"}" },
+        .{ Payload.Pwd, "{\"pwd\":\"/tmp\"}" },
+        .{ Payload.ProgramStatus, "{\"records\":[{\"state\":\"working\",\"msg\":\"m\",\"progress\":40}]}" },
+        .{ Payload.Ports, "{\"ports\":[{\"port\":8080},{\"port\":5173}]}" },
+        .{ Payload.Ownership, "{\"blocks\":[{\"block_id\":\"b\",\"owner\":\"c\"}]}" },
+    }) |pair| {
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, ar, pair[1], .{});
+        _ = try decode(pair[0], ar, v);
+    }
+}
+
+/// The calls the fake answers, made by an `Api` whose own memory comes from `a` (the connection's
+/// does not: its reader is another task).
+fn callEach(a: Allocator, r: *ApiRig) !void {
+    var api = Api.init(a, r.ctl);
+    defer api.deinit();
+    var list = try api.sessions();
+    list.deinit();
+    var bl = try api.blocks(r.sid);
+    bl.deinit();
+    var made = try api.createSession("rweb-test-oom");
+    defer made.deinit();
+    try api.renameSession(made.value.session_id, "rweb-test-oom-2");
+    // Destroying needs an attachment (as in the hub); it is the last use of the new session.
+    try api.attach(made.value.session_id);
+    try api.destroySession(made.value.session_id);
+    try api.attach(r.sid);
+    try api.resize(r.sid, r.bid, 90, 30);
+    try api.paste(r.sid, r.bid, "pasted text");
+    var dir = try api.listDir(r.sid, r.bid, "");
+    dir.deinit();
+    var owned = try api.own(r.sid, r.bid, .take);
+    owned.deinit();
+}
+
+test "api: every answer type, and every call the fake answers, fail cleanly at each allocation" {
+    try testing.checkAllAllocationFailures(testing.allocator, decodeEach, .{});
+    const r = try ApiRig.init(testing.allocator);
+    defer r.deinit(testing.allocator);
+    try testing.checkAllAllocationFailures(testing.allocator, callEach, .{r});
+}

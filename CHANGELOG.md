@@ -14,6 +14,8 @@ the Rex API revisions it speaks.
 - Terminal output reaches the page without memory allocations once warm (before: one per chunk for
   each viewer, and two per chunk read from Rex); a keystroke makes 4 instead of 23. Linux: about 12 %
   less CPU and half the page faults on a 32 MiB burst to three viewers.
+- Fixed a double free in the terminal mirror when memory runs out as a stream reconnects; when a
+  transfer cannot be registered for lack of memory the page now says so (it said "too many transfers").
 
 ## 0.1.1 (2026-11-26)
 

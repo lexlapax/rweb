@@ -208,3 +208,14 @@ test "snapshotSize reads the first record's size, and only from a TERMINAL recor
     std.mem.writeInt(u16, b[10..12], 2, .little);
     try testing.expect(snapshotSize(&b) == null);
 }
+
+fn welcomeAndFree(a: Allocator, text: []const u8) !void {
+    const w = try parseWelcome(a, text);
+    if (w.token) |t| a.free(t);
+}
+
+test "parseWelcome fails cleanly at every allocation" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, welcomeAndFree, .{
+        "{\"type\":\"welcome\",\"protocol\":\"" ++ subprotocol ++ "\",\"api_revision\":19,\"client\":{\"resumed\":false,\"reconnect_token\":\"tok-123\"},\"limits\":{\"max_message_bytes\":1048576}}",
+    });
+}

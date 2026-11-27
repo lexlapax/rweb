@@ -928,7 +928,7 @@ pub const Hub = struct {
                     return h.refuse(v, what, std.fmt.bufPrint(&buf, "too large: the limit is {d} MB", .{h.cfg.transfer.max_bytes / (1024 * 1024)}) catch "too large");
                 }
                 const name = h.gpa.dupe(u8, t_info.value.name) catch return;
-                const token = h.xfers.add(.{ .token = undefined, .kind = .download, .expires_ms = 0, .ticket = t_info.value.ticket, .name = name, .size = t_info.value.size, .viewer_id = v.id }) catch return h.refuse(v, what, "too many transfers waiting");
+                const token = h.xfers.add(.{ .token = undefined, .kind = .download, .expires_ms = 0, .ticket = t_info.value.ticket, .name = name, .size = t_info.value.size, .viewer_id = v.id }) catch |e| return h.refuse(v, what, transferRefusal(e));
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "download", .token = token, .name = t_info.value.name, .size = t_info.value.size }, .{}) catch return;
                 defer h.gpa.free(out);
                 v.pushText(out);
@@ -951,13 +951,21 @@ pub const Hub = struct {
                     return h.gpa.free(sid);
                 };
                 // `add` owns the strings from here, on success or failure.
-                const token = h.xfers.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = u.size, .session_id = sid, .block_id = bid, .viewer_id = v.id, .view_gen = view_gen }) catch return h.refuse(v, what, "too many transfers waiting");
+                const token = h.xfers.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = u.size, .session_id = sid, .block_id = bid, .viewer_id = v.id, .view_gen = view_gen }) catch |e| return h.refuse(v, what, transferRefusal(e));
                 const out = std.json.Stringify.valueAlloc(h.gpa, .{ .t = "xfer", .kind = "upload", .token = token, .size = u.size }, .{}) catch return;
                 defer h.gpa.free(out);
                 v.pushText(out);
             },
             else => unreachable,
         }
+    }
+
+    /// What the page is told when a transfer could not be registered.
+    fn transferRefusal(e: error{ TooMany, OutOfMemory }) []const u8 {
+        return switch (e) {
+            error.TooMany => "too many transfers waiting",
+            error.OutOfMemory => "out of memory",
+        };
     }
 
     fn sendInfo(h: *Hub, v: *Viewer) void {
@@ -2905,4 +2913,131 @@ test "hub: re-attaching after a Rex restart with no memory forgets the sessions,
     const attached = hs.hub.attached.contains(hs.session_id);
     hs.hub.mu.unlock(testing.io);
     try testing.expect(attached);
+}
+
+fn cleanAndFree(a: Allocator, text: []const u8) !void {
+    a.free(try cleanPaste(a, text));
+}
+
+test "hub: cleanPaste fails cleanly at every allocation" {
+    try testing.checkAllAllocationFailures(testing.allocator, cleanAndFree, .{"a\x1bb\xc2\x9bc it\u{2019}s \u{1f600}\n"});
+}
+
+/// Fails every allocation from the `fail_from`th on (counted from 0), like `std.testing.FailingAllocator`,
+/// but safe to share with the hub's own tasks (atomic counters). Frees and shrinking always go through.
+const FailFrom = struct {
+    inner: Allocator,
+    fail_from: usize,
+    count: std.atomic.Value(usize) = .init(0),
+    induced: std.atomic.Value(bool) = .init(false),
+
+    fn allocator(f: *FailFrom) Allocator {
+        return .{ .ptr = f, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn refuse(f: *FailFrom) bool {
+        if (f.count.fetchAdd(1, .monotonic) < f.fail_from) return false;
+        f.induced.store(true, .monotonic);
+        return true;
+    }
+    fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const f: *FailFrom = @ptrCast(@alignCast(ctx));
+        if (f.refuse()) return null;
+        return f.inner.rawAlloc(len, a, ra);
+    }
+    fn resize(ctx: *anyopaque, buf: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const f: *FailFrom = @ptrCast(@alignCast(ctx));
+        if (new_len > buf.len and f.refuse()) return false;
+        return f.inner.rawResize(buf, a, new_len, ra);
+    }
+    fn remap(ctx: *anyopaque, buf: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const f: *FailFrom = @ptrCast(@alignCast(ctx));
+        if (new_len > buf.len and f.refuse()) return null;
+        return f.inner.rawRemap(buf, a, new_len, ra);
+    }
+    fn free(ctx: *anyopaque, buf: []u8, a: std.mem.Alignment, ra: usize) void {
+        const f: *FailFrom = @ptrCast(@alignCast(ctx));
+        f.inner.rawFree(buf, a, ra);
+    }
+};
+
+/// One of every browser message, as `handle` gets it (targets filled in by `oneOfEach`).
+fn oneOfEach(sid: []const u8, bid: []const u8) [@typeInfo(protocol.Msg).@"union".field_names.len]protocol.Msg {
+    const at: protocol.Target = .{ .session = sid, .block = bid };
+    return .{
+        .tree,
+        .{ .open = .{ .session = sid, .block = bid } },
+        .{ .in = "echo typed\r" },
+        .{ .key = "{\"key\":\"enter\",\"action\":\"press\"}" },
+        .{ .paste = .{ .text = "pasted", .at = at } },
+        .{ .fit = .{ .cols = 90, .rows = 30, .at = at } },
+        .redraw,
+        .more_history,
+        .text,
+        .info,
+        .{ .ls = .{ .path = "", .at = at } },
+        .{ .dl = .{ .path = "/nonexistent/file", .at = at } },
+        .{ .ul = .{ .name = "a.txt", .size = 3, .at = at } },
+        .clip,
+        .{ .term_action = .{ .action = .clear, .at = at } },
+        .{ .observe = true },
+        .{ .new_session = "rweb-test-oom" },
+        .{ .new_terminal = sid },
+        .{ .rename_session = .{ .session = sid, .label = "renamed" } },
+        .{ .rename_block = .{ .session = sid, .block = bid, .label = "renamed" } },
+        .{ .close_block = .{ .session = "session:none", .block = "block:none" } },
+        .{ .destroy_session = "session:none" },
+        .ping,
+        .dbg,
+        .close_view,
+    };
+}
+
+comptime {
+    // Every message type is in `oneOfEach`: a new one does not compile until it is added.
+    var seen: std.EnumSet(std.meta.Tag(protocol.Msg)) = .init(.{});
+    for (oneOfEach("s", "b")) |m| seen.insert(std.meta.activeTag(m));
+    if (seen.count() != @typeInfo(protocol.Msg).@"union".field_names.len) @compileError("hub: oneOfEach needs every message type");
+}
+
+/// A hub on `a`, a viewer, one of every message (observe turned off again before the ones that
+/// write), then everything closed. Anything may fail for want of memory; nothing may leak or crash.
+fn hubRound(a: Allocator, f: *fake.Fake, ctl: *Control, sid: []const u8, bid: []const u8) void {
+    const h = Hub.open(a, testing.io, ctl, .{ .transfer = .{ .enabled = true, .upload_dir = "/nonexistent" } }) catch return;
+    defer h.close();
+    _ = f;
+    const v = h.addViewer() catch return;
+    defer h.removeViewer(v);
+    for (oneOfEach(sid, bid)) |m| {
+        h.handle(v, m);
+        if (m == .observe) h.handle(v, .{ .observe = false });
+    }
+    // What was queued for the viewer is freed with it (`removeViewer`); take a few to exercise that too.
+    var n: u32 = 0;
+    while (n < 8) : (n += 1) {
+        const fr = (v.next(20) catch break) orelse break;
+        v.recycle(fr);
+    }
+}
+
+test "hub: a hub and every message type, with allocations failing from each point on, leak nothing" {
+    const fk = try fake.Fake.start(testing.allocator, testing.io);
+    defer fk.deinit();
+    const made = try fk.createSession("rweb-test-oom");
+    const ctl = try Control.open(testing.allocator, testing.io, .{ .socket_path = fk.path });
+    defer ctl.close();
+    // How many allocations a whole round makes, then a round failing from each of them on (every
+    // `stride`th, to keep the test's time bounded; the hub's tasks make the count vary a little).
+    var full: FailFrom = .{ .inner = testing.allocator, .fail_from = std.math.maxInt(usize) };
+    hubRound(full.allocator(), fk, ctl, made.session_id, made.block_id);
+    const total = full.count.load(.monotonic);
+    try testing.expect(total > 50);
+    const stride = @max(1, total / 150);
+    var rounds: usize = 0;
+    var i: usize = 0;
+    while (i < total) : (i += stride) {
+        var fa: FailFrom = .{ .inner = testing.allocator, .fail_from = i };
+        hubRound(fa.allocator(), fk, ctl, made.session_id, made.block_id);
+        rounds += 1;
+    }
+    std.debug.print("hub out-of-memory rounds: {d} (a whole round makes {d} allocations)\n", .{ rounds, total });
 }

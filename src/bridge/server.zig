@@ -3516,3 +3516,18 @@ test "server: own addresses Tailscale has not confirmed for too long refuse requ
     try testing.expectEqual(@as(u16, 200), again.status);
     try expectRefusedWith(rig, "Tailscale-User-Login: owner@example.com\r\nX-Forwarded-For: 100.64.0.77\r\n", .own_address);
 }
+
+fn startAndStop(a: Allocator, hub: *Hub) !void {
+    const srv = try Server.start(a, testing.io, hub, .{ .listen = .{ .tcp_loopback = 0 }, .access = .{ .token = "an-allocation-failure-test-token-0123456789" } });
+    srv.stop();
+}
+
+test "server: start fails cleanly at every allocation" {
+    const f = try fake.Fake.start(testing.allocator, testing.io);
+    defer f.deinit();
+    const ctl = try rex.control.Control.open(testing.allocator, testing.io, .{ .socket_path = f.path });
+    defer ctl.close();
+    const h = try Hub.open(testing.allocator, testing.io, ctl, .{});
+    defer h.close();
+    try testing.checkAllAllocationFailures(testing.allocator, startAndStop, .{h});
+}

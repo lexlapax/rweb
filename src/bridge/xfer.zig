@@ -98,7 +98,7 @@ pub const Registry = struct {
     /// Take ownership of `e` (its strings), give it a token and a deadline, and return the token.
     /// Fails when too many are waiting, in all or for `e.viewer_id` (so one page cannot take every
     /// slot); expired entries are dropped first.
-    pub fn add(r: *Registry, e_in: Entry) error{TooMany}![32]u8 {
+    pub fn add(r: *Registry, e_in: Entry) error{ TooMany, OutOfMemory }![32]u8 {
         var e = e_in;
         r.mu.lockUncancelable(r.io);
         defer r.mu.unlock(r.io);
@@ -117,7 +117,7 @@ pub const Registry = struct {
         e.expires_ms = r.now() + token_ttl_ms;
         r.items.append(r.gpa, e) catch {
             e.deinit(r.gpa);
-            return error.TooMany;
+            return error.OutOfMemory;
         };
         return e.token;
     }
@@ -3160,4 +3160,35 @@ test "openUploadDir makes the folder for unfinished uploads private, and refuses
     try up.dir.symLink(testing.io, "../elsewhere", upload_parts_dir, .{});
     up.dir.close(testing.io);
     try testing.expectError(error.SymLink, openUploadDir(arena, testing.io, up_path, &problem));
+}
+
+fn quoteAndFree(a: Allocator, s: []const u8) !void {
+    a.free(try shellQuote(a, s));
+}
+
+/// Three entries in, one taken, the rest freed with the registry.
+fn registryRound(a: Allocator) !void {
+    var r = Registry.init(a, testing.io);
+    defer r.deinit();
+    var tokens: [3][32]u8 = undefined;
+    for (&tokens, 0..) |*t, i| {
+        const name = try a.dupe(u8, "file.txt");
+        const sid = a.dupe(u8, "session:1") catch |e| {
+            a.free(name);
+            return e;
+        };
+        const bid = a.dupe(u8, "block:1") catch |e| {
+            a.free(name);
+            a.free(sid);
+            return e;
+        };
+        t.* = try r.add(.{ .token = undefined, .kind = .upload, .expires_ms = 0, .name = name, .size = 1, .session_id = sid, .block_id = bid, .viewer_id = i });
+    }
+    var e = r.take(&tokens[1], .upload) orelse return error.TestUnexpectedResult;
+    e.deinit(a);
+}
+
+test "xfer: shellQuote and the transfer registry fail cleanly at every allocation" {
+    try testing.checkAllAllocationFailures(testing.allocator, quoteAndFree, .{"it's a file; rm -rf ~"});
+    try testing.checkAllAllocationFailures(testing.allocator, registryRound, .{});
 }

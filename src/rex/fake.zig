@@ -541,8 +541,13 @@ pub const Fake = struct {
         const gpa = f.gpa;
         var arena_state = std.heap.ArenaAllocator.init(gpa);
         defer arena_state.deinit();
+        // Copies of the ids: a session this or another connection destroys must not leave this list
+        // pointing at its freed id.
         var attached: std.ArrayList([]const u8) = .empty;
-        defer attached.deinit(gpa);
+        defer {
+            for (attached.items) |a| gpa.free(a);
+            attached.deinit(gpa);
+        }
 
         // hello
         const hello_msg = try c.readMessage(gpa);
@@ -659,7 +664,13 @@ pub const Fake = struct {
         } else if (std.mem.eql(u8, method, "session.attach")) {
             const sid = strField(p, "session_id") orelse return f.respondError(c, id, "bad_request", 400, "session_id required");
             const s = f.findSession(sid) orelse return f.respondError(c, id, "session_not_found", 404, "session not found");
-            try attached.append(f.gpa, s.id);
+            if (!isAttached(attached.items, s.id)) {
+                const copy = try f.gpa.dupe(u8, s.id);
+                attached.append(f.gpa, copy) catch |e| {
+                    f.gpa.free(copy);
+                    return e;
+                };
+            }
             // Simplified view: Rex's real one carries much more.
             return f.respond(c, id, .{
                 .session_id = s.id,
@@ -688,6 +699,10 @@ pub const Fake = struct {
                 };
                 _ = f.sessions.orderedRemove(i);
                 f.freeSession(s);
+                break;
+            };
+            for (attached.items, 0..) |a, i| if (std.mem.eql(u8, a, sid)) {
+                f.gpa.free(attached.swapRemove(i));
                 break;
             };
             return f.respond(c, id, .{});

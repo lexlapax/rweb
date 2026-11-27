@@ -80,7 +80,7 @@ mechanical changes above), **part fixed**, or **open**.
 | F21 | build | nice-to-have | the bridge's module graph is built twice; `optimize: anytype`; a plain `zig build` is Debug | open | `build.zig:21-36` against `:65-80`; `build.zig:21`; `build.zig:48` |
 | F22 | style | nice-to-have | `@hasField` on the project's own struct; a function-static buffer; tests before `main`; a long `main`; help and version returned as errors | **part fixed in round five**: the `@hasField` is gone and `rexProblem` takes a buffer (`src/bridge/main.zig:614`). **Open**: tests at `src/bridge/main.zig:26-74` before `main` at `:154`; `main` is 269 lines; `src/bridge/cli.zig:146-150` | as named |
 | F23 | performance | nice-to-have | four or five small allocations per keystroke; byte-wise masking; a ping payload copied to the heap; hand-made deques | **mostly fixed in Phase B step 3**: requests written in one pass, ping on the stack; deques left | `src/rex/input.zig:285-305`, `:273`; `src/rex/ws.zig:504`, `:553`, `:560`; `src/bridge/hub.zig:88`, `:171` |
-| F24 | tests | nice-to-have | waits are polls with wall-clock limits; `checkAllAllocationFailures` is not used | open (Phase B 4, 5) | 0 uses; 56 `sleep` calls, about 40 of them in tests |
+| F24 | tests | nice-to-have | waits are polls with wall-clock limits; `checkAllAllocationFailures` is not used | part done in Phase B step 4 (allocation failures); the polling waits are step 5 | 0 uses; 56 `sleep` calls, about 40 of them in tests |
 
 **Fixed now**, not in the table because the first pass treated them as the repository's choice: the
 0.17 names. `@intFromEnum` and `@enumFromInt` are `@backingInt` and `@fromBackingInt`,
@@ -127,7 +127,7 @@ Tally: 20 pass, 16 fix needed, 1 not applicable, 1 needs a run.
 | 27 | Tables and embeds | pass | Message types and terminal actions go through `stringToEnum` (`src/bridge/protocol.zig:91`, `:114`). Header names are compared without case (14 `eqlIgnoreCase`). 29 embedded files, all public page assets. The command line is a chain of about 40 `eql`, which reads well enough as it is; the asset table is scanned (F19). | |
 | 28 | Data layout | pass | No `packed`. Two `extern struct`, both for a system call. Nothing here is numerous enough for `MultiArrayList` to matter: tens of terminals and viewers. 21 `create` calls, one per long-lived object. | |
 | 29 | `undefined` and output bytes | pass | 309 `undefined`, nearly all buffers. What is written out is a slice of what was filled (`hdr[0..n]` at `src/rex/ws.zig:493`, `w.buffered()`), and whole arrays are sent only after every byte is set (`src/rex/transfer.zig:54-57`, `src/rex/data.zig:115-117`, the 25-byte resume record). | |
-| 30 | Leak and OOM tests | fix needed | `testing.allocator` 470 times; no test uses the page allocator. `FailingAllocator` in 5 tests (`src/rex/control.zig:940`, `src/rex/mirror.zig:986`, `:1408`, `:1481`, and the hub's counting allocator). **`checkAllAllocationFailures`: 0 uses.** No owning type has each of its allocations failed in turn; item 12's leak is what that leaves. | Phase B 4. |
+| 30 | Leak and OOM tests | **done in Phase B step 4** (2026-11-26) | `testing.allocator` 470 times; no test uses the page allocator. `FailingAllocator` in 5 tests (`src/rex/control.zig:940`, `src/rex/mirror.zig:986`, `:1408`, `:1481`, and the hub's counting allocator). **`checkAllAllocationFailures`: 0 uses.** No owning type has each of its allocations failed in turn; item 12's leak is what that leaves. | Phase B 4. |
 | 31 | Fuzzing and negative tests | fix needed | 10 fuzz targets in `src/fuzz.zig` (frame header, handshake, welcome, message body, the splitter against a reference with arbitrary cuts, snapshot framing in pieces, message reassembly, the browser protocol, the access decision, origin matching); 3 carry a corpus; 247 `expectError`. Not fuzzed: the mirror (the fuzz build leaves Ghostty out), `cleanPaste`, `escCut`, `parseMountInfoLine`, `checkPosixAcl`. A long fuzz run was not done here. | Fuzz targets for the four pure functions named; a mirror target that runs as an ordinary test if it cannot be instrumented. |
 | 32 | Test control | fix needed | `-Dtest-filter` exists (`build.zig:60`); tests use `std.testing.io` (501 uses); live tests skip without `REX_SOCKET` (25 `SkipZigTest`). But about 40 waits in tests are sleeps and polls with wall-clock limits, no `--test-timeout` is set anywhere, and there is no CI. | Phase B 5 (events to wait on); `--test-timeout` in `tools/release.sh`. |
 | 33 | Build hygiene | pass | No `findProgram`. The two script steps run at make time and are marked `has_side_effects` (`build.zig:16`, `:95`); the commit is deliberately not read while configuring. Two options (`test-filter`, `commit`). `zig-pkg/` is ignored. `dependencyLazy` is used for a dependency the manifest does not mark lazy, where `b.dependency` would say the same with less (`build.zig:22`, `:51`). | |
@@ -322,6 +322,33 @@ Rex, in ReleaseSafe.
    instead (see `src/bridge/hub.zig:2459`).
    Measure: the number of owning types and message types covered, out of the list above; leaks found
    (item 12's is the first).
+
+   **Done 2026-11-26.** `checkAllAllocationFailures` (each allocation failed in turn; the call must
+   return `OutOfMemory` and leak nothing) now covers: the browser protocol's parser for every message
+   type (a compile-time check requires a sample of each), `cleanPaste`, `shellQuote`, the transfer
+   registry (`add`, `take`, `deinit`), `wire.parseWelcome`, `rex1.parseBody`, every typed Rex answer
+   (`api.decode`), each API call the fake answers, `Input.open`, `Server.start`; with the earlier
+   `proc.run` that is 12. The hub, whose own tasks allocate beside the caller, gets a thread-safe
+   allocator that fails from the Nth allocation on: a round opens a hub, has a viewer send one of every
+   message type (again checked at compile time) and closes everything, for each N up to the round's
+   own count (166 rounds); none leaks or crashes. Control and the mirror had such tests already.
+
+   Found and fixed:
+   - **A double free in the mirror** on a reconnect's new nonce when memory runs out: `setNonce` freed
+     the old splitter before making the new one, so a failure left a freed splitter that the mirror's
+     own teardown freed again. The new one is made first now; a test fails the allocation there.
+   - The mirror logged a failed nonce and carried on, failing on the next bytes; it now ends the stream
+     at once, as every other mirror failure does.
+   - The transfer registry reported running out of memory as "too many transfers waiting"; it says so
+     now, and the page is told "out of memory".
+   - The fake Rex kept pointers to session ids in each connection's attached list, so destroying a
+     session left the list pointing at freed memory (a crash in the test double, which could have hidden
+     a real failure). It keeps copies now.
+
+   Not covered, by design: `Api.setLastError` gives up its message when memory runs out (the error is
+   still returned, the text falls back to its name); `Data.openTerminal` and the control client's reader
+   allocate on their own tasks and are covered by the hub's rounds and the existing control and mirror
+   tests rather than by `checkAllAllocationFailures`.
 
 5. **Events instead of polling; one write-deadline watcher per connection; the mutex around Rex
    calls (F13, F11, F12).** The supervisor waits on one event that everything now sets; the mirror

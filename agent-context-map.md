@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (Phase B step 3: no allocations on the output path once warm, 4 per keystroke; step 4 next).
+Last updated: 2026-11-26 (Phase B step 4: allocation-failure tests for every owning type and parser, a mirror double free fixed; step 5 next).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
@@ -20,8 +20,10 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
   5 to 12 % more CPU than `smp`/C, same latency and memory. **Step 3 done**: the output path makes no allocations once warm
   (48 to 80 per MiB before), a keystroke 4 instead of 23 (reusable read buffers, a pool of two live
   buffers per viewer, requests written in one pass); `src/rex/counting.zig` counts and profiles call
-  sites. Left from step 3: F4 and F16. **Next: step 4**, `checkAllAllocationFailures` for each owning
-  type and request path.
+  sites. Left from step 3: F4 and F16. **Step 4 done**: `checkAllAllocationFailures` for 12 parsers and
+  owning types, and 166 fail-from-N rounds of a hub handling every message type; found a double free in
+  `Mirror.setNonce` on out-of-memory (fixed), and three smaller faults. **Next: step 5**, events instead
+  of polling, one write-deadline watcher per connection, the mutex around Rex calls.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

@@ -388,3 +388,49 @@ test "messages that can follow a wait name their terminal: both ids or neither" 
     const long = try a.print("{{\"t\":\"ul\",\"name\":\"a\",\"size\":1,\"session\":\"{s}\",\"block\":\"b\"}}", .{@as([]const u8, &@as([max_id_bytes + 1]u8, @splat('s')))});
     try testing.expectError(error.TooLarge, parse(a, long));
 }
+
+/// Every message type, one each, as a page sends it (with its terminal named where it takes one).
+const one_of_each = [_][]const u8{
+    "{\"t\":\"tree\"}",
+    "{\"t\":\"open\",\"session\":\"s\",\"block\":\"b\"}",
+    "{\"t\":\"close_view\"}",
+    "{\"t\":\"in\",\"d\":\"ls -la\"}",
+    "{\"t\":\"key\",\"key\":{\"key\":\"enter\",\"mods\":\"ctrl\",\"action\":\"press\",\"text\":\"x\"}}",
+    "{\"t\":\"paste\",\"d\":\"two\\nlines\",\"force\":true,\"session\":\"s\",\"block\":\"b\"}",
+    "{\"t\":\"fit\",\"cols\":80,\"rows\":24,\"session\":\"s\",\"block\":\"b\"}",
+    "{\"t\":\"redraw\"}",
+    "{\"t\":\"more_history\"}",
+    "{\"t\":\"text\"}",
+    "{\"t\":\"info\"}",
+    "{\"t\":\"ls\",\"path\":\"/tmp\",\"session\":\"s\",\"block\":\"b\"}",
+    "{\"t\":\"dl\",\"path\":\"/tmp/a b\",\"session\":\"s\",\"block\":\"b\"}",
+    "{\"t\":\"ul\",\"name\":\"a.txt\",\"size\":3,\"session\":\"s\",\"block\":\"b\"}",
+    "{\"t\":\"clip\"}",
+    "{\"t\":\"term_action\",\"action\":\"reset\",\"session\":\"s\",\"block\":\"b\"}",
+    "{\"t\":\"observe\",\"on\":true}",
+    "{\"t\":\"new_session\",\"label\":\"work\"}",
+    "{\"t\":\"new_terminal\",\"session\":\"s\"}",
+    "{\"t\":\"rename_session\",\"session\":\"s\",\"label\":\"x\"}",
+    "{\"t\":\"rename_block\",\"session\":\"s\",\"block\":\"b\",\"label\":\"y\"}",
+    "{\"t\":\"close_block\",\"session\":\"s\",\"block\":\"b\"}",
+    "{\"t\":\"destroy_session\",\"session\":\"s\"}",
+    "{\"t\":\"ping\"}",
+    "{\"t\":\"dbg\",\"what\":\"anything\"}",
+};
+
+comptime {
+    // A new message type does not compile until it has a sample above.
+    if (one_of_each.len != @typeInfo(Msg).@"union".field_names.len) @compileError("protocol: one_of_each needs a sample of every message type");
+}
+
+fn parseEach(a: Allocator, texts: []const []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var seen: std.EnumSet(std.meta.Tag(Msg)) = .init(.{});
+    for (texts) |t| seen.insert(std.meta.activeTag(try parse(arena.allocator(), t)));
+    if (seen.count() != texts.len) return error.TestUnexpectedResult;
+}
+
+test "protocol: every message type parses, and a failed allocation at any point is OutOfMemory with nothing leaked" {
+    try testing.checkAllAllocationFailures(testing.allocator, parseEach, .{@as([]const []const u8, &one_of_each)});
+}

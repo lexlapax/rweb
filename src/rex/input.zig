@@ -787,3 +787,16 @@ test "input: a cut coalesced write never splits an escape sequence" {
     }
     try testing.expectEqualStrings(text.items, joined.items);
 }
+
+fn openAndClose(a: Allocator, ctl: *Control) !void {
+    const q = try Input.open(a, testing.io, Sender.forControl(ctl), "session:oom", "block:oom");
+    q.close();
+}
+
+test "input: open fails cleanly at every allocation" {
+    const f = try fake.Fake.start(testing.allocator, testing.io);
+    defer f.deinit();
+    const ctl = try Control.open(testing.allocator, testing.io, .{ .socket_path = f.path });
+    defer ctl.close();
+    try testing.checkAllAllocationFailures(testing.allocator, openAndClose, .{ctl});
+}

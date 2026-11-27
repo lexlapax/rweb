@@ -146,8 +146,11 @@ pub const Mirror = struct {
     pub fn setNonce(m: *Mirror, nonce: u64) !void {
         m.mu.lockUncancelable(m.io);
         defer m.mu.unlock(m.io);
+        // The new splitter first: if it cannot be made, the old one is still whole (and freed once,
+        // with the mirror), rather than freed here and freed again later.
+        const fresh = try rex1.Splitter.init(m.gpa, nonce);
         if (m.splitter) |*s| s.deinit();
-        m.splitter = try rex1.Splitter.init(m.gpa, nonce);
+        m.splitter = fresh;
     }
 
     pub fn deinit(m: *Mirror) void {
@@ -187,7 +190,9 @@ pub const Mirror = struct {
 
     fn sinkWelcome(ctx: *anyopaque, nonce: u64) void {
         const m: *Mirror = @ptrCast(@alignCast(ctx));
-        m.setNonce(nonce) catch |e| log.err("nonce: {t}", .{e});
+        // As for bytes: a mirror that cannot take the stream's nonce cannot follow it, so it ends
+        // the stream now (its owner starts a new one) rather than fail on the first bytes.
+        m.setNonce(nonce) catch |e| m.fail(e);
     }
 
     fn sinkEnded(ctx: *anyopaque, why: data.End) void {
@@ -1711,4 +1716,16 @@ test "mirror: Copy text is formatted within 8 times its byte cap and keeps the e
     try testing.expect(cut.truncated and cut.text.len <= 500);
     try testing.expect(big.largest <= 2 * copy_format_factor * 500);
     try testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, cut.text, "\n"), "00299"));
+}
+
+test "mirror: a new nonce that cannot be stored leaves the old splitter whole, freed once" {
+    // A stream that reconnects gets a second nonce. If storing it runs out of memory, the mirror must
+    // still hold a splitter it can free exactly once (the testing allocator reports a double free).
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
+    const m = try Mirror.initPending(fa.allocator(), testing.io);
+    defer m.deinit();
+    try m.setNonce(1);
+    fa.fail_index = fa.alloc_index; // the next allocation fails
+    try testing.expectError(error.OutOfMemory, m.setNonce(2));
+    try testing.expect(m.splitter != null);
 }

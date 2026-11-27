@@ -607,3 +607,19 @@ test "contiguous program output reaches the sink in one call, escape sequences a
     try testing.expectEqual(@as(usize, 1), c.plain_calls);
     try testing.expectEqualSlices(u8, big.items, c.bytes.items);
 }
+
+fn bodiesInArena(a: Allocator, bodies: []const []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    for (bodies) |b| _ = try parseBody(arena.allocator(), b);
+}
+
+test "parseBody fails cleanly at every allocation" {
+    const bodies = [_][]const u8{
+        "{\"type\":\"resize\",\"cols\":80,\"rows\":24,\"owner\":\"client:1\"}",
+        "{\"type\":\"theme\",\"foreground\":\"#ffffff\",\"background\":\"#000000\",\"palette\":[\"#000000\",\"#ff0000\",\"#00ff00\"]}",
+        "{\"type\":\"child_exited\",\"exit_code\":2}",
+        "{\"type\":\"something_new\"}",
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, bodiesInArena, .{@as([]const []const u8, &bodies)});
+}
