@@ -463,10 +463,15 @@ pub const Control = struct {
         var writing = true;
         defer if (writing) c.releaseWriter();
 
-        var out: std.Io.Writer.Allocating = try .initCapacity(gpa, 256);
+        // Written on the stack when it fits (keystrokes, most calls), else on the heap.
+        var small: [4096]u8 = undefined;
+        var fixed: std.Io.Writer = .fixed(&small);
+        var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        writeRequest(&out.writer, id, method, payload) catch return error.OutOfMemory; // only the buffer's growth can fail
-        const req = out.written();
+        const req = if (writeRequest(&fixed, id, method, payload)) |_| fixed.buffered() else |_| blk: {
+            writeRequest(&out.writer, id, method, payload) catch return error.OutOfMemory; // only the buffer's growth can fail
+            break :blk out.written();
+        };
         if (req.len > max_message) return error.MessageTooLarge;
         // The request must be written within the call's own timeout: a Rex that stops reading
         // gets its connection shut (by the write's deadline) rather than holding this task.
@@ -611,9 +616,11 @@ pub const Control = struct {
         const conn = c.conn;
         c.mu.unlock(c.io);
         const cn = conn orelse return;
+        // One buffer for the connection's life: a message is parsed (`dispatch`) before the next read.
+        var buf: ws.Conn.ReadBuffer = .{};
+        defer buf.deinit(gpa);
         while (true) {
-            const m = cn.readMessage(gpa) catch return;
-            defer gpa.free(m.data);
+            const m = cn.readMessageInto(gpa, &buf) catch return;
             if (m.opcode != .text) return; // close or something we do not speak
             c.dispatch(m.data) catch |e| {
                 log.debug("dropping a message: {t}", .{e});
@@ -690,6 +697,22 @@ test "control: connects, negotiates and calls" {
     const e = (try c.nextEvent(1000)).?;
     defer e.deinit(testing.allocator);
     try testing.expect(e == .connected and e.connected.generation == 1 and !e.connected.resumed);
+}
+
+test "control: a request too large for the stack buffer is written on the heap" {
+    const f = try fake.Fake.start(testing.allocator, testing.io);
+    defer f.deinit();
+    const c = try Control.open(testing.allocator, testing.io, .{ .socket_path = f.path });
+    defer c.close();
+    const pad = try testing.allocator.alloc(u8, 6000);
+    defer testing.allocator.free(pad);
+    @memset(pad, 'p');
+    var r = try c.callValue("session.list", .{ .pad = pad }, 5000);
+    defer r.deinit();
+    _ = try r.ok();
+    var small = try c.callValue("session.list", .{ .pad = "p" }, 5000);
+    defer small.deinit();
+    _ = try small.ok();
 }
 
 test "control: concurrent calls are matched to their responses" {

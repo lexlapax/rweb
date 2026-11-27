@@ -58,8 +58,8 @@ mechanical changes above), **part fixed**, or **open**.
 | id | area | severity | what | status | where now |
 |---|---|---|---|---|---|
 | F1 | allocators | should-fix | `init.gpa` in a ReleaseSafe build is `std.heap.SafeAllocator` over the page allocator (std `start.zig`); nobody chose it or measured it | **decided in Phase B step 2** (2026-11-26): kept, now stated and checked at compile time | `src/bridge/main.zig:155` |
-| F2 | performance | should-fix | `readMessage` allocates and frees a buffer for every message, so once per chunk of terminal output | open (Phase B 3) | `src/rex/ws.zig:517-577` |
-| F3 | performance | should-fix | live output is copied per viewer per chunk, and a frame grows by exact-size `realloc` (quadratic, bounded by the 64 KiB frame) | open (Phase B 3) | `src/bridge/hub.zig:229-250` |
+| F2 | performance | should-fix | `readMessage` allocates and frees a buffer for every message, so once per chunk of terminal output | **fixed in Phase B step 3** (2026-11-26): `readMessageInto` with a kept buffer | `src/rex/ws.zig:517-577` |
+| F3 | performance | should-fix | live output is copied per viewer per chunk, and a frame grows by exact-size `realloc` (quadratic, bounded by the 64 KiB frame) | **fixed in Phase B step 3**: a pool of two live buffers per viewer, joined in place | `src/bridge/hub.zig:229-250` |
 | F4 | performance | should-fix | a reply is built with `valueAlloc`, then `push` copies it and the first copy is freed; a redraw (up to 16 MiB) is copied the same way | open (Phase B 3) | `src/bridge/hub.zig:186-188`, `:1238`; 17 `valueAlloc` in `hub.zig` |
 | F5 | comptime | should-fix | Rex replies: parsed in `dispatch`, copied, parsed again in `callTimeout`, deep-copied by `cloneValue`, then picked apart by hand; events get a third parse; request bodies are glued from escaped pieces | **fixed in Phase B step 1** (2026-11-26; section 4) | `src/rex/control.zig:490`, `:599`; `src/rex/api.zig:114`, `:583`; `src/rex/rex1.zig:182`; `src/rex/wire.zig:31`; `src/bridge/hub.zig:466`; `src/bridge/main.zig:731`, `:759` |
 | F6 | comptime | should-fix | message type matched by a chain of `eql`; `classOf` ended in `else => .free` | **fixed in round five**: `stringToEnum` and an exhaustive switch; both class functions list every tag, and a comptime loop refuses a tag that is under a mirror's lock and free | `src/bridge/protocol.zig:91-92`; `src/bridge/hub.zig:667-692` |
@@ -79,7 +79,7 @@ mechanical changes above), **part fixed**, or **open**.
 | F20 | build | should-fix | libc not asked for; the Linux release not position independent | **fixed in round five**: `link_libc = true`, `pie` on Linux. The archive itself: see checklist item 34 | `build.zig:27`, `:34`, `:69` |
 | F21 | build | nice-to-have | the bridge's module graph is built twice; `optimize: anytype`; a plain `zig build` is Debug | open | `build.zig:21-36` against `:65-80`; `build.zig:21`; `build.zig:48` |
 | F22 | style | nice-to-have | `@hasField` on the project's own struct; a function-static buffer; tests before `main`; a long `main`; help and version returned as errors | **part fixed in round five**: the `@hasField` is gone and `rexProblem` takes a buffer (`src/bridge/main.zig:614`). **Open**: tests at `src/bridge/main.zig:26-74` before `main` at `:154`; `main` is 269 lines; `src/bridge/cli.zig:146-150` | as named |
-| F23 | performance | nice-to-have | four or five small allocations per keystroke; byte-wise masking; a ping payload copied to the heap; hand-made deques | open (Phase B 3) | `src/rex/input.zig:285-305`, `:273`; `src/rex/ws.zig:504`, `:553`, `:560`; `src/bridge/hub.zig:88`, `:171` |
+| F23 | performance | nice-to-have | four or five small allocations per keystroke; byte-wise masking; a ping payload copied to the heap; hand-made deques | **mostly fixed in Phase B step 3**: requests written in one pass, ping on the stack; deques left | `src/rex/input.zig:285-305`, `:273`; `src/rex/ws.zig:504`, `:553`, `:560`; `src/bridge/hub.zig:88`, `:171` |
 | F24 | tests | nice-to-have | waits are polls with wall-clock limits; `checkAllAllocationFailures` is not used | open (Phase B 4, 5) | 0 uses; 56 `sleep` calls, about 40 of them in tests |
 
 **Fixed now**, not in the table because the first pass treated them as the repository's choice: the
@@ -275,6 +275,44 @@ Rex, in ReleaseSafe.
    Measure: allocations per output chunk and per keystroke, before and after, with a counting
    allocator in a test (the target is 0 on the output path once warm, and 1 per keystroke); then the
    step 2 workload again.
+
+   **Done 2026-11-26** for the two paths that run all the time (F2, F3, F23); F4 (replies and redraws
+   copied once more when queued) and F16 (a browser connection's unused 128 KiB) are left for later.
+   What changed:
+   - `ws.zig`: `readMessageInto` reads into a buffer the caller keeps (a message is valid until the
+     next read; a buffer grown past 256 KiB for one message is let go). The Rex data and control
+     readers and the browser reader use it. A ping's payload is answered from the stack.
+   - `hub.zig`: live output goes into one of two 64 KiB buffers a viewer keeps; later output joins it
+     in place while there is room; the writer hands a sent buffer back (`Viewer.recycle`). A chunk
+     larger than a live frame still gets its own buffer.
+   - `input.zig`: a request is written in one pass, the ids and text escaped as they are written, into a
+     buffer the queue keeps. `control.zig`: a request is written on the stack when it fits in 4 KiB.
+
+   Measured with the workload of step 2 (`src/bridge/bench.zig`, which now counts the bridge's
+   allocations; `RWEB_BENCH_SITES=1` prints the busiest call sites with their stacks). ReleaseSafe,
+   three runs each; the counts are the same on macOS and Linux.
+
+   | | before | after |
+   |---|---|---|
+   | allocations per MiB of output, 1 viewer | 48 (82 MB copied for 32 MiB) | 0 (5 in all, the buffers warming up) |
+   | allocations per MiB of output, 3 viewers | 80 (148 MB) | 0 (3 to 5 in all) |
+   | allocations per keystroke | 23 (5.6 KB) | 4 (4.0 KB) |
+   | Linux: total CPU of the workload | 1,285–1,361 ms | 1,132–1,183 ms |
+   | Linux: page faults | ~121,000 | 35,000–58,000 |
+   | Linux: 32 MiB to 3 viewers | 105–111 ms | 62–68 ms |
+   | macOS: page faults | ~48,700 | ~31,200 |
+
+   The four allocations left per keystroke: the typed text's copy in the input queue (the one the
+   audit expected) and three for parsing Rex's reply (its tree and arena, which the waiting call owns).
+   The key's round trip did not change (about 1.7 ms on Linux, 2.5 ms on macOS): it is waits, step 5.
+
+   Tests added: the reader reuses its buffer across messages and a ping, answers the ping, returns a
+   close frame's own payload, and lets a grown buffer go; the pool reuses a sent buffer, joins in place,
+   gives a large chunk its own buffer, keeps at most two, and frees what a closed viewer hands back; a
+   control request larger than the stack buffer goes out. Checks: macOS with the live Rex (revision 18)
+   and Linux with the live Rex (revision 19) in ReleaseSafe, all passed; web tests 44/44; and the page in
+   desktop Chrome on a ReleaseSafe bridge built from this tree (a burst of output, pastes, an upload, the
+   Copy view and a reconnect), with Rex's own capture read afterwards.
 
 4. **`checkAllAllocationFailures` for each owning type and request path (F24, item 30).** `Hub.open`
    and `close`, `Control.open`, `Data.openTerminal`, `Input.open`, `Mirror` from snapshot to live,

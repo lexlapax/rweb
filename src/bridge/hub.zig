@@ -51,11 +51,19 @@ pub const Frame = struct {
     binary: bool,
     data: []u8,
     kind: Kind = .reply,
+    /// `data` is the front of a live buffer of `max_live_frame` bytes (see `Viewer.pushLive`), which is
+    /// handed back to the viewer's pool after sending (`Viewer.recycle`) or freed whole.
+    pooled: bool = false,
 
     pub fn deinit(f: Frame, gpa: Allocator) void {
-        gpa.free(f.data);
+        gpa.free(if (f.pooled) f.data.ptr[0..max_live_frame] else f.data);
     }
 };
+
+/// Live buffers a viewer keeps for reuse once sent: with one being written to the browser and one
+/// being filled, live output needs no allocation once warm. At most this many times `max_live_frame`
+/// stays allocated per viewer.
+pub const live_pool_max = 2;
 
 /// Most text the Copy view is sent (the end of the scrollback if there is more), and most rows it is
 /// built from: the rows are chosen before anything is formatted.
@@ -87,6 +95,9 @@ pub const Viewer = struct {
     /// Queued frames; those before `head` are sent.
     frames: std.ArrayList(Frame) = .empty,
     head: usize = 0,
+    /// Sent live buffers kept for reuse (see `Frame.pooled`), guarded by `mu`.
+    live_pool: [live_pool_max][]u8 = undefined,
+    live_pool_len: usize = 0,
     /// Bytes of live output queued.
     live_bytes: usize = 0,
     /// Reply frames queued, and their bytes.
@@ -239,6 +250,15 @@ pub const Viewer = struct {
             const last = &v.frames.items[v.frames.items.len - 1];
             if (last.kind == .live and last.data.len + bytes.len <= max_live_frame) {
                 if (v.live_bytes + bytes.len > v.hub.cfg.max_live_bytes) return v.overflowLocked();
+                if (last.pooled) {
+                    // The buffer is `max_live_frame` long: there is room in place.
+                    const n = last.data.len;
+                    last.data = last.data.ptr[0 .. n + bytes.len];
+                    @memcpy(last.data[n..], bytes);
+                    v.live_bytes += bytes.len;
+                    v.wake.set(v.hub.io);
+                    return;
+                }
                 if (gpa.realloc(last.data, last.data.len + bytes.len)) |grown| {
                     @memcpy(grown[last.data.len..], bytes);
                     last.data = grown;
@@ -250,8 +270,18 @@ pub const Viewer = struct {
         }
         if (v.live_bytes + bytes.len + live_frame_overhead > v.hub.cfg.max_live_bytes) return v.overflowLocked();
         v.reserveLocked(1) catch return v.overflowLocked();
-        const copy = gpa.dupe(u8, bytes) catch return v.overflowLocked();
-        v.frames.appendAssumeCapacity(.{ .binary = true, .data = copy, .kind = .live });
+        if (bytes.len <= max_live_frame) {
+            // A pooled buffer when one is free, else a new one of the full size (kept for reuse).
+            const buf = if (v.live_pool_len > 0) blk: {
+                v.live_pool_len -= 1;
+                break :blk v.live_pool[v.live_pool_len];
+            } else gpa.alloc(u8, max_live_frame) catch return v.overflowLocked();
+            @memcpy(buf[0..bytes.len], bytes);
+            v.frames.appendAssumeCapacity(.{ .binary = true, .data = buf[0..bytes.len], .kind = .live, .pooled = true });
+        } else {
+            const copy = gpa.dupe(u8, bytes) catch return v.overflowLocked();
+            v.frames.appendAssumeCapacity(.{ .binary = true, .data = copy, .kind = .live });
+        }
         v.live_bytes += bytes.len + live_frame_overhead;
         v.wake.set(v.hub.io);
     }
@@ -335,7 +365,20 @@ pub const Viewer = struct {
         v.wake.set(v.hub.io);
     }
 
+    /// A frame the writer has sent: a live buffer goes back to the pool (if there is room and the
+    /// viewer is still open), anything else is freed.
+    pub fn recycle(v: *Viewer, f: Frame) void {
+        if (!f.pooled) return f.deinit(v.hub.gpa);
+        v.mu.lockUncancelable(v.hub.io);
+        defer v.mu.unlock(v.hub.io);
+        if (v.closed or v.live_pool_len == live_pool_max) return f.deinit(v.hub.gpa);
+        v.live_pool[v.live_pool_len] = f.data.ptr[0..max_live_frame];
+        v.live_pool_len += 1;
+    }
+
     fn freeFrames(v: *Viewer) void {
+        for (v.live_pool[0..v.live_pool_len]) |b| v.hub.gpa.free(b);
+        v.live_pool_len = 0;
         if (v.closed_frame) |x| v.hub.gpa.free(x);
         v.closed_frame = null;
         for (v.frames.items[v.head..]) |f| f.deinit(v.hub.gpa);
@@ -2374,6 +2417,56 @@ test "hub: an upload asked for as its terminal closes is refused, and the viewer
     const f = (try waitFrame(v, isError)) orelse return error.TestUnexpectedResult;
     defer f.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, f.data, "no terminal open") != null);
+}
+
+test "hub: live output reuses a viewer's sent buffers, joins in place, and frees what it cannot keep" {
+    const hs = try Harness.init(.{});
+    defer hs.deinit();
+    const v = try hs.hub.addViewer();
+    defer hs.hub.removeViewer(v);
+    // What a new viewer is sent first (its mode, the tree) is not live output.
+    while (try v.next(100)) |f| v.recycle(f);
+    // A frame, sent and handed back: the next output goes into the same buffer.
+    v.pushLive("first");
+    const f1 = (try v.next(100)).?;
+    try testing.expect(f1.pooled);
+    try testing.expectEqualStrings("first", f1.data);
+    const p1 = f1.data.ptr;
+    v.recycle(f1);
+    try testing.expectEqual(@as(usize, 1), v.live_pool_len);
+    v.pushLive("second");
+    // Output before the frame is sent joins it in place.
+    v.pushLive(" and more");
+    const f2 = (try v.next(100)).?;
+    try testing.expectEqual(p1, f2.data.ptr);
+    try testing.expectEqualStrings("second and more", f2.data);
+    try testing.expectEqual(@as(usize, 0), v.live_pool_len);
+    // Output larger than a live frame gets its own buffer, which is freed, not pooled.
+    const huge = try testing.allocator.alloc(u8, max_live_frame + 1);
+    defer testing.allocator.free(huge);
+    @memset(huge, 'h');
+    v.recycle(f2);
+    v.pushLive(huge);
+    const f3 = (try v.next(100)).?;
+    try testing.expect(!f3.pooled);
+    v.recycle(f3);
+    try testing.expectEqual(@as(usize, 1), v.live_pool_len);
+    // The pool holds at most `live_pool_max`; one more is freed.
+    var held: [live_pool_max + 1]Frame = undefined;
+    for (&held, 0..) |*h, i| {
+        var b: [8]u8 = undefined;
+        v.pushLive(try std.fmt.bufPrint(&b, "f{d}", .{i}));
+        h.* = (try v.next(100)).?;
+    }
+    for (held) |h| v.recycle(h);
+    try testing.expectEqual(@as(usize, live_pool_max), v.live_pool_len);
+    // A closed viewer keeps nothing new; its pool is freed with it (the testing allocator checks).
+    v.pushLive("last"); // takes a buffer from the pool
+    const f4 = (try v.next(100)).?;
+    const kept = v.live_pool_len;
+    hs.hub.closeViewer(v);
+    v.recycle(f4);
+    try testing.expectEqual(kept, v.live_pool_len);
 }
 
 test "hub: opening, sizing and terminal actions count against the heavy-request limit" {

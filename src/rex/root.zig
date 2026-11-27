@@ -11,6 +11,8 @@ pub const mirror = @import("mirror.zig");
 pub const input = @import("input.zig");
 pub const api = @import("api.zig");
 pub const transfer = @import("transfer.zig");
+/// For measurements only (Phase B): an allocator that counts.
+pub const counting = @import("counting.zig");
 
 test {
     _ = ws;
@@ -24,4 +26,5 @@ test {
     _ = api;
     _ = transfer;
     _ = @import("measure.zig");
+    _ = counting;
 }

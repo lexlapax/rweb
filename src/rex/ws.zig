@@ -513,11 +513,45 @@ pub const Conn = struct {
         if (!c.control_rate.allowUpTo(Io.Clock.awake.now(c.io).toMilliseconds(), c.control_limit)) return error.Protocol;
     }
 
-    /// Read one complete message, answering pings. Close frames are returned.
+    /// Read one complete message, answering pings. Close frames are returned. The message's data is
+    /// the caller's to free (with `gpa`).
     pub fn readMessage(c: *Conn, gpa: Allocator) !Message {
-        const r = c.r;
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(gpa);
+        const op = try c.readInto(gpa, &buf);
+        return .{ .opcode = op, .data = try buf.toOwnedSlice(gpa) };
+    }
+
+    /// A read buffer kept by the caller between messages; `readMessageInto` grows it as needed.
+    /// Free it with `deinit` when done.
+    pub const ReadBuffer = struct {
+        list: std.ArrayList(u8) = .empty,
+
+        /// A buffer that grew past this for one large message is released before the next read,
+        /// rather than kept for the life of the connection.
+        pub const keep_max = 256 * 1024;
+
+        pub fn deinit(b: *ReadBuffer, gpa: Allocator) void {
+            b.list.deinit(gpa);
+        }
+    };
+
+    /// As `readMessage`, into `buf`, which is reused: the message's data is valid only until the
+    /// next read into `buf` (or its `deinit`). Once the buffer has grown to the connection's usual
+    /// message size, a read allocates nothing.
+    pub fn readMessageInto(c: *Conn, gpa: Allocator, buf: *ReadBuffer) !Message {
+        if (buf.list.capacity > ReadBuffer.keep_max) {
+            buf.list.deinit(gpa);
+            buf.list = .empty;
+        }
+        buf.list.clearRetainingCapacity();
+        const op = try c.readInto(gpa, &buf.list);
+        return .{ .opcode = op, .data = buf.list.items };
+    }
+
+    /// Read one complete message into `buf` (which starts empty), answering pings; its opcode.
+    fn readInto(c: *Conn, gpa: Allocator, buf: *std.ArrayList(u8)) !Opcode {
+        const r = c.r;
         var msg_op: ?Opcode = null;
         var frames: u32 = 0;
         while (true) {
@@ -557,10 +591,12 @@ pub const Conn = struct {
             switch (op) {
                 .ping => {
                     try c.countControl();
-                    const payload = try gpa.dupe(u8, buf.items[start..]);
-                    defer gpa.free(payload);
+                    // A ping's payload is at most 125 bytes (`parseHeader` checks control frames).
+                    var payload: [125]u8 = undefined;
+                    const n = buf.items.len - start;
+                    @memcpy(payload[0..n], buf.items[start..]);
                     buf.shrinkRetainingCapacity(start);
-                    try c.writeFrame(.pong, payload);
+                    try c.writeFrame(.pong, payload[0..n]);
                     continue;
                 },
                 .pong => {
@@ -569,15 +605,16 @@ pub const Conn = struct {
                     continue;
                 },
                 .close => {
-                    const data = try gpa.dupe(u8, buf.items[start..]);
-                    buf.deinit(gpa);
-                    return .{ .opcode = .close, .data = data };
+                    // The close frame's own payload is the message: drop what came before it.
+                    std.mem.copyForwards(u8, buf.items[0 .. buf.items.len - start], buf.items[start..]);
+                    buf.shrinkRetainingCapacity(buf.items.len - start);
+                    return .close;
                 },
                 .continuation => {},
                 else => msg_op = op,
             }
             if (h.fin) {
-                return .{ .opcode = msg_op.?, .data = try buf.toOwnedSlice(gpa) };
+                return msg_op.?;
             }
         }
     }
@@ -671,6 +708,80 @@ test "a server refuses an unmasked frame, a client refuses a masked one" {
     defer gpa.free(m2.data);
     try std.testing.expectEqualStrings("hi", m2.data);
 }
+
+/// A masked frame of any length (the 64-bit length form past 65535).
+fn maskedFrameAny(al: std.mem.Allocator, op: u8, payload: []const u8) ![]u8 {
+    const mask = [4]u8{ 0x5a, 0x01, 0xc3, 0x7e };
+    var f: std.ArrayList(u8) = .empty;
+    try f.append(al, 0x80 | op);
+    if (payload.len < 126) {
+        try f.append(al, 0x80 | @as(u8, @intCast(payload.len)));
+    } else if (payload.len <= 0xffff) {
+        try f.append(al, 0x80 | 126);
+        try f.appendSlice(al, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(payload.len))));
+    } else {
+        try f.append(al, 0x80 | 127);
+        try f.appendSlice(al, &std.mem.toBytes(std.mem.nativeToBig(u64, payload.len)));
+    }
+    try f.appendSlice(al, &mask);
+    for (payload, 0..) |b, i| try f.append(al, b ^ mask[i % 4]);
+    return f.toOwnedSlice(al);
+}
+
+test "readMessageInto reuses its buffer, answers pings in between, and lets a grown buffer go" {
+    const a = std.testing.allocator;
+    var counting: @import("counting.zig").Counting = .{ .child = a };
+    const gpa = counting.allocator();
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(a);
+    const big = try a.alloc(u8, ReadBufferKeep + 4096);
+    defer a.free(big);
+    @memset(big, 'x');
+    for ([_]struct { op: u8, fin: bool, data: []const u8 }{
+        .{ .op = 0x1, .fin = true, .data = "hello" },
+        .{ .op = 0x1, .fin = false, .data = "ab" }, // a fragmented message with a ping inside it
+        .{ .op = 0x9, .fin = true, .data = "p1" },
+        .{ .op = 0x0, .fin = true, .data = "cd" },
+    }) |fr| {
+        const f = try maskedFrame(a, fr.op, fr.fin, fr.data);
+        defer a.free(f);
+        try bytes.appendSlice(a, f);
+    }
+    const bf = try maskedFrameAny(a, 0x2, big);
+    defer a.free(bf);
+    try bytes.appendSlice(a, bf);
+    const cf = try maskedFrame(a, 0x8, true, &.{ 0x03, 0xe8, 'b', 'y', 'e' });
+    defer a.free(cf);
+    try bytes.appendSlice(a, cf);
+
+    var sink: std.Io.Writer.Allocating = .init(a);
+    defer sink.deinit();
+    var r: std.Io.Reader = undefined;
+    var c = memConn(bytes.items, &sink.writer, &r, false);
+    c.max_message = 1 << 20;
+    var buf: Conn.ReadBuffer = .{};
+    defer buf.deinit(gpa);
+
+    const m1 = try c.readMessageInto(gpa, &buf);
+    try std.testing.expectEqualStrings("hello", m1.data);
+    // The next message fits what the buffer has: no allocation, and the ping is answered.
+    const before = counting.snap()[0];
+    const m2 = try c.readMessageInto(gpa, &buf);
+    try std.testing.expectEqual(Opcode.text, m2.opcode);
+    try std.testing.expectEqualStrings("abcd", m2.data);
+    try std.testing.expectEqual(before, counting.snap()[0]);
+    try std.testing.expect(std.mem.indexOf(u8, sink.written(), "p1") != null); // the pong
+    // One large message grows the buffer past what is kept; the read after it lets it go.
+    const m3 = try c.readMessageInto(gpa, &buf);
+    try std.testing.expectEqual(big.len, m3.data.len);
+    try std.testing.expect(buf.list.capacity > Conn.ReadBuffer.keep_max);
+    const m4 = try c.readMessageInto(gpa, &buf);
+    try std.testing.expectEqual(Opcode.close, m4.opcode);
+    try std.testing.expectEqualSlices(u8, &.{ 0x03, 0xe8, 'b', 'y', 'e' }, m4.data);
+    try std.testing.expect(buf.list.capacity <= Conn.ReadBuffer.keep_max);
+}
+
+const ReadBufferKeep = Conn.ReadBuffer.keep_max;
 
 test "a peer that floods pings, or sends endless empty fragments, is cut off" {
     const gpa = std.testing.allocator;

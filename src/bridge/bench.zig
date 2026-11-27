@@ -23,6 +23,9 @@ const server = @import("server.zig");
 const default_output_mib = 32;
 const keys = 1000;
 
+/// The bridge's counting allocator, for the phases to report from.
+var cnt: *rex.counting.Counting = undefined;
+
 fn nowNs(io: Io) i96 {
     return Io.Clock.awake.now(io).nanoseconds;
 }
@@ -116,14 +119,17 @@ fn outputPhase(io: Io, f: *fake.Fake, viewers: []const Browser, bid: []const u8,
     var got: [3]u64 = @splat(0);
     var tasks: [3]?Io.Future(void) = @splat(null);
     const before = usage();
+    const c0 = cnt.snap();
     const t0 = nowNs(io);
     for (viewers, 0..) |v, i| tasks[i] = try io.concurrent(readUntilMarker, .{ v, marker, &got[i] });
     try feedOutput(f, bid, output_mib, marker);
     for (&tasks) |*t| if (t.*) |*x| x.await(io);
     const ms = @divTrunc(nowNs(io) - t0, 1_000_000);
     const after = usage();
-    std.debug.print("bench {s}: {d} MiB to {d} viewer(s): {d} ms wall, {d} ms CPU, peak RSS {d} KiB, {d} page faults; received", .{
-        label, output_mib, viewers.len, ms, @divTrunc(after.cpu_us - before.cpu_us, 1000), after.maxrss_kib, after.minflt - before.minflt,
+    const c1 = cnt.snap();
+    std.debug.print("bench {s}: {d} MiB to {d} viewer(s): {d} ms wall, {d} ms CPU, peak RSS {d} KiB, {d} page faults; bridge: {d} allocations ({d} per MiB), {d} KiB; received", .{
+        label,         output_mib,                            viewers.len,            ms, @divTrunc(after.cpu_us - before.cpu_us, 1000), after.maxrss_kib, after.minflt - before.minflt,
+        c1[0] - c0[0], (c1[0] - c0[0]) / @max(output_mib, 1), (c1[1] - c0[1]) / 1024,
     });
     for (viewers, 0..) |_, i| std.debug.print(" {d} KiB", .{got[i] / 1024});
     std.debug.print("\n", .{});
@@ -137,7 +143,7 @@ test "bench: output, viewers and keystrokes through the bridge (only with RWEB_B
 
     var safe_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = safe_state.deinit();
-    const gpa: Allocator = if (std.mem.eql(u8, which, "safe"))
+    const chosen: Allocator = if (std.mem.eql(u8, which, "safe"))
         safe_state.allocator()
     else if (std.mem.eql(u8, which, "smp"))
         std.heap.smp_allocator
@@ -145,6 +151,12 @@ test "bench: output, viewers and keystrokes through the bridge (only with RWEB_B
         std.heap.c_allocator
     else
         return error.UnknownAllocator;
+    // Counted, so each phase can say how many allocations the bridge made; `RWEB_BENCH_SITES` also
+    // prints the busiest call sites of the output and keystroke phases (slow: a stack per allocation).
+    var counting: rex.counting.Counting = .{ .child = chosen };
+    const gpa = counting.allocator();
+    const sites = testing.environ.getPosix("RWEB_BENCH_SITES") != null;
+    cnt = &counting;
 
     const f = try fake.Fake.start(std.heap.smp_allocator, io);
     defer f.deinit();
@@ -176,11 +188,22 @@ test "bench: output, viewers and keystrokes through the bridge (only with RWEB_B
     try outputPhase(io, f, vs[0..1], made.block_id, which, "END-OF-OUTPUT-ONE", output_mib);
     try openTerminal(vs[1], made.session_id, made.block_id);
     try openTerminal(vs[2], made.session_id, made.block_id);
+    if (sites) {
+        counting.resetSites();
+        counting.profile.store(true, .monotonic);
+    }
     try outputPhase(io, f, vs[0..3], made.block_id, which, "END-OF-OUTPUT-THREE", output_mib);
+    if (sites) {
+        counting.profile.store(false, .monotonic);
+        counting.printSites("output to 3 viewers, per MiB", 12, output_mib);
+        counting.resetSites();
+        counting.profile.store(true, .monotonic);
+    }
 
     // Keystrokes: each typed word, timed until its echo reaches the viewer.
     var rtt: [keys]i64 = undefined;
     const ku0 = usage();
+    const kc0 = counting.snap();
     const kt0 = nowNs(io);
     for (&rtt, 0..) |*r, i| {
         var word: [16]u8 = undefined;
@@ -196,9 +219,14 @@ test "bench: output, viewers and keystrokes through the bridge (only with RWEB_B
     }
     const kms = @divTrunc(nowNs(io) - kt0, 1_000_000);
     const ku1 = usage();
+    const kc1 = counting.snap();
+    if (sites) {
+        counting.profile.store(false, .monotonic);
+        counting.printSites("keystrokes, per key", 30, keys);
+    }
     std.mem.sort(i64, &rtt, {}, std.sort.asc(i64));
-    std.debug.print("bench {s}: {d} keystrokes: round trip median {d} us, p99 {d} us, max {d} us; {d} ms wall, {d} ms CPU\n", .{
-        which, keys, rtt[keys / 2], rtt[keys * 99 / 100], rtt[keys - 1], kms, @divTrunc(ku1.cpu_us - ku0.cpu_us, 1000),
+    std.debug.print("bench {s}: {d} keystrokes: round trip median {d} us, p99 {d} us, max {d} us; {d} ms wall, {d} ms CPU; bridge: {d} allocations per key, {d} bytes per key\n", .{
+        which, keys, rtt[keys / 2], rtt[keys * 99 / 100], rtt[keys - 1], kms, @divTrunc(ku1.cpu_us - ku0.cpu_us, 1000), (kc1[0] - kc0[0]) / keys, (kc1[1] - kc0[1]) / keys,
     });
 
     // Settled: after the work, a pause, then memory.

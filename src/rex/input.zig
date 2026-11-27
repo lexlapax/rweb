@@ -92,6 +92,9 @@ pub const Input = struct {
     mu: Io.Mutex = .init,
     queue: std.ArrayList(Item) = .empty,
     queued_bytes: usize = 0,
+    /// The request being written, kept between calls (only the worker writes it): once it has grown to
+    /// the usual request size, a call allocates nothing for its body.
+    request: std.ArrayList(u8) = .empty,
     in_flight: bool = false,
     closed: bool = false,
     wake: Io.Event = .unset,
@@ -131,6 +134,7 @@ pub const Input = struct {
         q.queue.deinit(q.gpa);
         q.gpa.free(q.session_id);
         q.gpa.free(q.block_id);
+        q.request.deinit(q.gpa);
         q.gpa.destroy(q);
     }
 
@@ -283,36 +287,68 @@ pub const Input = struct {
     }
 
     fn send(q: *Input, item: *Item) bool {
-        const gpa = q.gpa;
-        const sid = std.json.Stringify.valueAlloc(gpa, q.session_id, .{}) catch return false;
-        defer gpa.free(sid);
-        const bid = std.json.Stringify.valueAlloc(gpa, q.block_id, .{}) catch return false;
-        defer gpa.free(bid);
-        var method: []const u8 = undefined;
-        const body = switch (item.*) {
-            .text => |t| blk: {
-                method = "com.superlogical.terminal.write";
-                const data = std.json.Stringify.valueAlloc(gpa, t.items, .{}) catch return false;
-                defer gpa.free(data);
-                break :blk gpa.print("{{\"session_id\":{s},\"block_id\":{s},\"args\":{{\"data\":{s}}}}}", .{ sid, bid, data }) catch return false;
-            },
-            .key => |k| blk: {
-                method = "client.key";
-                break :blk gpa.print("{{\"session_id\":{s},\"block_id\":{s},\"key\":{s}}}", .{ sid, bid, k }) catch return false;
-            },
-            .event => |e| blk: {
-                method = "block.event";
-                const kind = std.json.Stringify.valueAlloc(gpa, e.kind, .{}) catch return false;
-                defer gpa.free(kind);
-                break :blk gpa.print("{{\"session_id\":{s},\"block_id\":{s},\"event\":{{\"type\":{s},\"payload\":{s}}}}}", .{ sid, bid, kind, e.payload }) catch return false;
-            },
+        const method: []const u8 = switch (item.*) {
+            .text => "com.superlogical.terminal.write",
+            .key => "client.key",
+            .event => "block.event",
         };
-        defer gpa.free(body);
-        q.sender.call(q.sender.ctx, method, body) catch |e| {
+        q.request.clearRetainingCapacity();
+        var out: std.Io.Writer.Allocating = .fromArrayList(q.gpa, &q.request);
+        defer {
+            q.request = out.toArrayList();
+            // A request grown for one large paste is not kept for the life of the terminal.
+            if (q.request.capacity > keep_request_max) {
+                q.request.deinit(q.gpa);
+                q.request = .empty;
+            }
+        }
+        q.writeBody(&out.writer, item.*) catch return false; // only the buffer's growth can fail
+        q.sender.call(q.sender.ctx, method, out.written()) catch |e| {
             log.debug("{s} failed: {t}", .{ method, e });
             return false;
         };
         return true;
+    }
+
+    /// A request body grown past this for one large input is released after its call.
+    const keep_request_max = 64 * 1024;
+
+    /// The body of `item`'s call, written in one pass: the ids and text escaped as they are written,
+    /// the key's and event's JSON (checked when queued) copied as they are.
+    fn writeBody(q: *Input, w: *std.Io.Writer, item: Item) std.Io.Writer.Error!void {
+        var s: std.json.Stringify = .{ .writer = w };
+        try s.beginObject();
+        try s.objectField("session_id");
+        try s.write(q.session_id);
+        try s.objectField("block_id");
+        try s.write(q.block_id);
+        switch (item) {
+            .text => |t| {
+                try s.objectField("args");
+                try s.beginObject();
+                try s.objectField("data");
+                try s.write(t.items);
+                try s.endObject();
+            },
+            .key => |k| {
+                try s.objectField("key");
+                try s.beginWriteRaw();
+                try w.writeAll(k);
+                s.endWriteRaw();
+            },
+            .event => |e| {
+                try s.objectField("event");
+                try s.beginObject();
+                try s.objectField("type");
+                try s.write(e.kind);
+                try s.objectField("payload");
+                try s.beginWriteRaw();
+                try w.writeAll(e.payload);
+                s.endWriteRaw();
+                try s.endObject();
+            },
+        }
+        try s.endObject();
     }
 };
 

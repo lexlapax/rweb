@@ -17,44 +17,7 @@ const Control = @import("control.zig").Control;
 const api_mod = @import("api.zig");
 const Api = api_mod.Api;
 
-/// Counts what passes through it; safe to share between tasks.
-const Counting = struct {
-    child: Allocator,
-    allocs: std.atomic.Value(u64) = .init(0),
-    bytes: std.atomic.Value(u64) = .init(0),
-
-    fn allocator(c: *Counting) Allocator {
-        return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-    }
-    fn alloc(ctx: *anyopaque, len: usize, al: std.mem.Alignment, ra: usize) ?[*]u8 {
-        const c: *Counting = @ptrCast(@alignCast(ctx));
-        _ = c.allocs.fetchAdd(1, .monotonic);
-        _ = c.bytes.fetchAdd(len, .monotonic);
-        return c.child.rawAlloc(len, al, ra);
-    }
-    fn resize(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, new_len: usize, ra: usize) bool {
-        const c: *Counting = @ptrCast(@alignCast(ctx));
-        const ok = c.child.rawResize(mem, al, new_len, ra);
-        if (ok and new_len > mem.len) _ = c.bytes.fetchAdd(new_len - mem.len, .monotonic);
-        return ok;
-    }
-    fn remap(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
-        const c: *Counting = @ptrCast(@alignCast(ctx));
-        const p = c.child.rawRemap(mem, al, new_len, ra);
-        if (p != null) {
-            _ = c.allocs.fetchAdd(1, .monotonic);
-            if (new_len > mem.len) _ = c.bytes.fetchAdd(new_len - mem.len, .monotonic);
-        }
-        return p;
-    }
-    fn free(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, ra: usize) void {
-        const c: *Counting = @ptrCast(@alignCast(ctx));
-        c.child.rawFree(mem, al, ra);
-    }
-    fn snap(c: *Counting) [2]u64 {
-        return .{ c.allocs.load(.monotonic), c.bytes.load(.monotonic) };
-    }
-};
+const Counting = @import("counting.zig").Counting;
 
 fn nowNs(io: Io) i96 {
     return Io.Clock.awake.now(io).nanoseconds;

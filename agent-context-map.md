@@ -1,6 +1,6 @@
 # Agent context map
 
-Last updated: 2026-11-26 (Phase B step 2: the safe allocator kept, from measurements; step 3 next).
+Last updated: 2026-11-26 (Phase B step 3: no allocations on the output path once warm, 4 per keystroke; step 4 next).
 state, decisions, blockers and next actions. Put durable evidence in `docs/`.
 
 
@@ -17,8 +17,11 @@ state, decisions, blockers and next actions. Put durable evidence in `docs/`.
   `.{}`-is-a-list trap the fake hid, in the audit). `src/rex/measure.zig` measures the client
   (`RWEB_MEASURE=1`). **Step 2 done**: the release allocator stays std's `SafeAllocator`, now stated in `main` and
   checked at compile time; measured with the fixed workload `src/bridge/bench.zig` (`RWEB_BENCH=1`):
-  5 to 12 % more CPU than `smp`/C, same latency and memory. **Next: step 3**, allocations per frame and
-  per keystroke, measured with the same workload.
+  5 to 12 % more CPU than `smp`/C, same latency and memory. **Step 3 done**: the output path makes no allocations once warm
+  (48 to 80 per MiB before), a keystroke 4 instead of 23 (reusable read buffers, a pool of two live
+  buffers per viewer, requests written in one pass); `src/rex/counting.zig` counts and profiles call
+  sites. Left from step 3: F4 and F16. **Next: step 4**, `checkAllAllocationFailures` for each owning
+  type and request path.
 - Small items for the next release: `tools/dist.sh` ships the README without `assets/screenshots/`;
   whether the build should refuse group- or world-writable `zig-pkg` folders.
 - Not verified: a host's sleep and wake against the stale-address refusal.

@@ -1304,13 +1304,15 @@ pub const Server = struct {
         var window_start: i64 = nowMs(s.io);
         var window_count: u32 = 0;
         var too_large = false;
+        // One buffer for the socket: a message is parsed into the arena before the next read.
+        var read_buf: rex.ws.Conn.ReadBuffer = .{};
+        defer read_buf.deinit(gpa);
         while (true) {
-            const m = c.readMessage(gpa) catch |e| {
+            const m = c.readMessageInto(gpa, &read_buf) catch |e| {
                 too_large = e == error.TooLarge;
                 if (too_large) log.warn("closing a browser that sent a message over {d} bytes", .{protocol.max_message_bytes});
                 break;
             };
-            defer gpa.free(m.data);
             const now = nowMs(s.io);
             live.last_rx.store(now, .release);
             if (now - window_start >= 1000) {
@@ -1400,7 +1402,7 @@ pub const Server = struct {
                 s.writeTimed(c, live, .ping, "") catch return;
                 continue;
             };
-            defer f.deinit(s.gpa);
+            defer v.recycle(f); // a live buffer is reused for the next output
             const t0 = std.Io.Clock.awake.now(s.io).toMilliseconds();
             s.writeTimed(c, live, if (f.binary) .binary else .text, f.data) catch |e| {
                 if (s.opts.debug_input) log.info("send failed after {d} ms: {t}", .{ std.Io.Clock.awake.now(s.io).toMilliseconds() - t0, e });

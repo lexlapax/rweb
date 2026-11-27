@@ -11,6 +11,9 @@ the Rex API revisions it speaks.
 - Rex client: each answer is parsed once and read into a typed structure, and requests are written in
   one pass; a tree refresh with 50 sessions makes 63 % fewer allocations. A malformed answer from Rex is
   refused more strictly (a field of the wrong type is an error, not ignored).
+- Terminal output reaches the page without memory allocations once warm (before: one per chunk for
+  each viewer, and two per chunk read from Rex); a keystroke makes 4 instead of 23. Linux: about 12 %
+  less CPU and half the page faults on a 32 MiB burst to three viewers.
 
 ## 0.1.1 (2026-11-26)
 

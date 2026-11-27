@@ -243,8 +243,11 @@ pub const Data = struct {
     /// Read until the connection ends, handing bytes to the sink.
     fn serve(d: *Data) Served {
         const c = d.conn.?;
+        // One buffer for this connection: the sink copies what it keeps before the next read.
+        var buf: ws.Conn.ReadBuffer = .{};
+        defer buf.deinit(d.gpa);
         while (true) {
-            const m = c.readMessage(d.gpa) catch |e| switch (e) {
+            const m = c.readMessageInto(d.gpa, &buf) catch |e| switch (e) {
                 // The server sent what this protocol does not allow (a frame over the limit, a
                 // reserved bit, a ping flood): resuming would get the same again. End the stream.
                 error.TooLarge, error.Protocol, error.BadControl => {
@@ -255,7 +258,6 @@ pub const Data = struct {
                 // The connection dropped: resume.
                 else => return .reconnect,
             };
-            defer d.gpa.free(m.data);
             switch (m.opcode) {
                 .binary => {
                     if (m.data.len == 0) continue;
