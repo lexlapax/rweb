@@ -33,8 +33,10 @@ a 4-second `echo` loop, upright again after it.
   Homebrew on the Macs, the AUR's `rweb-bin` on linux-box and gateway-box; setup-repo installs them, minimum
   0.3.0, its own services). That was 0.3.0's live run: through each machine's real Serve address from
   another node, page 200, WebSocket from the page's `https://` origin 101, from `http://` or another port
-  403; `rweb doctor` 7/7 on laptop-mac. Ghostty `vt-1.0.2` taken (upstream check). **Next: release 0.3.1** (vt-1.0.2 and the version line; the owner's word).
-  **For 0.3.1, done, not released (owner's go, 2026-11-27):** the page shows rweb's version under the ⋯
+  403; `rweb doctor` 7/7 on laptop-mac. Ghostty `vt-1.0.2` taken (upstream check). **0.3.1 release commit** (owner's yes, 2026-11-27): version, CHANGELOG heading, README, the guide's
+  "Upgrading to 0.3.1" and doctor sample; then signed archives, tag, GitHub Release, tap and AUR, macair-lex
+  upgraded, the upstream check run again.
+  **In 0.3.1 (owner's go, 2026-11-27):** the page shows rweb's version under the ⋯
   menu's "About rweb" (owner chose the second line from two screenshots): `hub.Config.version` from
   `build_options.version` into the `mode` frame (authenticated socket only), `keys.js` `pageVersion` (strict
   X.Y.Z), `textContent`; tests: hub "mode frame names this rweb's version", web test; `menu.png` retaken

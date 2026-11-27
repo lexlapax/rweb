@@ -299,7 +299,7 @@ Gates, all before any public step (**all met 2026-11-26**):
   and commit message the tailnet, host and setup-repository names became generic, commits are authored
   by the owner's GitHub no-reply address, and the README names the maintainer. The rewritten history
   went to a new public `lexlapax/rweb`, and the old private repository was deleted, so GitHub holds no
-  copy of the old objects. v0.1.1, v0.2.0 and v0.3.0 are GitHub Releases there.
+  copy of the old objects. v0.1.1, v0.2.0, v0.3.0 and v0.3.1 are GitHub Releases there.
 
 Where the steps below stand (2026-11-27):
 
@@ -312,7 +312,7 @@ Where the steps below stand (2026-11-27):
 - Step 3: made 2026-11-27: a Homebrew formula (release binary, macOS ARM64
   and Linux x86-64, `brew services`), an AUR package `rweb-bin` (with a systemd user unit), and the
   services in the archive (`contrib/`); `tools/packaging.sh` makes them from a signed release
-  ([packaging/README.md](../packaging/README.md)). Published 2026-11-27 at 0.2.0, updated to 0.3.0:
+  ([packaging/README.md](../packaging/README.md)). Published 2026-11-27 at 0.2.0, updated to 0.3.0 and 0.3.1:
   the tap `lexlapax/homebrew-rweb` and the AUR package `rweb-bin`; each release updates them.
 - Step 4: tagged releases with checksums and notes, and the Rex revisions in `rweb --version`: done.
   Signed checksums: from 0.3.0, `SHA256SUMS.sig` (`ssh-keygen -Y sign`, namespace `file`, key
@@ -356,7 +356,7 @@ Rex from a phone, following only the docs.
 
 Owner, 2026-11-27: "the web interface does not show anywhere what version of rweb it is"; started at the
 owner's "go" the same day, after the upstream check's item (Ghostty `vt-1.0.2`,
-[upstream-check.md](upstream-check.md)). **Done 2026-11-27, not released:** the owner chose the second
+[upstream-check.md](upstream-check.md)). **Released in 0.3.1 (2026-11-27):** the owner chose the second
 line ("About rweb", "Version X.Y.Z" under it) from a screenshot of each.
 
 1. **The page shows rweb's version.** Today only the update item ("rweb X.Y.Z is available") and

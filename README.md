@@ -16,9 +16,9 @@ prompt that is waiting, run the quick command, and go. Not affiliated with Super
   <img src="assets/screenshots/phone.png" alt="rweb on a phone: a terminal showing rweb --version and git log, and the key bar above the browser's address bar" width="200">
 </p>
 
-**Current release: 0.3.0** (2026-11-27). It installs from Homebrew and the AUR, checks a setup with
-`rweb doctor`, tells you when a newer release is out, and ships signed checksums; round seven's security
-review is in it. It works with Rex 0.1.0-preview.25 (Rex API revisions 18 to 24). What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Current release: 0.3.1** (2026-11-27). It installs from Homebrew and the AUR, checks a setup with
+`rweb doctor`, tells you when a newer release is out, ships signed checksums, and shows its version in
+the page's ⋯ menu; round seven's security review is in it. It works with Rex 0.1.0-preview.25 (Rex API revisions 18 to 24). What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 `rweb --version` names the version you have.
 
 ## Why
@@ -232,7 +232,7 @@ which it is built. The software it contains or serves keeps its own licences:
 ## Status
 
 rweb is in daily use on Linux and macOS. Rex is a preview: rweb pins the Rex API revisions it speaks
-(see `rweb --version`; 0.3.0 speaks 18 to 24, Rex 0.1.0-preview.21 to preview.25) and is tested against
+(see `rweb --version`; 0.3.1 speaks 18 to 24, Rex 0.1.0-preview.21 to preview.25) and is tested against
 each Rex update. Release archives, signed: macOS on Apple silicon,
 and Linux x86-64 (static, any distribution); the same through Homebrew (both) and the AUR (Arch Linux).
 Windows support will come later.

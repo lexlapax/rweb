@@ -413,6 +413,8 @@ To upgrade, read [CHANGELOG.md](../CHANGELOG.md), then:
 sessions; pages behind Tailscale reconnect by themselves, and a page through an SSH tunnel waits for a
 tap on Reconnect. The Serve entry, the secret and the token stay as they are.
 
+**Upgrading to 0.3.1.** Nothing to change. The ⋯ menu's "About rweb" shows the version you run.
+
 **Upgrading to 0.3.0.** Nothing to change: the options, files and Serve entry are the same as in 0.2.0.
 New: rweb asks GitHub once a day whether a newer release is out (above); add `--no-update-check` to the
 service's command to turn that off. `rweb doctor` checks a setup. A page reached over plain HTTP behind
@@ -485,7 +487,7 @@ failure. It never prints the backend secret or the token.
 
 ```
 $ rweb doctor
-rweb doctor: checking rweb tailscale (rweb 0.3.0)
+rweb doctor: checking rweb tailscale (rweb 0.3.1)
   ok    Rex answers at /run/user/1000/rex/server.sock, API revision 24 (rweb speaks 18 to 24)
   ok    a bridge is listening on unix:/run/user/1000/rweb/bridge.sock
   ok    Tailscale: box.example.ts.net, signed in as you@example.com (/usr/bin/tailscale)
@@ -494,7 +496,7 @@ rweb doctor: checking rweb tailscale (rweb 0.3.0)
         if Tailscale Serve is not set up for rweb yet, run this once:
         sudo tailscale serve --bg --https=12443 unix:/run/user/1000/rweb/bridge.sock
         …
-  ok    rweb 0.3.0 is the latest release
+  ok    rweb 0.3.1 is the latest release
 rweb doctor: 5 passed, 0 notes, 1 failed
 ```
 

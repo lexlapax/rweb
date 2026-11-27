@@ -4,7 +4,10 @@ Versions follow [semantic versioning](https://semver.org). Newest first. `rweb -
 version, the commit it was built from, the build mode and target, the Ghostty (libghostty-vt) tag and
 the Rex API revisions it speaks.
 
-## Unreleased
+## 0.3.1 (2026-11-27)
+
+The page names its rweb, and Ghostty's terminal library is brought up to date. No options, files or Serve
+entries change: upgrade the package (or install the archive over 0.3.0) and restart rweb.
 
 - The page says which rweb it is talking to: the ⋯ menu's "About rweb" item shows the version under it.
   The bridge sends it after sign-in only; the token form shows none.

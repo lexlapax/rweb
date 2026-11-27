@@ -1,6 +1,6 @@
 .{
     .name = .rweb,
-    .version = "0.3.0",
+    .version = "0.3.1",
     .dependencies = .{
         .ghostty = .{
             .url = "https://github.com/ghostty-org/ghostty/archive/refs/tags/vt-1.0.2.tar.gz",
